@@ -24,6 +24,11 @@ try:
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from auth import tenant_scope  # type: ignore
 
+try:  # A2R24-01：异常文本脱敏
+    from ..error_contract import scrubbed_detail
+except ImportError:
+    from error_contract import scrubbed_detail  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -350,7 +355,10 @@ def _load_subscription_record(redis: Redis, subscription_id: str) -> Dict[str, A
     try:
         info = json.loads(raw)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"数据解析失败: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=scrubbed_detail(logger, "event_data_parse_failed", "数据解析失败", exc),
+        )
     return info if isinstance(info, dict) else {}
 
 
@@ -382,7 +390,10 @@ async def get_subscription(
     try:
         return SubscriptionInfo(**info)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"数据解析失败: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=scrubbed_detail(logger, "event_data_parse_failed", "数据解析失败", e),
+        )
 
 
 @router.delete("/events/subscriptions/{subscription_id}")

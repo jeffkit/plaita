@@ -303,7 +303,7 @@ def test_platform_admin_still_manages_users(client):
     assert client.delete("/api/users/root2", headers=root).status_code == 200
     r = client.delete("/api/users/root", headers=root)
     assert r.status_code == 400, r.text
-    assert "最后一个平台管理员" in r.json()["detail"]
+    assert "最后一个平台管理员" in r.json()["detail"]["message"]
 
 
 def test_api_key_still_manages_users(tmp_path, monkeypatch):

@@ -185,7 +185,7 @@ def test_non_platform_user_cannot_clear_active_tenant(env):
         assert r.status_code == 400, (
             f"{username} 非平台身份不得切全量，实得 {r.status_code}: {r.text[:300]}"
         )
-        assert "仅平台管理员" in r.json()["detail"]
+        assert "仅平台管理员" in r.json()["detail"]["message"]
         me = env.client.get("/api/auth/me", headers=headers).json()
         assert me["tenant_id"] == TENANT_A, "非法切换必须保持原活跃租户"
 

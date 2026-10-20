@@ -12,6 +12,7 @@
 - POST   /api/flows/{flow_id}/publish          发布版本（draft → published）
 """
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -36,6 +37,13 @@ except ImportError:
         sync_flow_to_engine,
     )
     from auth import ensure_platform_admin, require_auth, tenant_scope
+
+try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
+    from ..error_contract import error_detail, scrubbed_detail
+except ImportError:
+    from error_contract import error_detail, scrubbed_detail  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -118,11 +126,18 @@ def _validate_definition(definition: str) -> None:
     try:
         data = json.loads(definition)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=422, detail=f"definition 非合法 JSON: {e}")
+        raise HTTPException(
+            status_code=422,
+            detail=scrubbed_detail(
+                logger, "invalid_definition_json", "definition 不是合法 JSON", e
+            ),
+        )
     try:
         validation.validate_definition(data)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(
+            status_code=422, detail=error_detail("invalid_definition", str(e))
+        )
 
 
 # ============ 端点 ============
@@ -194,7 +209,9 @@ def create_flow(req: CreateFlowRequest, request: Request = None):
         rec = _store().create_flow(req.flow_id, author=req.author, desc=req.desc,
                                    tenant_id=tenant)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(
+            status_code=409, detail=error_detail("flow_conflict", str(e))
+        )
     _audit(request, "flow.create", req.flow_id,
            {"author": req.author, "desc": req.desc}, tenant_id=tenant)
     return FlowSummaryView(
@@ -235,7 +252,9 @@ def delete_flow(flow_id: str, request: Request = None, redis: Redis = Depends(ge
     try:
         _store().delete_flow(flow_id, tenant_id=tenant)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(
+            status_code=404, detail=error_detail("flow_not_found", str(e))
+        )
     # 引擎运行时存储同步清理（本地模式无 Redis，无需清理）
     if redis is not None:
         remove_flow_from_engine(redis, flow_id, tenant_id=tenant)
@@ -324,14 +343,16 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
         # C5-1：结构化 409——前端据此弹「加载最新 / 强制覆盖」
         raise HTTPException(
             status_code=409,
-            detail={
-                "message": str(e),
-                "conflict": "version_stale",
-                "latest_updated_at": e.latest_updated_at,
-            },
+            detail=error_detail(
+                "version_stale", str(e),
+                conflict="version_stale",
+                latest_updated_at=e.latest_updated_at,
+            ),
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(
+            status_code=409, detail=error_detail("version_conflict", str(e))
+        )
     # allocate_version 时服务端可能分配了与 path 不同的版本号：以返回值为准
     out = store.get_version(flow_id, result.version, tenant_id=tenant)
     if request is not None:
@@ -358,7 +379,9 @@ def delete_version(flow_id: str, version: str, request: Request = None,
     try:
         _store().delete_version(flow_id, version, tenant_id=tenant)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(
+            status_code=404, detail=error_detail("version_not_found", str(e))
+        )
     if redis is not None:
         remove_flow_version_from_engine(redis, flow_id, version, tenant_id=tenant)
     if request is not None:
@@ -380,7 +403,9 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
     try:
         out = store.publish_version(flow_id, req.version, tenant_id=tenant)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(
+            status_code=404, detail=error_detail("version_not_found", str(e))
+        )
     # 发布即同步到引擎运行时存储：FlowWorker 从这里解析定义，
     # 不同步则「发布成功、启动必失败」。本地单机模式无 Redis：
     # 执行走 console 进程内（SQLite 定义），无需同步。
@@ -443,7 +468,9 @@ def export_version(flow_id: str, version: str, request: Request = None):
         return deployments_svc.build_promotion_package(_store(), flow_id, version,
                                                        tenant_id=tenant)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(
+            status_code=404, detail=error_detail("version_not_found", str(e))
+        )
 
 
 class ImportPromotionRequest(BaseModel):
@@ -471,12 +498,18 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
     except deployments_svc.PromotionConflictError as e:
         raise HTTPException(
             status_code=409,
-            detail={"message": str(e), "conflict": e.conflict, **e.details},
+            detail=error_detail(
+                e.conflict, str(e), conflict=e.conflict, **e.details
+            ),
         )
     except deployments_svc.PromotionValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(
+            status_code=422, detail=error_detail("promotion_invalid", str(e))
+        )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400, detail=error_detail("import_invalid", str(e))
+        )
 
     flow_id, version = result["flow_id"], result["version"]
     if req.publish:
@@ -491,7 +524,9 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
         try:
             out = _store().publish_version(flow_id, version, tenant_id=tenant)
         except LookupError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(
+                status_code=404, detail=error_detail("version_not_found", str(e))
+            )
         sync_flow_to_engine(redis, flow_id, out.version, out.definition, tenant_id=tenant)
         try:
             from ..config import get_settings

@@ -248,7 +248,7 @@ def test_promotion_export_import_fingerprint(client_with_users, tmp_path, monkey
     bad = {**pkg, "definition": {"nodes": []}}
     r = client.post("/api/flows/import-version", headers=h, json={"package": bad})
     assert r.status_code == 400
-    assert "指纹" in r.json()["detail"]
+    assert "指纹" in r.json()["detail"]["message"]
 
     # 原包导入为新版本草稿
     r = client.post("/api/flows/import-version", headers=h,
@@ -362,7 +362,7 @@ def test_import_rejects_invalid_version_and_path_traversal(client_with_users):
         )
         assert r.status_code == 422, (bad_version, r.status_code, r.text)
         if bad_version:
-            assert "semver" in r.json()["detail"]
+            assert "semver" in r.json()["detail"]["message"]
         assert store.get_version(flow_id, bad_version) is None
 
     for bad_flow_id in ("../escape", "a/b", "a\\b", ".", ".."):
@@ -371,7 +371,7 @@ def test_import_rejects_invalid_version_and_path_traversal(client_with_users):
             "/api/flows/import-version", headers=h, json={"package": bad_pkg}
         )
         assert r.status_code == 422, (bad_flow_id, r.status_code, r.text)
-        assert "flow_id" in r.json()["detail"]
+        assert "flow_id" in r.json()["detail"]["message"]
         assert store.get_flow_record(bad_flow_id) is None
 
 
@@ -400,7 +400,7 @@ def test_import_publish_validates_flow_definition(client_with_users):
         json={"package": bad_pkg, "new_version": "9.9.9", "publish": True},
     )
     assert r.status_code == 422, r.text
-    assert "Flow 校验失败" in r.json()["detail"]
+    assert "Flow 校验失败" in r.json()["detail"]["message"]
     # 零落库：未创建版本，更没有 published 行。
     assert store.get_version(flow_id, "9.9.9") is None
 

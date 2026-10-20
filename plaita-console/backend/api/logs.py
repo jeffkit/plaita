@@ -75,6 +75,17 @@ class LogStatsResponse(BaseModel):
     # A2R20-04：条目/墙钟预算或键扫描触界，统计只是部分结果（有租户过滤时
     # 计数是下界）。
     truncated: bool = False
+    # A2R24-03：平台视角按每键最新 N 条采样再按 xlen/样本比放大，级别分布
+    # 是**估算**。此前没有任何字段区分「精确」与「估算」，200 条 ERROR 能被
+    # 报成 300 条 INFO。现在显式标注；truncated 仍只表示预算/键扫描触界。
+    estimated: bool = Field(
+        False,
+        description="级别分布是否为采样估算（平台全量视角且未读完整个 Stream）",
+    )
+    sample_size: Optional[int] = Field(
+        None,
+        description="估算所用样本条数；estimated=false 时为 null",
+    )
 
 
 # ============ 工具函数 ============
@@ -443,6 +454,9 @@ async def get_log_stats(
     # 统计（精确），不能把 xlen 当成租户总量、也不能采平台样本估算。
     tenant = tenant_scope(request)
     truncated = False
+    # A2R24-03：平台视角是采样估算，必须显式标注（estimated/sample_size）。
+    estimated = False
+    sampled_entries = 0
     remaining = _LOG_STATS_MAX_ENTRIES
     deadline = time.monotonic() + _LOG_TIME_BUDGET_S
     
@@ -500,6 +514,7 @@ async def get_log_stats(
             sample = min(100, remaining)
             entries = redis.xrevrange(key_str, count=sample) if sample > 0 else []
             remaining -= len(entries)
+            sampled_entries += len(entries)
             level_counts = {}
             
             for _, entry_data in entries:
@@ -508,14 +523,16 @@ async def get_log_stats(
                     level = level.decode()
                 level_counts[level] = level_counts.get(level, 0) + 1
             
-            # 按比例估算总数
+            # 按比例估算总数；样本没覆盖整个 Stream 时是估算（A2R24-03）
             if entries:
+                if len(entries) < length:
+                    estimated = True
                 ratio = length / len(entries)
                 for level, count in level_counts.items():
                     if service_type not in stats_dict:
                         stats_dict[service_type] = {}
-                    estimated = int(count * ratio)
-                    stats_dict[service_type][level] = stats_dict[service_type].get(level, 0) + estimated
+                    estimated_count = int(count * ratio)
+                    stats_dict[service_type][level] = stats_dict[service_type].get(level, 0) + estimated_count
         except Exception:
             continue
     
@@ -537,10 +554,20 @@ async def get_log_stats(
             total_logs,
         )
 
+    if estimated:
+        # 采样估算不是静默降级：响应带 estimated/sample_size，这里留 WARNING。
+        logger.warning(
+            "日志统计平台视角使用采样估算：sample_size=%d total_logs=%d "
+            "estimated=true（精确计数请带租户视角）",
+            sampled_entries, total_logs,
+        )
+
     return LogStatsResponse(
         stats=stats,
         total_logs=total_logs,
         truncated=truncated,
+        estimated=estimated,
+        sample_size=sampled_entries if estimated else None,
     )
 
 

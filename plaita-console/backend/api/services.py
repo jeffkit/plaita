@@ -105,9 +105,29 @@ class ServiceStatusResponse(BaseModel):
 
 # ============ 工具函数 ============
 
+#: 本地单机档（Redis=None）的统一 503 文案（A2R24-04）。
+SERVICE_REGISTRY_UNAVAILABLE_DETAIL = "服务注册表依赖 Redis，本地单机档不可用"
+
+
+def get_redis_or_503(request: Request) -> Redis:
+    """取数据面 Redis；本地单机档统一 503 JSON（A2R24-04）。
+
+    历史：``get_redis`` 直接返回 ``request.app.state.redis``，三个 GET 端点
+    （types/list、{id}、{id}/status）在 None 上抛 ``NoneType`` → 500
+    ``text/plain``；同模块 list/topology 却是 503 JSON。
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        raise HTTPException(
+            status_code=503,
+            detail=SERVICE_REGISTRY_UNAVAILABLE_DETAIL,
+        )
+    return redis
+
+
 def get_redis(request: Request) -> Redis:
-    """获取 Redis 客户端"""
-    return request.app.state.redis
+    """FastAPI 依赖形态（所有服务的读/控制端点统一走 503 闸）。"""
+    return get_redis_or_503(request)
 
 
 def parse_service_data(data: str) -> Optional[ServiceInfo]:
@@ -180,12 +200,12 @@ async def list_services(
     
     - **service_type**: 可选，按服务类型筛选
     """
-    redis = get_redis(request) if request is not None else None
+    redis = get_redis_or_503(request) if request is not None else None
     if redis is None:
         # 本地单机档无 Redis：与 queues/events 一致返回 503（此前 NoneType.keys 500）
         raise HTTPException(
             status_code=503,
-            detail="服务注册表依赖 Redis，本地单机档不可用",
+            detail=SERVICE_REGISTRY_UNAVAILABLE_DETAIL,
         )
     services = []
     added_instance_ids = set()
@@ -391,12 +411,12 @@ async def get_topology(
     """
     获取服务拓扑结构（含关联关系）
     """
-    redis = get_redis(request) if request is not None else None
+    redis = get_redis_or_503(request) if request is not None else None
     if redis is None:
         # 本地单机档无 Redis：与 queues/events 一致返回 503（此前 NoneType.keys 500）
         raise HTTPException(
             status_code=503,
-            detail="服务注册表依赖 Redis，本地单机档不可用",
+            detail=SERVICE_REGISTRY_UNAVAILABLE_DETAIL,
         )
     # 获取所有服务（有界 SCAN 替代无 COUNT 的 scan_iter：A2R20-02）
     pattern = "plaita:registry:*"

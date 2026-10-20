@@ -45,6 +45,11 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         get_sse_async_redis,
     )
 
+try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
+    from ..error_contract import error_detail, scrubbed_detail
+except ImportError:
+    from error_contract import error_detail, scrubbed_detail  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -1209,7 +1214,12 @@ async def get_execution(
         # 见 _execution_info_from_summary）。
         return ExecutionInfo(**_with_usage(data))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"数据解析失败: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=scrubbed_detail(
+                logger, "execution_data_parse_failed", "执行数据解析失败", e
+            ),
+        )
 
 
 @router.post("/executions")
@@ -1234,9 +1244,12 @@ async def start_execution(
                 request.params, tenant_id=tenant,
             )
         except LookupError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            raise HTTPException(status_code=404, detail=error_detail("flow_not_found", str(e)))
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(
+                status_code=400,
+                detail=error_detail("invalid_execution_request", str(e)),
+            )
         _audit(http_request, "execution.start", info["execution_id"],
                {"flow_id": request.flow_id, "version": request.version,
                 "mode": "local"}, tenant_id=tenant)
@@ -1279,15 +1292,16 @@ async def start_execution(
         )
         raise HTTPException(
             status_code=429,
-            detail={
-                "error": "tenant_quota_exceeded",
-                "tenant_id": tenant or "default",
-                "max_running": max_running,
-                "message": (
+            detail=error_detail(
+                "tenant_quota_exceeded",
+                (
                     f"租户 {tenant or 'default'} 并发 start 数已达上限"
                     f"（{max_running}），请等待在跑执行终态后重试"
                 ),
-            },
+                error="tenant_quota_exceeded",
+                tenant_id=tenant or "default",
+                max_running=max_running,
+            ),
         )
     # 写入任务队列 Stream（FlowWorker 消费组消费）
     try:
@@ -1431,7 +1445,9 @@ async def delete_execution(
                 force=force,
             )
         except local.ExecutionActiveError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409, detail=error_detail("execution_active", str(exc))
+            ) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(request, "execution.delete", execution_id,
@@ -1520,7 +1536,10 @@ async def resume_execution(
                 request.data, tenant_id=tenant_scope(http_request),
             )
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(
+                status_code=400,
+                detail=error_detail("invalid_resume_request", str(e)),
+            )
         if not ok:
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(http_request, "execution.resume", execution_id,

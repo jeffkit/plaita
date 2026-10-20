@@ -172,7 +172,7 @@ def test_switch_tenant_rejects_bad_cases_without_moving_active_tenant(client):
         headers=_auth(token),
     )
     assert r.status_code == 400
-    assert "不是租户" in r.json()["detail"]
+    assert "不是租户" in r.json()["detail"]["message"]
     assert _flow_ids(client, token) == {"flow-b"}
 
 

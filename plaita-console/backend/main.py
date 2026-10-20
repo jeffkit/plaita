@@ -36,6 +36,7 @@ try:
     from .api import capacity as capacity_api
     from .services import flow_store, signature, users_svc
     from .api import auth_users
+    from .error_contract import install_error_handlers
 except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该走到这里
     if __package__ == "plaita_console":
         raise
@@ -50,6 +51,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     from api import capacity as capacity_api  # type: ignore
     from services import flow_store, signature, users_svc  # type: ignore
     from api import auth_users  # type: ignore
+    from error_contract import install_error_handlers  # type: ignore
 
 # 配置日志
 logging.basicConfig(
@@ -430,6 +432,10 @@ def create_app() -> FastAPI:
             {"name": "health", "description": "健康检查（无鉴权）"},
         ],
     )
+
+    # A2R24-01：所有错误响应统一为 {"detail": {code, message, ...}}；
+    # 未捕获异常回 JSON 500（不再 text/plain），异常原文只进日志。
+    install_error_handlers(app)
     
     # 添加 CORS 中间件
     app.add_middleware(

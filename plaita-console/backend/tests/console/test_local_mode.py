@@ -94,7 +94,7 @@ def test_local_run_unpublished_rejected(app: FastAPI, client: TestClient):
     )
     r = client.post("/api/executions", json={"flow_id": "draft-flow"})
     assert r.status_code == 400
-    assert "已发布版本" in r.json()["detail"]
+    assert "已发布版本" in r.json()["detail"]["message"]
 
 
 def test_local_delete_execution(app: FastAPI, client: TestClient):
@@ -172,7 +172,7 @@ def test_resume_rejects_non_suspended(app: FastAPI, client: TestClient):
     r = client.post(f"/api/executions/{eid}/resume",
                     json={"resume_type": "event", "data": {}})
     assert r.status_code == 400
-    assert "挂起" in r.json()["detail"]
+    assert "挂起" in r.json()["detail"]["message"]
 
 
 def test_resume_suspended_rejects_continue_and_retry(app: FastAPI, client: TestClient):
@@ -198,7 +198,7 @@ def test_resume_suspended_rejects_continue_and_retry(app: FastAPI, client: TestC
         r = client.post(f"/api/executions/{eid}/resume",
                         json={"resume_type": resume_type})
         assert r.status_code == 400, (resume_type, r.status_code)
-        assert resume_type in r.json()["detail"]
+        assert resume_type in r.json()["detail"]["message"]
     # 执行未被扰动
     body = client.get(f"/api/executions/{eid}").json()
     assert body["status"] == "suspended"

@@ -27,6 +27,11 @@ except ImportError:
         tenant_scope,
     )
 
+try:  # A2R24-01：统一错误 detail 形状
+    from ..error_contract import error_detail
+except ImportError:
+    from error_contract import error_detail  # type: ignore
+
 router = APIRouter()
 
 
@@ -82,16 +87,17 @@ def get_credential(name: str, request: Request = None):
         # 具名返回可操作指引（恢复原密钥），不把明文/密文带进错误体。
         raise HTTPException(
             status_code=503,
-            detail={
-                "message": str(e),
-                "error": "credentials_key_mismatch",
-                "reason": e.reason,
-            },
+            detail=error_detail(
+                "credentials_key_mismatch", str(e),
+                error="credentials_key_mismatch", reason=e.reason,
+            ),
         )
     except credentials_svc.CredentialsDisabledError as e:
         raise HTTPException(
             status_code=503,
-            detail={"message": str(e), "error": "credentials_disabled"},
+            detail=error_detail(
+                "credentials_disabled", str(e), error="credentials_disabled",
+            ),
         )
     if record is None:
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
@@ -127,19 +133,20 @@ def save_credential(req: CredentialSaveRequest, request: Request = None):
         # 且原导出文件保持不变（A2R25-10）。
         raise HTTPException(
             status_code=409,
-            detail={
-                "message": str(e),
-                "error": "credentials_key_mismatch",
-                "reason": e.reason,
-            },
+            detail=error_detail(
+                "credentials_key_mismatch", str(e),
+                error="credentials_key_mismatch", reason=e.reason,
+            ),
         )
     except credentials_svc.CredentialsDisabledError as e:
         raise HTTPException(
             status_code=503,
-            detail={"message": str(e), "error": "credentials_disabled"},
+            detail=error_detail(
+                "credentials_disabled", str(e), error="credentials_disabled",
+            ),
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("credential_invalid", str(e)))
     _audit(request, "credential.save", req.name,
            {"type": req.type, "tenant_id": tenant}, tenant_id=tenant)
     return {"success": True, "name": req.name, "message": "凭据已保存并导出"}

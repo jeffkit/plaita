@@ -68,6 +68,17 @@ except ImportError:
         effective_redis_url,
     )
 
+try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
+    from ..error_contract import error_detail, redact_url_userinfo, scrubbed_detail
+except ImportError:
+    from error_contract import (  # type: ignore
+        error_detail,
+        redact_url_userinfo,
+        scrubbed_detail,
+    )
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 #: 任意 URL token（scheme://…）——只用于脱敏，不用于策略判断。
@@ -205,7 +216,7 @@ def _require_service_manager():
     try:
         return get_service_manager()
     except ClusterConfigError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise HTTPException(status_code=503, detail=error_detail("cluster_config_error", str(e))) from e
 
 #: quick-test 事件发布桥的等待上限（秒）。超时后不得再等 worker 线程：
 #: EventBus 后端卡住时 ``ThreadPoolExecutor.__exit__``（``shutdown(wait=True)``）
@@ -1922,7 +1933,7 @@ async def create_cluster(
             preset=request.preset
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("cluster_invalid", str(e)))
 
     _audit_cluster(http_request, "registry.create", cluster.id,
                    {"id": cluster.id, "name": cluster.name})
@@ -1961,7 +1972,7 @@ async def update_cluster(
             redis_url=request.redis_url
         )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=error_detail("cluster_not_found", str(e)))
 
     _audit_cluster(http_request, "registry.update", cluster_id,
                    {"id": cluster.id, "name": cluster.name})
@@ -1994,7 +2005,7 @@ async def delete_cluster(
     try:
         success = registry.delete_cluster(cluster_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("cluster_delete_rejected", str(e)))
     
     if not success:
         raise HTTPException(status_code=404, detail=f"集群 {cluster_id} 不存在")
@@ -2016,7 +2027,12 @@ def _connect_redis_or_502(redis_url: str):
     except Exception as e:  # noqa: BLE001 — 目标集群不可达：显式拒绝而非静默错位
         raise HTTPException(
             status_code=502,
-            detail=f"无法连接集群 Redis（{redis_url}）: {e}",
+            detail=scrubbed_detail(
+                logger,
+                "cluster_redis_unreachable",
+                f"无法连接集群 Redis（{redact_url_userinfo(redis_url)}）",
+                e,
+            ),
         ) from e
 
 
@@ -2193,7 +2209,7 @@ async def save_cluster_config_detail(
     try:
         success = registry.save_cluster_config(cluster_id, payload.config)
     except ProcessConfigError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail=error_detail("cluster_config_invalid", str(e))) from e
 
     if not success:
         raise HTTPException(status_code=400, detail=f"无法保存集群 {cluster_id} 的配置")

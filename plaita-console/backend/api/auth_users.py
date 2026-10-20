@@ -35,6 +35,11 @@ except ImportError:
     from services import login_guard, tenants_svc, users_svc  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
+try:  # A2R24-01：统一错误 detail 形状
+    from ..error_contract import error_detail
+except ImportError:
+    from error_contract import error_detail  # type: ignore
+
 # plaita#151：异常/外部文本入日志前统一清洗（共享实现，不在此另写一份）
 from plaita.core.url_redaction import _scrub_url_text
 
@@ -103,7 +108,7 @@ def setup(req: CreateUserRequest, request: Request):
     try:
         info = users_svc.setup_admin(get_flow_store(), req.username, req.password)
     except users_svc.UserError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=error_detail("user_conflict", str(e)))
     session = users_svc.login(get_flow_store(), req.username, req.password)
     _set_audit_identity(request, session)
     _audit(request, "auth.setup", req.username,
@@ -179,7 +184,7 @@ def switch_tenant(req: SwitchTenantRequest, request: Request,
     try:
         context = users_svc.switch_tenant(get_flow_store(), token, req.tenant_id)
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("tenant_switch_invalid", str(e)))
     _audit(request, "auth.switch_tenant", req.tenant_id or "(full-view)",
            {"full_view": req.tenant_id is None},
            tenant_id=req.tenant_id or "")
@@ -226,7 +231,7 @@ def create_user(req: CreateUserRequest, request: Request, identity: Dict = Depen
             memberships=req.memberships,
         )
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("user_invalid", str(e)))
     _audit(request, "user.create", req.username,
            {"role": req.role, "platform_admin": req.platform_admin},
            tenant_id="")
@@ -242,7 +247,7 @@ def set_role(username: str, req: RoleRequest, request: Request,
     try:
         users_svc.set_role(get_flow_store(), username, req.role)
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("user_invalid", str(e)))
     _audit(request, "user.set_role", username, {"role": req.role},
            tenant_id="")
     return {"success": True, "username": username, "role": req.role}
@@ -260,7 +265,7 @@ def set_password(username: str, req: PasswordRequest, request: Request,
     try:
         users_svc.set_password(get_flow_store(), username, req.password)
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("user_invalid", str(e)))
     _audit(request, "user.set_password", username, {}, tenant_id="")
     return {"success": True, "username": username}
 
@@ -276,7 +281,7 @@ def delete_user(username: str, request: Request,
             get_flow_store(), username, allow_platform_admin=True
         )
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("user_invalid", str(e)))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"用户不存在: {username}")
     _audit(request, "user.delete", username, {}, tenant_id="")

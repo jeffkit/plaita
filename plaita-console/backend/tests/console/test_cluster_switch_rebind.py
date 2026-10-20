@@ -184,7 +184,7 @@ def test_switch_to_unreachable_cluster_keeps_registry_and_plane(env):
     r = client.post("/api/clusters/switch", json={"cluster_id": "C"}, headers=HEADERS)
 
     assert r.status_code == 502, r.text
-    assert URL_C in r.json()["detail"]
+    assert URL_C in r.json()["detail"]["message"]
     assert registry.get_active_cluster().id == "A"
     assert app.state.redis is before
     assert app.state.redis_url == URL_A

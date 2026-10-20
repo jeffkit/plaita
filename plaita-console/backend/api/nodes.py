@@ -18,6 +18,11 @@ except ImportError:
     from services import flow_store, node_registry_svc
     from auth import tenant_scope  # type: ignore
 
+try:  # A2R24-01：统一错误 detail 形状
+    from ..error_contract import error_detail
+except ImportError:
+    from error_contract import error_detail  # type: ignore
+
 router = APIRouter()
 
 
@@ -97,7 +102,7 @@ def register_node(req: RegisterNodeRequest, request: Request = None):
             tenant_id=tenant,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("node_invalid", str(e)))
     _audit(request, "node.register", req.node_type,
            {"node_type": req.node_type, "category": req.category},
            tenant_id=tenant)
@@ -111,9 +116,9 @@ def delete_node(node_type: str, request: Request = None):
     try:
         node_registry_svc.delete_custom(_store(), node_type, tenant_id=tenant)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("node_invalid", str(e)))
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=error_detail("node_not_found", str(e)))
     _audit(request, "node.delete", node_type, {"node_type": node_type},
            tenant_id=tenant or "")
     return {"success": True, "node_type": node_type}

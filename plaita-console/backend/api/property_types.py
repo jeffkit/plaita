@@ -21,6 +21,11 @@ except ImportError:
     from services import flow_store, node_registry_svc  # type: ignore
     from auth import tenant_scope  # type: ignore
 
+try:  # A2R24-01：统一错误 detail 形状
+    from ..error_contract import error_detail
+except ImportError:
+    from error_contract import error_detail  # type: ignore
+
 router = APIRouter()
 
 
@@ -92,7 +97,9 @@ def upsert_property_type(req: UpsertPropertyTypeRequest, request: Request = None
             tenant_id=tenant,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=400, detail=error_detail("property_type_invalid", str(e))
+        )
     _audit(request, "property_type.upsert", req.name,
            {"name": req.name, "base_type": req.base_type}, tenant_id=tenant)
     return PropertyTypeView(**out.model_dump())
@@ -104,7 +111,9 @@ def delete_property_type(name: str, request: Request = None):
     try:
         node_registry_svc.delete_property_type(_store(), name, tenant_id=tenant)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(
+            status_code=404, detail=error_detail("property_type_not_found", str(e))
+        )
     _audit(request, "property_type.delete", name, {"name": name},
            tenant_id=tenant or "")
     return {"success": True, "name": name}

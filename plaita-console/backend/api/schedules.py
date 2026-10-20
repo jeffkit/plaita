@@ -68,6 +68,11 @@ try:
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from auth import tenant_scope  # type: ignore
 
+try:  # A2R24-01：统一错误 detail 形状
+    from ..error_contract import error_detail
+except ImportError:
+    from error_contract import error_detail  # type: ignore
+
 router = APIRouter()
 
 
@@ -158,11 +163,12 @@ def _raise_schedule_conflict(latest_updated_at: Optional[str]) -> None:
     """#198：结构化 409（参考 flows.py C5-1 的 version_stale 形状）。"""
     raise HTTPException(
         status_code=409,
-        detail={
-            "message": "调度已被其他编辑更新，请加载最新后重试",
-            "conflict": "schedule_stale",
-            "latest_updated_at": latest_updated_at,
-        },
+        detail=error_detail(
+            "schedule_stale",
+            "调度已被其他编辑更新，请加载最新后重试",
+            conflict="schedule_stale",
+            latest_updated_at=latest_updated_at,
+        ),
     )
 
 

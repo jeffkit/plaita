@@ -132,9 +132,11 @@ def test_default_flow_without_env_is_structured_400(client, stub_loop):
     resp = _post(client, dataset="demo.json")
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
-    assert "FlowSourceProposer" in detail
-    assert "PLAITA_AI_PROPOSER_BASE_URL" in detail
-    assert "PLAITA_AI_PROPOSER_MODEL" in detail
+    assert detail["code"] == "proposer_not_configured"
+    message = detail["message"]
+    assert "FlowSourceProposer" in message
+    assert "PLAITA_AI_PROPOSER_BASE_URL" in message
+    assert "PLAITA_AI_PROPOSER_MODEL" in message
     assert stub_loop.last_proposer is None  # 构造失败 → 循环根本没建
 
 
@@ -142,7 +144,7 @@ def test_prompt_without_env_is_400_too(client, stub_loop):
     """legacy prompt 缺 env 同样 400（既有风格不回归）。"""
     resp = _post(client, dataset="demo.json", proposer="prompt")
     assert resp.status_code == 400, resp.text
-    assert "PLAITA_AI_PROPOSER_BASE_URL" in resp.json()["detail"]
+    assert "PLAITA_AI_PROPOSER_BASE_URL" in resp.json()["detail"]["message"]
 
 
 def test_unknown_proposer_rejected(client, stub_loop):

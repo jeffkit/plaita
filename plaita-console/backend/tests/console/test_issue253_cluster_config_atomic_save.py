@@ -208,8 +208,8 @@ def test_corrupt_config_returns_named_503_and_stays_failed(broken_env, caplog):
     for response in (first, second, service_types, infrastructure):
         assert response.status_code == 503, response.text
         detail = response.json()["detail"]
-        assert "集群配置载入失败" in detail
-        assert str(config_path) in detail
+        assert "集群配置载入失败" in detail["message"]
+        assert str(config_path) in detail["message"]
 
     # 半截文件原样保留：改名会让下一次加载把它当「路径失效」回退到别的
     # checkout，故障再次被伪装成健康。

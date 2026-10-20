@@ -20,6 +20,11 @@ except ImportError:
     from services import tenants_svc, users_svc  # type: ignore
     from services.flow_store import get_flow_store  # type: ignore
 
+try:  # A2R24-01：统一错误 detail 形状
+    from ..error_contract import error_detail
+except ImportError:
+    from error_contract import error_detail  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -129,7 +134,7 @@ def create_tenant(req: CreateTenantRequest, request: Request,
             get_flow_store(), req.id, req.name, redis_client=_redis(request)
         )
     except tenants_svc.TenantError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=error_detail("tenant_conflict", str(e)))
     _audit(request, "tenant.create", req.id, {"target_tenant": req.id},
            tenant_id="")
     return tenant  # 含 contract_secret_key（仅此一次）
@@ -142,7 +147,7 @@ def get_tenant(tenant_id: str, request: Request,
     try:
         return tenants_svc.get_tenant(get_flow_store(), tenant_id)
     except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=error_detail("tenant_not_found", str(e)))
 
 
 @router.post("/tenants/{tenant_id}/status")
@@ -154,7 +159,7 @@ def set_status(tenant_id: str, req: TenantStatusRequest, request: Request,
             get_flow_store(), tenant_id, req.status, redis_client=_redis(request)
         )
     except tenants_svc.TenantError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("tenant_invalid", str(e)))
     _audit(request, "tenant.set_status", tenant_id,
            {"status": req.status, "target_tenant": tenant_id}, tenant_id="")
     return {"success": True, "tenant_id": tenant_id, "status": req.status}
@@ -167,7 +172,7 @@ def rotate_secret(tenant_id: str, request: Request, identity: Dict = Depends(req
     try:
         secret = tenants_svc.rotate_contract_secret(get_flow_store(), tenant_id)
     except tenants_svc.TenantError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=error_detail("tenant_not_found", str(e)))
     _audit(request, "tenant.rotate_secret", tenant_id,
            {"target_tenant": tenant_id}, tenant_id="")
     return secret  # 含 contract_secret_key（仅此一次）
@@ -181,7 +186,7 @@ def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(req
             get_flow_store(), tenant_id, redis_client=_redis(request)
         )
     except tenants_svc.TenantError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=error_detail("tenant_conflict", str(e)))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
     _audit(request, "tenant.delete", tenant_id, {"target_tenant": tenant_id},
@@ -208,7 +213,7 @@ def add_member(tenant_id: str, req: MemberRequest, request: Request,
     try:
         tenants_svc.add_member(get_flow_store(), tenant_id, req.username, req.role)
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("member_invalid", str(e)))
     _audit(request, "tenant.add_member", f"{tenant_id}/{req.username}", {"role": req.role})
     return {"success": True, "username": req.username, "tenant_id": tenant_id}
 
@@ -223,7 +228,7 @@ def set_member_role(tenant_id: str, username: str, req: MemberRequest,
     try:
         tenants_svc.set_member_role(get_flow_store(), tenant_id, username, req.role)
     except users_svc.UserError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=error_detail("member_invalid", str(e)))
     _audit(request, "tenant.set_member_role", f"{tenant_id}/{username}", {"role": req.role})
     return {"success": True, "username": username, "role": req.role}
 

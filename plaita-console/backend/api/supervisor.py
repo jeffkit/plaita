@@ -21,6 +21,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
+    from ..error_contract import error_detail, scrubbed_detail
+except ImportError:
+    from error_contract import error_detail, scrubbed_detail  # type: ignore
+
 logger = logging.getLogger("api.supervisor")
 
 router = APIRouter()
@@ -65,7 +70,10 @@ def _load_plaita_ai():
     except ImportError as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"plaita-ai 未安装（{exc}）。在 backend 环境执行: pip install -e ./plaita-ai",
+            detail=error_detail(
+                "supervisor_unavailable",
+                "plaita-ai 未安装。在 backend 环境执行: pip install -e ./plaita-ai",
+            ),
         ) from exc
     return load_dataset, FlowSourceProposer, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
 
@@ -125,7 +133,12 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
     try:
         dataset = load_dataset(str(dataset_path))
     except Exception as exc:  # noqa: BLE001 —— 数据集问题原样带回给面板
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=scrubbed_detail(
+                logger, "dataset_invalid", "数据集加载失败，请检查数据集名称与格式", exc
+            ),
+        ) from exc
 
     try:
         if req.proposer == "static":
@@ -135,7 +148,10 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
         else:
             proposer = FlowSourceProposer()
     except Exception as exc:  # noqa: BLE001 —— proposer 未配置（如缺 PLAITA_AI_PROPOSER_* env）
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("proposer_not_configured", str(exc)),
+        ) from exc
 
     supervisor = Supervisor(
         _local_client(request),
@@ -145,7 +161,13 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
     try:
         result = supervisor.run_loop(flow_id, dataset)
     except Exception as exc:  # noqa: BLE001 —— 引擎/网络错误原样带回
-        raise HTTPException(status_code=502, detail=f"supervisor 迭代失败: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=scrubbed_detail(
+                logger, "supervisor_iteration_failed", "supervisor 迭代失败", exc,
+                exc_info=True,
+            ),
+        ) from exc
     # A55-S1：自迭代审计（flow_id/dataset；不记数据集内容与提案正文）。
     try:
         from ..services import audit as audit_svc

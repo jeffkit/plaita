@@ -139,6 +139,8 @@ def test_running_delete_without_force_is_409_and_keeps_all_keys(env):
     r = client.delete("/api/executions/e-run", headers=_headers())
 
     assert r.status_code == 409
+    # 该 mini-app 未挂统一 handler：源站 detail 仍是字符串（A2R24-01 只收敛
+    # 异常文本出网点；这条是业务文案）。
     assert "force=true" in r.json()["detail"]
     # 状态与机制键原样保留，取消意图未被写入
     assert redis.exists("plaita:execution:e-run") == 1
@@ -364,7 +366,7 @@ def test_local_delete_via_api_requires_force_then_purges_logs(tmp_path, monkeypa
     try:
         r = client.delete(f"/api/executions/{eid}")
         assert r.status_code == 409
-        assert "force=true" in r.json()["detail"]
+        assert "force=true" in r.json()["detail"]["message"]
 
         r = client.delete(f"/api/executions/{eid}?force=true")
         assert r.status_code == 200, r.text
