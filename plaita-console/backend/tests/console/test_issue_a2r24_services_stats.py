@@ -120,3 +120,69 @@ def test_tenant_stats_is_exact_and_not_labeled_estimated():
     assert body["estimated"] is False
     assert body["sample_size"] is None
     assert _level_counts(body) == {"ERROR": 200, "INFO": 100}
+
+
+def _seed_a2r28_instance_streams(redis, *, streams: int = 20, per_stream: int = 150):
+    """A2R28 探针口径：``plaita:logs:{service}:{instance}`` 四段键 + 条目数超采样窗。"""
+    for s in range(streams):
+        key = f"plaita:logs:flow_worker:inst{s}"
+        for i in range(per_stream):
+            redis.xadd(
+                key,
+                {
+                    "level": "ERROR" if i % 5 == 0 else "INFO",
+                    "message": f"m{i}",
+                    "tenant_id": "default",
+                },
+            )
+
+
+def _logs_client_with(redis, *, tenant: bool) -> TestClient:
+    app = FastAPI()
+    app.state.redis = redis
+    app.state.local_mode = False
+    if tenant:
+        @app.middleware("http")
+        async def _bind_tenant(request, call_next):
+            request.state.tenant_id = "default"
+            return await call_next(request)
+    install_error_handlers(app)
+    app.include_router(logs_api.router, prefix="/api")
+    return TestClient(app)
+
+
+def test_platform_stats_labels_estimate_for_a2r28_instance_key_shape():
+    """A2R28 键形（四段）仍按 service 段归组，且 estimated/sample_size 口径不变。
+
+    r52 的实例日志下推把键切成 ``plaita:logs:{service}:{instance}``；stats 的
+    平台分支仍用 ``parts[2]`` 取 service_type，并按每键最新 100 条采样。这里用
+    20 流 × 150 条（样本未覆盖整条流）验证：total_logs 是 xlen 之和、estimated
+    为 true、sample_size=实际采样条数，而不是退回静默估算。
+    """
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    _seed_a2r28_instance_streams(redis)
+    client = _logs_client_with(redis, tenant=False)
+    body = client.get("/api/logs/stats").json()
+
+    assert body["truncated"] is False
+    assert body["total_logs"] == 20 * 150
+    assert body["estimated"] is True
+    assert body["sample_size"] == 20 * 100
+    assert {row["service_type"] for row in body["stats"]} == {"flow_worker"}
+    # 每流最后 100 条：20 ERROR/80 INFO；按 150/100 放大后每流 30/120。
+    assert _level_counts(body) == {"ERROR": 600, "INFO": 2400}
+
+
+def test_tenant_stats_is_exact_for_a2r28_instance_key_shape():
+    """同一键形下租户视角仍逐条精确：estimated=false、sample_size=null。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    _seed_a2r28_instance_streams(redis)
+    client = _logs_client_with(redis, tenant=True)
+    body = client.get("/api/logs/stats").json()
+
+    assert body["truncated"] is False
+    assert body["total_logs"] == 20 * 150
+    assert body["estimated"] is False
+    assert body["sample_size"] is None
+    # 每流 150 条中 i%5==0 为 ERROR → 30 ERROR/120 INFO。
+    assert _level_counts(body) == {"ERROR": 600, "INFO": 2400}

@@ -5,6 +5,7 @@
 覆盖草稿。除 ``DispatchOneRequest``（#262 服务端权威字段，显式 ignore）外，
 全部请求模型必须继承 ``StrictRequestModel``。
 """
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -150,3 +151,72 @@ class TestStrictRequestModels:
                 checked += 1
         # 防止模块改名/移动后本测试静默空转。
         assert checked >= 30
+
+    def test_every_json_request_body_forbids_unknown_fields(self):
+        """全端点扫尾：OpenAPI 中每个 JSON requestBody 都必须是 forbid。
+
+        A2R24-10 的端面口径是「所有请求模型」；上一测试按类名（``*Request``）
+        扫，本测试反过来从 OpenAPI 的 requestBody 出发，覆盖匿名/内联模型和
+        将来新增的模块，避免只改了类名或漏了路由就静默放过。
+
+        唯一例外 ``POST /api/dispatch/one``（#262：``shadow``/``dry_run`` 是
+        服务端权威字段，请求体同名字段按文档忽略，见 ``DispatchOneRequest``）。
+        """
+        modules = [
+            "auth_users",
+            "audit",
+            "capacity",
+            "cluster",
+            "copilot",
+            "credential_templates",
+            "credentials",
+            "dryrun",
+            "events",
+            "executions",
+            "flow_version",
+            "flows",
+            "logs",
+            "metrics",
+            "nodes",
+            "property_types",
+            "queues",
+            "schedules",
+            "services",
+            "supervisor",
+            "tenants",
+        ]
+        app = FastAPI()
+        for name in modules:
+            app.include_router(
+                importlib.import_module(f"api.{name}").router, prefix="/api"
+            )
+        spec = app.openapi()
+        schemas = spec.get("components", {}).get("schemas", {})
+        checked = 0
+        exemptions = set()
+        for path, ops in spec["paths"].items():
+            for method, op in ops.items():
+                if method not in ("get", "post", "put", "delete", "patch"):
+                    continue
+                request_body = op.get("requestBody")
+                if not request_body:
+                    continue
+                for content_type, media in request_body.get("content", {}).items():
+                    if not content_type.startswith("application/json"):
+                        continue
+                    schema = media.get("schema", {})
+                    ref = schema.get("$ref")
+                    model_name = ref.rsplit("/", 1)[-1] if ref else None
+                    target = schemas.get(model_name, schema) if model_name else schema
+                    if path == "/api/dispatch/one":
+                        assert model_name == "DispatchOneRequest"
+                        exemptions.add(path)
+                        continue
+                    assert target.get("additionalProperties") is False, (
+                        f"{method.upper()} {path} 的 {model_name} 未 forbid 未知字段"
+                    )
+                    checked += 1
+        # 40 个 JSON body operation（38 个模型，StopService/CreateUser 各复用）；
+        # 防止路由改名后扫尾静默空转。
+        assert checked >= 38, checked
+        assert exemptions == {"/api/dispatch/one"}
