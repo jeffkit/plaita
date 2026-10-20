@@ -20,9 +20,14 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 
 from plaita.credentials import (
+    DEFAULT_KEY_FILE,
     STORE_FORMAT,
     STORE_FORMAT_VERSION,
     STORE_META_KEY,
+    CredentialError,
+    _default_credentials_dir as _engine_default_credentials_dir,
+    _read_key_file as _engine_read_key_file,
+    _tighten_key_file_permissions as _engine_tighten_key_file_permissions,
     credentials_base_file as _engine_credentials_base_file,
 )
 from plaita.tenant_context import guard_tenant_write
@@ -69,16 +74,20 @@ class CredentialsKeyMismatchError(CredentialsDisabledError):
 
 
 def _db_dir() -> Path:
-    """从 PLAITA_CONSOLE_DB_URL 推断 DB 所在目录（默认 cwd）。"""
-    db_url = os.environ.get("PLAITA_CONSOLE_DB_URL", "sqlite:///./plaita_console.db")
-    if db_url.startswith("sqlite:///"):
-        raw = db_url[len("sqlite:///"):]
-        return Path(raw).resolve().parent
-    return Path.cwd()
+    """从 PLAITA_CONSOLE_DB_URL 推断 DB 所在目录（与引擎同源）。
+
+    A67-04：未设置/PG/内存库回退 cwd、相对 SQLite URL 按 cwd 解析都由引擎
+    ``_default_credentials_dir`` 统一打一次性 WARNING；本函数只负责委托，避免
+    console 与引擎两套解析规则漂移。
+    """
+    return _engine_default_credentials_dir("密钥文件")
 
 
 def credentials_key_file() -> Path:
-    return Path(os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", _db_dir() / ".plaita-credentials.key"))
+    explicit = os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", "").strip()
+    if explicit:
+        return Path(explicit)
+    return _db_dir() / DEFAULT_KEY_FILE
 
 
 def credentials_file(tenant_id: str = DEFAULT_TENANT_ID) -> Path:
@@ -100,32 +109,67 @@ def credentials_file(tenant_id: str = DEFAULT_TENANT_ID) -> Path:
     return base.with_name(f"{base.stem}.{tenant_id}{base.suffix}")
 
 
+def _read_existing_key(key_file: Path) -> bytes:
+    try:
+        return _engine_read_key_file(key_file)
+    except CredentialError as e:
+        raise CredentialsDisabledError(str(e)) from e
+
+
+def _create_key_file(key_file: Path) -> bytes:
+    """以 O_EXCL + 0600 原子创建密钥文件（A67-05，并顺带收口 A67-01 首建竞争）。
+
+    历史实现先 ``write_bytes``（umask 下通常 0644）再 ``chmod 0600``，窗口内
+    其他本地用户可读到 44B Fernet key；并发首建还会互相覆盖。现在文件从
+    创建那一刻就是 0600；``O_EXCL`` 落败者不重新生成，而是等待并复用胜者
+    写入的 key（同一 DB 的所有副本必须共用一把 key）。
+    """
+    key = Fernet.generate_key()
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        logger.info("凭据密钥文件已由另一进程创建，复用: %s", key_file)
+        return _read_existing_key(key_file)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            key_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    logger.info("已生成凭据密钥文件（0600）: %s", key_file)
+    return key
+
+
 def _load_key_bytes(*, generate: bool) -> bytes:
     """读取 Fernet key；``generate=True`` 仅在首次加密时允许创建密钥文件。
 
     读已有密文（``generate=False``）绝不生成新 key：缺 key 时生成一把新
     key 只会让所有旧密文必然解密失败，并把「未配置」伪装成「密钥不一致」。
+    已存在的 0644 存量 key 在读取时顺手收紧（A67-05）。
     """
     key = os.environ.get("PLAITA_CREDENTIALS_KEY")
     if key:
         return key.encode() if isinstance(key, str) else key
     key_file = credentials_key_file()
     if key_file.is_file():
-        return key_file.read_bytes().strip()
+        _engine_tighten_key_file_permissions(key_file)
+        return _read_existing_key(key_file)
     if not generate:
         raise CredentialsDisabledError(
             "未配置凭据解密密钥：请设置 PLAITA_CREDENTIALS_KEY（Fernet key），"
             f"或提供 {key_file} 指向密钥文件"
         )
-    key = Fernet.generate_key()
-    key_file.parent.mkdir(parents=True, exist_ok=True)
-    key_file.write_bytes(key)
-    try:
-        os.chmod(key_file, 0o600)
-    except OSError:
-        pass
-    logger.info("已生成凭据密钥文件: %s", key_file)
-    return key
+    return _create_key_file(key_file)
 
 
 def _fernet(*, generate: bool = False) -> Fernet:
@@ -532,6 +576,14 @@ def reconcile_exports() -> Dict[str, Any]:
     DB 无凭据且文件不存在时不落盘（不为空部署凭空创建文件）。返回摘要供
     启动日志/测试断言。
     """
+    # A67-05：启动对账同时收紧存量密钥文件权限。历史版本用 write_bytes 创建
+    # （通常 0644）再 chmod；只靠「读取时收紧」会漏掉空部署/暂未读到凭据的
+    # 进程，因此启动对账也必须做一次（key 不存在时保持不生成）。
+    key_permission_tightened = False
+    key_file = credentials_key_file()
+    if key_file.is_file():
+        key_permission_tightened = _engine_tighten_key_file_permissions(key_file)
+
     store = get_flow_store()
     with store._session_local() as session:
         # SQLite：先取得写锁，读到写文件期间 save/delete/delete_tenant 的
@@ -646,6 +698,7 @@ def reconcile_exports() -> Dict[str, Any]:
         "orphan_tenants": orphan_tenants,
         "key_mismatch": key_mismatch,
         "mismatched_tenants": mismatched_tenants,
+        "key_permission_tightened": key_permission_tightened,
     }
     logger.info(
         "凭据导出对账完成：重建 %d，刷新 %d（其中清空 %d），多余文件 %d，"

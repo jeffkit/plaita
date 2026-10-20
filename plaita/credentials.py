@@ -4,8 +4,11 @@
 ``PLAITA_CREDENTIALS_FILE`` 指定路径；未显式设置时与 console 同规则解析：
 ``PLAITA_CONSOLE_DB_URL`` 为 SQLite 时落在 **DB 同目录**的
 ``.plaita-credentials.json``（同一 DB 的多个副本因此读写同一份导出文件），
-否则回退当前工作目录。``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试
-同级 ``.plaita-credentials.key`` 文件）。加密/解密依赖 ``cryptography``
+否则回退当前工作目录并打一次性 WARNING（A67-04）——回退只保证单进程可用，
+多副本/PG 部署必须显式给出绝对路径的 ``PLAITA_CREDENTIALS_FILE`` /
+``PLAITA_CREDENTIALS_KEY_FILE``，否则各进程按各自 cwd 读写不同文件。
+``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试同级
+``.plaita-credentials.key`` 文件）。加密/解密依赖 ``cryptography``
 （``pip install plaita[credentials]``）。
 
 文件缺失视为「尚未配置凭据」（空 store）；文件存在但为空/损坏则抛
@@ -39,9 +42,14 @@ Fernet 密钥，租户代码可以直接读取 default 凭据文件，因此 cod
 from __future__ import annotations
 
 import json
+import logging
 import os
+import stat
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialError(RuntimeError):
@@ -70,19 +78,85 @@ STORE_FORMAT = "plaita-credentials"
 STORE_FORMAT_VERSION = 2
 
 
-def _default_credentials_dir() -> Path:
-    """默认凭据文件目录：SQLite 时与 DB 同目录，否则 cwd。
+# 默认路径回退告警按 (原因, 组件, 解析结果) 去重：引擎每次读凭据都会解析路径，
+# 不能每个节点调用都刷一条 WARNING。A67-04 要求「显式配置缺失即告警」，同一
+# 进程同一原因只告警一次即可被启动日志/运维看到。
+_PATH_FALLBACK_WARNINGS: set[tuple[str, str, str]] = set()
 
-    与 console ``services.credentials_svc._db_dir`` 同规则。导出文件是 DB 的
-    派生缓存，按 cwd 落盘会让「同 DB 多副本」各持一份互不收敛的副本（A66-01
-    ~ A66-04）；按 DB 路径落盘则同一 SQLite 库的副本天然共享同一个文件。
+
+def _reset_path_fallback_warnings() -> None:
+    """清空回退告警去重状态（测试用；生产进程 env/cwd 不变，无需清理）。"""
+    _PATH_FALLBACK_WARNINGS.clear()
+
+
+def _warn_path_once(key: tuple[str, str, str], message: str, *args: Any) -> None:
+    if key in _PATH_FALLBACK_WARNINGS:
+        return
+    _PATH_FALLBACK_WARNINGS.add(key)
+    logger.warning(message, *args)
+
+
+def _warn_cwd_fallback(component: str, reason: str, detail: str) -> Path:
+    cwd = Path.cwd()
+    _warn_path_once(
+        (reason, component, str(cwd)),
+        "凭据%s默认回退到当前工作目录 %s：%s。回退只保证单进程可用；"
+        "多副本/PG 部署必须给所有 console/worker 显式注入同一绝对路径的 "
+        "PLAITA_CREDENTIALS_FILE 与 PLAITA_CREDENTIALS_KEY_FILE，"
+        "否则各进程会读写各自 cwd 下的凭据文件（A67-04）",
+        component,
+        cwd,
+        detail,
+    )
+    return cwd
+
+
+def _default_credentials_dir(component: str = "文件") -> Path:
+    """默认凭据文件/密钥目录：SQLite 时与 DB 同目录，否则 cwd + WARNING。
+
+    与 console ``services.credentials_svc`` 同源（后者委托本函数）。导出文件是
+    DB 的派生缓存，按 cwd 落盘会让「同 DB 多副本」各持一份互不收敛的副本
+    （A66-01 ~ A66-04）；按 DB 路径落盘则同一 SQLite 库的副本天然共享同一个
+    文件。无法从 DB URL 推断共享目录（未设置/PG/内存库）或 URL 为相对路径时，
+    仍按历史语义回退，但必须留下 WARNING（A67-04：升级后无 DB env 的 worker
+    会继续解旧 cwd 文件，静默回退会让已吊销/已轮换的旧值继续服务）。
     """
     db_url = os.environ.get("PLAITA_CONSOLE_DB_URL", "").strip()
+    if not db_url:
+        return _warn_cwd_fallback(
+            component, "unset", "未设置 PLAITA_CONSOLE_DB_URL"
+        )
     if db_url.startswith("sqlite:///"):
         raw = db_url[len("sqlite:///"):]
         if raw and raw != ":memory:":
-            return Path(raw).resolve().parent
-    return Path.cwd()
+            path = Path(raw)
+            directory = path.resolve().parent
+            if not path.is_absolute():
+                # 相对 URL 的值即使两端相同，也会按各自进程 cwd 解析到不同 DB。
+                _warn_path_once(
+                    ("relative_sqlite", component, str(path.resolve())),
+                    "PLAITA_CONSOLE_DB_URL=%r 是相对路径：凭据%s按当前工作目录"
+                    "解析到 %s（父目录 %s）。值相同不代表同一数据库；多副本"
+                    "部署请改用绝对路径（A67-04）",
+                    db_url,
+                    component,
+                    path.resolve(),
+                    directory,
+                )
+            return directory
+        return _warn_cwd_fallback(
+            component,
+            "memory",
+            "PLAITA_CONSOLE_DB_URL 指向内存 SQLite，无法推断共享导出目录",
+        )
+    # 只记录 scheme：DB URL 可能含 userinfo 口令，WARNING 不得把它写进日志。
+    scheme = db_url.split("://", 1)[0] if "://" in db_url else db_url.split(":", 1)[0]
+    return _warn_cwd_fallback(
+        component,
+        f"non_sqlite:{scheme}",
+        f"PLAITA_CONSOLE_DB_URL 的 scheme={scheme!r} 不是 sqlite:/// 文件 URL，"
+        "无法推断 DB 同目录（URL 值已省略，避免泄露口令）",
+    )
 
 
 def credentials_base_file() -> Path:
@@ -94,7 +168,7 @@ def credentials_base_file() -> Path:
     explicit = os.environ.get("PLAITA_CREDENTIALS_FILE", "").strip()
     if explicit:
         return Path(explicit)
-    return _default_credentials_dir() / DEFAULT_FILE
+    return _default_credentials_dir("文件") / DEFAULT_FILE
 
 
 def tenant_credentials_file(tenant_id: Optional[str], base: Optional[Path] = None) -> Path:
@@ -128,7 +202,7 @@ def credentials_key_file() -> Path:
     explicit = os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", "").strip()
     if explicit:
         return Path(explicit)
-    return _default_credentials_dir() / DEFAULT_KEY_FILE
+    return _default_credentials_dir("密钥文件") / DEFAULT_KEY_FILE
 
 
 def subprocess_credentials_env() -> Dict[str, str]:
@@ -154,13 +228,83 @@ def subprocess_credentials_env() -> Dict[str, str]:
     }
 
 
+# chmod 失败只告警一次/路径，避免每次解密都刷日志（只读挂载是常见部署形态）。
+_KEY_PERMISSION_WARNINGS: set[str] = set()
+
+
+def _tighten_key_file_permissions(key_file: Path) -> bool:
+    """把已存在密钥文件的权限收紧到 0600；返回本次是否执行了收紧。
+
+    A67-05：历史版本先用 ``write_bytes``（umask 下通常 0644）创建 key 再
+    ``chmod``，存量文件也可能一直是 0644。密钥是解密所有租户凭据的唯一材料，
+    任何读取（引擎）与启动对账（console）都应顺手收紧。只读挂载等无法
+    chmod 的场景只 WARNING，不阻断读取。
+    """
+    try:
+        mode = stat.S_IMODE(key_file.stat().st_mode)
+    except OSError:
+        return False
+    if mode & 0o077 == 0:
+        return False
+    try:
+        os.chmod(key_file, 0o600)
+    except OSError as e:
+        key = str(key_file)
+        if key not in _KEY_PERMISSION_WARNINGS:
+            _KEY_PERMISSION_WARNINGS.add(key)
+            # #151 日志卫生：异常文本必须经构造面掩码，不能把裸异常交给 logger。
+            from plaita.core.url_redaction import _scrub_exception_text
+
+            logger.warning(
+                "凭据密钥文件 %s 权限为 %o（宽于 0600）且收紧失败（%s）；"
+                "请检查文件属主/只读挂载（A67-05）",
+                key_file,
+                mode,
+                _scrub_exception_text(e),
+            )
+        return False
+    logger.warning(
+        "凭据密钥文件 %s 权限为 %o（宽于 0600），已收紧为 0600（A67-05）",
+        key_file,
+        mode,
+    )
+    return True
+
+
+def _read_key_file(key_file: Path, *, timeout: float = 1.0) -> bytes:
+    """读取非空密钥内容；创建者可能刚 O_EXCL 建好文件尚未写入，短暂等待。
+
+    空文件不能当成有效密钥（Fernet 会抛不直观的 ValueError），也不能静默
+    重新生成（会覆盖并发创建者刚写入的 key，A67-01）。等待超时后 fail-loud。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            data = key_file.read_bytes().strip()
+        except FileNotFoundError:
+            data = b""
+        except OSError as e:
+            raise CredentialError(
+                f"无法读取凭据密钥文件 {key_file}：{e}"
+            ) from e
+        if data:
+            return data
+        if time.monotonic() >= deadline:
+            raise CredentialError(
+                f"凭据密钥文件 {key_file} 为空或不可读（另一个进程可能正在"
+                "创建）；请检查文件内容后重试"
+            )
+        time.sleep(0.02)
+
+
 def _load_key() -> bytes:
     key = os.environ.get("PLAITA_CREDENTIALS_KEY")
     if key:
         return key.encode()
     key_file = credentials_key_file()
     if key_file.is_file():
-        return key_file.read_bytes().strip()
+        _tighten_key_file_permissions(key_file)
+        return _read_key_file(key_file)
     raise CredentialError(
         "未配置凭据解密密钥：请设置 PLAITA_CREDENTIALS_KEY（Fernet key），"
         "或提供 PLAITA_CREDENTIALS_KEY_FILE 指向密钥文件"
