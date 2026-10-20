@@ -59,6 +59,16 @@ class ScanResult:
     elapsed_s: float = 0.0
 
 
+def escape_glob(value: str) -> str:
+    """转义 Redis ``SCAN MATCH`` 通配字符（把外部标识符当字面量）。
+
+    与 ``api/services.py`` 的 ``_escape_glob`` 同义：instance_id / service_type
+    来自查询参数，直接拼进 pattern 会让 ``*``/``?``/``[]`` 扩大匹配面（甚至
+    退化成全库扫描）。下推键级模式前必须先转义。
+    """
+    return "".join("\\" + ch if ch in "\\*?[]" else ch for ch in value)
+
+
 def scan_keys(
     redis: Redis,
     pattern: str,

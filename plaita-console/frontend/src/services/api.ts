@@ -362,6 +362,11 @@ export interface LogEntry {
 export interface LogListResponse {
   logs: LogEntry[]
   total: number
+  // A2R28-01：读取预算/键扫描触界时 total 只是已返回的条数（不是全集），
+  // 前端必须显式提示「结果不完整」，不能把 truncated 当作「没有日志」。
+  degraded?: boolean
+  skipped?: number
+  truncated?: boolean
 }
 
 // ============ 集群管理类型 ============

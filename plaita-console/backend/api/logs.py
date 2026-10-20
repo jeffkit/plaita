@@ -15,9 +15,9 @@ from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 
 try:
-    from .redis_scan import scan_keys
+    from .redis_scan import escape_glob, scan_keys
 except ImportError:  # 平铺布局（cwd=backend）运行时
-    from api.redis_scan import scan_keys  # type: ignore
+    from api.redis_scan import escape_glob, scan_keys  # type: ignore
 
 try:
     from .sse_redis import SSE_REDIS_RETRY_SECONDS, get_sse_async_redis
@@ -153,6 +153,67 @@ def _bounded_log_keys(redis: Redis, pattern: str, max_keys: int) -> tuple[List[s
     return result.keys, result.truncated
 
 
+def _instance_log_keys(
+    redis: Redis,
+    service_type: Optional[str],
+    instance_id: str,
+    max_keys: int,
+) -> tuple[List[str], bool]:
+    """实例日志的**键级下推**（A2R28-01）：先精确键/定向模式，无命中回退。
+
+    发布侧键格式是 ``plaita:logs:{service_type}:{instance_id}``
+    （plaita/server/log_handler.py），instance_id 本可直接参与 key 择取。
+    此前先枚举 ``plaita:logs:*`` 再按条目字段过滤——800 流 × 0.3s 墙钟下
+    只有前 ~170 个流轮得到，绝大多数真实实例返回空（且 ``truncated`` 只
+    在服务端 WARNING 可见）。
+
+    - ``service_type`` 已知：键是精确的，``EXISTS`` 后**直读该键**，零 SCAN；
+    - 只有 ``instance_id``（深链形态）：``plaita:logs:*:{instance_id}`` 定向
+      SCAN，仍按字面量转义 glob 元字符。定向模式的 SCAN 只回传命中键，但
+      仍需走完 keyspace 才能确认没有第二个 service 段；用 0.3s 墙钟 + 更大
+      轮次预算收口（250 轮在 25 万键下差一轮就误报 truncated）；
+    - 零命中回退全量 SCAN 并 WARNING——兼容历史/非规范键格式。
+    """
+    escaped_instance = escape_glob(instance_id)
+    if service_type:
+        exact = f"plaita:logs:{service_type}:{instance_id}"
+        try:
+            if redis.exists(exact):
+                return [exact], False
+        except Exception as exc:  # noqa: BLE001 - 探测失败退化为 SCAN
+            logger.warning(
+                "实例日志精确键探测失败（instance=%s key=%s，退化为 SCAN）: %s",
+                instance_id, exact, exc,
+            )
+        logger.warning(
+            "实例日志精确键无命中（instance=%s key=%s），回退 service SCAN",
+            instance_id, exact,
+        )
+        return _bounded_log_keys(
+            redis, f"plaita:logs:{escape_glob(service_type)}:*", max_keys
+        )
+
+    targeted = f"plaita:logs:*:{escaped_instance}"
+    result = scan_keys(
+        redis,
+        targeted,
+        count=1000,
+        max_keys=max_keys,
+        max_rounds=1000,
+        time_budget_s=_LOG_TIME_BUDGET_S,
+    )
+    if result.keys:
+        return result.keys, result.truncated
+
+    logger.warning(
+        "实例日志精确键零命中（instance=%s pattern=%s），回退全量 SCAN "
+        "（兼容旧键格式；若结果仍为空请核对实例 ID）",
+        instance_id,
+        targeted,
+    )
+    return _bounded_log_keys(redis, "plaita:logs:*", max_keys)
+
+
 # ============ API 端点 ============
 
 def _local_store(request: Request):
@@ -204,16 +265,16 @@ async def list_logs(
             total=len(rows),
         )
 
-    # 构建 Stream key 模式：instance_id 一律不参与 key 拼接，只作条目过滤
-    # （#102）。发布侧 key 本就按 service_type:instance_id 分流
-    # （plaita/server/log_handler.py），日志页的深链可能只有 instance_id
-    # （历史链接、Cluster 卡片深链），仅凭 instance_id 拼不出 key——曾因此
-    # 退化为全量键且从不按条目收窄，实例筛选静默失效。
-    if service_type:
-        pattern = f"plaita:logs:{service_type}:*"
+    # 构建 Stream key 模式（A2R28-01）：instance_id 存在时下推到精确键
+    # ``plaita:logs:{service}:{instance}`` / ``plaita:logs:*:{instance}``，
+    # 只读命中键；条目字段过滤仍然保留（租户边界与深链语义不变）。
+    if instance_id:
+        keys, truncated = _instance_log_keys(
+            redis, service_type, instance_id, _LOG_LIST_MAX_KEYS
+        )
     else:
-        pattern = "plaita:logs:*"
-    keys, truncated = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
+        pattern = f"plaita:logs:{service_type}:*" if service_type else "plaita:logs:*"
+        keys, truncated = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
 
     logs = []
     skipped = 0
@@ -342,9 +403,12 @@ async def get_instance_logs(
             total=len(rows),
         )
 
-    # 查找所有可能包含该实例日志的 Stream key
-    pattern = "plaita:logs:*"
-    keys, truncated = _bounded_log_keys(redis, pattern, _LOG_LIST_MAX_KEYS)
+    # A2R28-01：实例键级下推——发布侧键是
+    # ``plaita:logs:{service_type}:{instance_id}``，只读命中键；零命中才
+    # 回退全量 SCAN（历史/非规范键格式，WARNING 可见）。
+    keys, truncated = _instance_log_keys(
+        redis, None, instance_id, _LOG_LIST_MAX_KEYS
+    )
     # 多租户（plaita#192）：实例 id 可能被他租户猜中/从别处取得，逐条目按
     # tenant_id 收窄——不能只按 instance_id 匹配。
     tenant = tenant_scope(request)

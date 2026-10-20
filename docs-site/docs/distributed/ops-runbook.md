@@ -22,6 +22,7 @@ memory 仅单测 / 本地 demo。SQLAlchemy `db` 为 **experimental**，需 `PLA
 | 流程定义 / 注册表 | `plaita:flow:*`、`plaita:flow_list`、`plaita:flow_versions:*` | `plaita:{tenant}:flow:*` 等 |
 | 执行状态 | `plaita:execution:{id}` | `plaita:{tenant}:execution:{id}` |
 | 执行列表索引 | `plaita:execution:index`（ZSET，`:ready` 为回填标记） | `plaita:{tenant}:execution:index`（+`:ready`） |
+| 执行索引回填游标 | `plaita:execution:index:backfill:cursor`（SCAN 游标，24h TTL；回填完成即删） | `plaita:{tenant}:execution:index:backfill:cursor` |
 | resume lease | `plaita:execution:lease:{id}` | `plaita:{tenant}:execution:lease:{id}` |
 | fence 当前世代（CAS 比较值） | `plaita:execution:fence:{id}`（裸整数，7d TTL，删除执行时清） | `plaita:{tenant}:execution:fence:{id}` |
 | fence 世代计数器（单调锚） | `plaita:execution:fencegen:{id}`（裸整数，**无 TTL，删除执行不清**） | `plaita:{tenant}:execution:fencegen:{id}` |

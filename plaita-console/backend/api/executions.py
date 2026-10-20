@@ -3,6 +3,7 @@
 提供执行列表、详情、启动、停止等接口
 """
 import asyncio
+import heapq
 import json
 import logging
 import os
@@ -727,11 +728,31 @@ def _execution_info_from_summary(
 EXECUTION_LIST_MAX_SIZE = 200
 EXECUTION_SCAN_COUNT = 1000
 EXECUTION_SCAN_MAX_ROUNDS = 1500
-EXECUTION_SCAN_MAX_KEYS = 100_000
 EXECUTION_SCAN_TIME_BUDGET_S = 1.0
 EXECUTION_FILTER_MAX_CANDIDATES = 10_000
 EXECUTION_FILTER_TIME_BUDGET_S = 1.0
 EXECUTION_INDEX_PAGE_CHUNK = 200
+
+# ---- A2R28-02：存量索引回填「批量 + deadline + 断点续跑」----
+# 历史：回填依赖单次列表的有界 SCAN（max_keys=100k）；触界即返回
+# truncated 且**不置 ready**。执行数一旦超过 100k，完整 SCAN 永远不可能在
+# 单请求内完成 ⇒ ready 永不置位 ⇒ 每次列表都重复扫描并投影前 100k 行
+# （120k 下 3.8s / 102k 命令，total 永久只到 100000）。
+#
+# 现在回填自己驱动 SCAN，并按 r39 lifespan 回填的 batch+deadline 语义收口：
+# - 每批 ``EXECUTION_BACKFILL_BATCH_SIZE`` 个键一个 pipeline（ZADD 批量写）；
+# - 单请求墙钟 ``EXECUTION_BACKFILL_DEADLINE_S`` / 键数
+#   ``EXECUTION_BACKFILL_MAX_KEYS`` 任一触界即停，**SCAN 游标持久化**到
+#   ``{ns}:execution:index:backfill:cursor``，下一请求从断点续跑（ZADD 幂等，
+#   重复批次不会写脏）；
+# - 只有 SCAN 游标回到 0 才置 ready 并清游标——中途退出绝不谎报「索引就绪」。
+# 触界/失败都留 WARNING（含已扫描键数与游标），降级必须可观测。
+EXECUTION_BACKFILL_BATCH_SIZE = 1000
+# 单请求墙钟：120k 键的 Lua 投影约 3.2s + ZADD 约 0.9s（探针机实测），
+# 5s 过于贴边；10s 留 2x 余量，同时仍是硬上限（超界保留游标续跑）。
+EXECUTION_BACKFILL_DEADLINE_S = 10.0
+EXECUTION_BACKFILL_MAX_KEYS = 1_000_000
+EXECUTION_BACKFILL_CURSOR_TTL_S = 86_400
 # 平台视角发现「Redis 里存在但租户表没有」的命名空间：有界 SCAN 结果缓存，
 # 避免单租户平台视角每个请求都走一遍 keyspace。
 _EXECUTION_NS_CACHE_TTL_S = 30.0
@@ -809,51 +830,200 @@ def _execution_namespaces(request: Request, tenant: Optional[str], redis: Redis)
     return namespaces
 
 
-def _scan_execution_summaries(
-    redis: Redis, namespace: str
-) -> Tuple[Dict[str, Dict[str, Any]], bool]:
-    """索引不可用时的回退：有界 SCAN + 当块投影。返回 (summaries, truncated)。"""
-    result = scan_keys(
-        redis,
-        f"{namespace}:execution:*",
-        count=EXECUTION_SCAN_COUNT,
-        max_keys=EXECUTION_SCAN_MAX_KEYS,
-        max_rounds=EXECUTION_SCAN_MAX_ROUNDS,
-        time_budget_s=EXECUTION_SCAN_TIME_BUDGET_S,
-    )
-    keys = [key for key in result.keys if not _is_mechanism_key(key)]
-    return _project_summaries(redis, keys), result.truncated
+def _execution_backfill_cursor_key(namespace: str) -> str:
+    """回填断点（SCAN 游标）键（A2R28-02）。"""
+    return f"{namespace}:execution:index:backfill:cursor"
 
 
-def _backfill_execution_index(
-    redis: Redis, namespace: str, summaries: Dict[str, Dict[str, Any]]
-) -> None:
-    """存量库一次性回填：扫描结果 → 索引成员 + 就绪标记（失败下次重试）。"""
+def _load_backfill_cursor(redis: Redis, namespace: str) -> int:
+    """读取持久化 SCAN 游标；缺失/坏值按 0（从头开始，幂等安全）。"""
+    key = _execution_backfill_cursor_key(namespace)
     try:
-        index_key = execution_index_key(namespace)
+        raw = redis.get(key)
+    except Exception as exc:  # noqa: BLE001 - 读游标失败只影响续跑效率
+        logger.warning("执行索引回填游标读取失败（本次从头开始）: %s", exc)
+        return 0
+    if raw is None:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning("执行索引回填游标非法（%r），本次从头开始", raw)
+        return 0
+
+
+def _save_backfill_cursor(redis: Redis, namespace: str, cursor: int) -> bool:
+    """持久化 SCAN 游标；失败返回 False（下次从头重复扫描，结果仍正确）。"""
+    try:
+        redis.set(
+            _execution_backfill_cursor_key(namespace),
+            str(cursor),
+            ex=EXECUTION_BACKFILL_CURSOR_TTL_S,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - 游标写失败只影响续跑效率
+        logger.warning(
+            "执行索引回填游标写入失败（namespace=%s cursor=%s，下次从头重扫）: %s",
+            namespace, cursor, exc,
+        )
+        return False
+
+
+def _write_backfill_batch(
+    redis: Redis, namespace: str, summaries: Dict[str, Dict[str, Any]]
+) -> bool:
+    """一批 ZADD（score=start_time）到索引；失败返回 False（游标不前移）。"""
+    if not summaries:
+        return True
+    index_key = execution_index_key(namespace)
+    try:
         pipe = redis.pipeline(transaction=False)
-        count = 0
         for key, summary in summaries.items():
             pipe.zadd(
                 index_key,
                 {_execution_id_from_key(key): execution_start_time_score(summary)},
             )
-            count += 1
-            if count % 1000 == 0:
-                pipe.execute()
-                pipe = redis.pipeline(transaction=False)
-        pipe.set(execution_index_ready_key(namespace), "1")
         pipe.execute()
-        logger.info(
-            "执行索引回填完成（namespace=%s）：%d 个成员（一次性迁移，"
-            "此后列表走 ZSET 真分页）",
-            namespace,
-            len(summaries),
-        )
-    except Exception as exc:  # noqa: BLE001 - 回填失败不影响本次响应
+        return True
+    except Exception as exc:  # noqa: BLE001 - 本批失败：保留游标，下次重试
         logger.warning(
-            "执行索引回填失败（本次列表仍返回扫描结果，下次请求重试）: %s", exc
+            "执行索引回填批次写入失败（namespace=%s，%d 个成员，保留游标）: %s",
+            namespace, len(summaries), exc,
         )
+        return False
+
+
+def _backfill_execution_index(
+    redis: Redis,
+    namespace: str,
+    *,
+    status: Optional[str],
+    flow_id: Optional[str],
+    limit: int,
+    deadline: Optional[float] = None,
+) -> Tuple[List[ExecutionInfo], int, bool, bool]:
+    """分批回填执行索引（A2R28-02），返回
+    ``(本次采到的行, 索引基数, 是否完成, 是否全扫完成)``。
+
+    从持久化游标续跑；每批 ``EXECUTION_BACKFILL_BATCH_SIZE`` 个键一次 ZADD。
+    墙钟/键数触界即停并保留游标（下次续跑），SCAN 走到 0 才置 ready。
+    未完成时 ``索引基数`` 是已索引成员数（total 的下界，响应同时带
+    ``truncated=true``）。``全扫完成`` 表示本请求从游标 0 起跑并扫完全部键，
+    此时返回的行就是全量 top-N（调用方无需再读一遍索引）。
+    """
+    index_key = execution_index_key(namespace)
+    ready_key = execution_index_ready_key(namespace)
+    pattern = f"{namespace}:execution:*"
+    deadline_at = (
+        deadline
+        if deadline is not None
+        else time.monotonic() + EXECUTION_BACKFILL_DEADLINE_S
+    )
+    cursor = _load_backfill_cursor(redis, namespace)
+    start_cursor = cursor
+    scanned = 0
+    # 当页窗口的 top-N（score=start_time）：边扫边维护，内存 O(offset+size)，
+    # 而不是把全部摘要留在 console（120k 行）再排序。仅在「从 0 起跑且扫完」
+    # 时这 N 行就是全量 top-N，可直接作为列表结果（避免回填完成瞬间再投影一遍）。
+    collected: List[Tuple[float, str, Dict[str, Any]]] = []
+    matched = 0
+    complete = False
+    stop_reason: Optional[str] = None
+    batch_size = max(1, EXECUTION_BACKFILL_BATCH_SIZE)
+    window = max(1, limit)
+
+    try:
+        while True:
+            if scanned >= EXECUTION_BACKFILL_MAX_KEYS:
+                stop_reason = "max_keys"
+                break
+            if time.monotonic() >= deadline_at:
+                stop_reason = "deadline"
+                break
+
+            cursor, batch = redis.scan(
+                cursor=cursor, match=pattern, count=batch_size
+            )
+            keys = [
+                key if isinstance(key, str) else key.decode()
+                for key in batch
+                if not _is_mechanism_key(
+                    key if isinstance(key, str) else key.decode()
+                )
+            ]
+            scanned += len(keys)
+            summaries = _project_summaries(redis, keys) if keys else {}
+            if summaries and not _write_backfill_batch(redis, namespace, summaries):
+                # 本批没写进索引：游标不前移，下一请求重试同一批。
+                stop_reason = "write_failed"
+                break
+            for key, summary in summaries.items():
+                if status and (summary.get("status") or "") != status:
+                    continue
+                if flow_id and (summary.get("flow_id") or "") != flow_id:
+                    continue
+                matched += 1
+                score = execution_start_time_score(summary)
+                item = (score, key, summary)
+                if len(collected) < window:
+                    heapq.heappush(collected, item)
+                elif (score, key) > (collected[0][0], collected[0][1]):
+                    heapq.heapreplace(collected, item)
+
+            if cursor == 0:
+                complete = True
+                break
+            _save_backfill_cursor(redis, namespace, cursor)
+    except Exception as exc:  # noqa: BLE001 - 回填失败不影响本次列表响应
+        stop_reason = "scan_failed"
+        logger.warning(
+            "执行索引回填扫描失败（namespace=%s cursor=%s 已扫描=%d）: %s",
+            namespace, cursor, scanned, exc,
+        )
+
+    try:
+        indexed = int(redis.zcard(index_key) or 0)
+    except Exception as exc:  # noqa: BLE001 - 基数读失败按本批已写数计
+        logger.warning("执行索引基数读取失败（按已扫描数计）: %s", exc)
+        indexed = scanned
+
+    ordered = sorted(
+        collected, key=lambda item: (item[0], item[1]), reverse=True
+    )
+    rows = [
+        _execution_info_from_summary(key, summary)
+        for _score, key, summary in ordered
+    ]
+    # 过滤时 total 是匹配数（完整扫描时精确，中断时是下界）；无过滤时用
+    # ZCARD（索引成员数，含本请求已写入的成员）。
+    reported_total = matched if (status or flow_id) else indexed
+    # 从游标 0 起跑且扫完：这批 top-N 就是全量 top-N，可被调用方直接使用；
+    # 续跑后完成只覆盖部分键，调用方须改用索引页（否则顺序/内容不完整）。
+    full_scan = complete and start_cursor == 0
+
+    if complete:
+        try:
+            pipe = redis.pipeline(transaction=False)
+            pipe.set(ready_key, "1")
+            pipe.delete(_execution_backfill_cursor_key(namespace))
+            pipe.execute()
+            logger.info(
+                "执行索引回填完成（namespace=%s）：%d 个成员，本次扫描 %d 键"
+                "（此后列表走 ZSET 真分页）",
+                namespace, indexed, scanned,
+            )
+        except Exception as exc:  # noqa: BLE001 - 标记写失败：下次重跑同一批
+            logger.warning(
+                "执行索引回填完成但就绪标记写入失败（下次请求重试）: %s", exc
+            )
+        return rows, reported_total, True, full_scan
+
+    logger.warning(
+        "执行索引回填未完成（namespace=%s reason=%s）：已扫描 %d 键、索引 %d "
+        "成员、本次返回 %d 行；游标已保留，下次列表续跑",
+        namespace, stop_reason or "unknown", scanned, indexed, len(rows),
+    )
+    return rows, reported_total, False, False
 
 
 def _index_page_rows(
@@ -907,6 +1077,30 @@ def _index_page_rows(
         if len(ids) < chunk:
             break
     return rows[:limit], max(0, total - pruned)
+
+
+def _ready_namespaces_total(
+    redis: Redis, namespaces: List[str]
+) -> Optional[int]:
+    """全部命名空间索引就绪时返回 ZCARD 总和；任一未就绪/读失败返回 None。
+
+    A2R28-03 页界预检：``ZCARD`` 是 O(1)，先算总页界再决定是否投影。
+    有任一命名空间未就绪（存量回填中）时放弃预检——total 尚不可知，走
+    原有回填/分页路径（响应带 truncated）。
+    """
+    total = 0
+    for namespace in namespaces:
+        try:
+            if not redis.exists(execution_index_ready_key(namespace)):
+                return None
+            total += int(redis.zcard(execution_index_key(namespace)) or 0)
+        except Exception as exc:  # noqa: BLE001 - 读失败只跳过预检
+            logger.warning(
+                "执行索引基数读取失败（namespace=%s，跳过页界预检）: %s",
+                namespace, exc,
+            )
+            return None
+    return total
 
 
 def _filtered_index_rows(
@@ -991,18 +1185,26 @@ def _namespace_rows(
         logger.warning("执行索引就绪标记读取失败（按未就绪处理）: %s", exc)
 
     if not index_ready:
-        summaries, truncated = _scan_execution_summaries(redis, namespace)
-        rows = [
-            _execution_info_from_summary(key, summary)
-            for key, summary in summaries.items()
-        ]
-        if status:
-            rows = [row for row in rows if row.status == status]
-        if flow_id:
-            rows = [row for row in rows if row.flow_id == flow_id]
-        if not truncated:
-            _backfill_execution_index(redis, namespace, summaries)
-        return rows, len(rows), truncated
+        # A2R28-02：分批 + deadline 回填（可断点续跑）；完成前返回已采到的行
+        # 并标 truncated=true，完成瞬间直接走索引当页（只投影本页）。
+        rows, indexed, complete, full_scan = _backfill_execution_index(
+            redis,
+            namespace,
+            status=status,
+            flow_id=flow_id,
+            limit=offset + limit,
+            deadline=time.monotonic() + EXECUTION_BACKFILL_DEADLINE_S,
+        )
+        if not complete:
+            return rows, indexed, True
+        if full_scan:
+            return rows, indexed, False
+        if status or flow_id:
+            return _filtered_index_rows(
+                redis, namespace, offset, limit, status, flow_id
+            )
+        page_rows, total = _index_page_rows(redis, namespace, offset, limit)
+        return page_rows, total, False
 
     if status or flow_id:
         return _filtered_index_rows(
@@ -1162,9 +1364,24 @@ async def list_executions(
         # 全局窗口（offset+size）内的行，合并后排序切片——page=2 不再全扫。
         offset = (page - 1) * size
         need = offset + size
+        namespaces = _execution_namespaces(request, tenant, redis)
+        # A2R28-03：页界预检（无过滤时）。索引就绪的命名空间用 ZCARD 直接
+        # 算总数，offset 越界立即空返回——不再把 offset+size 行历史投影出来
+        # 再切片（120k 下 page=601 曾 4.24s / 122,404 命令，并冻结并发
+        # /health 4.15s）。ZCARD 是 O(1)，越界页只花几条命令。
+        if not status and not flow_id:
+            known_total = _ready_namespaces_total(redis, namespaces)
+            if known_total is not None and offset >= known_total:
+                return ExecutionListResponse(
+                    executions=[],
+                    total=known_total,
+                    page=page,
+                    size=size,
+                    truncated=False,
+                )
         executions = []
         total = 0
-        for namespace in _execution_namespaces(request, tenant, redis):
+        for namespace in namespaces:
             rows, ns_total, ns_truncated = _namespace_rows(
                 redis, namespace, 0, need, status, flow_id
             )
