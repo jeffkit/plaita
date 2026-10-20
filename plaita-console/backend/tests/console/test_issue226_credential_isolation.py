@@ -5,10 +5,11 @@
 - **A4**：`get_credential_record(name, tenant_id)` 跨租户必须返回 None（删掉
   同一过滤块后直接泄露 B 的凭据**明文**）；
 - **A5**：无 `PLAITA_CREDENTIALS_KEY` 时首次生成的密钥文件必须 `0o600`
-  （改成 `0o644` 后宿主其他用户可读 Fernet key，静态加密失效）。
+  （改成 `0o644` 后宿主其他用户可读 Fernet key，静态加密失效）。A67-05 起
+  由 `os.open(O_EXCL, 0o600)` 直接创建；历史实现是 `write_bytes` 后 chmod。
 
-负控：A3/A4 把两处 `if tenant_id is not None:` 改为 `if False:`；A5 把
-`os.chmod(key_file, 0o600)` 改为 `0o644`。证据见
+负控：A3/A4 把两处 `if tenant_id is not None:` 改为 `if False:`；A5 把创建
+模式改为 `0o644`（A67-05 前为 `os.chmod(key_file, 0o600)`）。证据见
 `docs/proofs/226-six-regression-gaps.md` 与 `docs/proofs/data/226-*`。
 """
 from __future__ import annotations
