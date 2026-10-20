@@ -7,12 +7,13 @@ import functools
 import inspect
 import json
 import logging
+import threading
 import time
 import uuid
 import weakref
 import sys
 import os
-from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Union
+from typing import Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -643,7 +644,238 @@ from .core import (
     bind_trusted_tenant,
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
-from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
+from plaita.core.url_redaction import (
+    _redact_env_value,
+    _scrub_exception_text,
+    _scrub_url_text,
+)
+
+
+# ---------------------------------------------------------------------------
+# 事件正典键形 / TTL（台账 r70 A69-02）
+#
+# console 手动发布与服务内部 resume 事件都必须写成引擎 ``RedisEventStorage``
+# 的形状（``events:{id}`` + ``types:{type}``），否则 ``get_event`` /
+# ``list_events`` / ``EventReconciler`` 看不到它们：Pub/Sub 丢通知后无法回扫。
+# 键构造与 TTL 解析集中在这里，禁止第三份实现。
+# ---------------------------------------------------------------------------
+
+DEFAULT_EVENT_KEY_PREFIX = "plaita:event:"
+DEFAULT_EVENT_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days，与订阅记录同源
+EVENT_TTL_ENV = "PLAITA_EVENT_TTL_SECONDS"
+
+
+def event_record_key(event_id: str, key_prefix: str = DEFAULT_EVENT_KEY_PREFIX) -> str:
+    """事件记录键（string，``Event.model_dump_json()``）。"""
+    return f"{key_prefix}events:{event_id}"
+
+
+def event_type_index_key(event_type: str, key_prefix: str = DEFAULT_EVENT_KEY_PREFIX) -> str:
+    """事件类型索引键（ZSET，member=event_id，score=event.timestamp）。"""
+    return f"{key_prefix}types:{event_type}"
+
+
+def event_retention_ttl_seconds() -> int:
+    """事件记录/类型索引的统一 TTL（秒）。
+
+    优先级：``PLAITA_EVENT_TTL_SECONDS`` > 默认 7 天。非法/非正数**不静默**降级
+    为无限额——记 WARNING 后回退默认（AGENTS.md「任何降级必须可观测」）。
+    """
+    raw = os.environ.get(EVENT_TTL_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_EVENT_TTL_SECONDS
+    try:
+        ttl = int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%s 非法（需正整数秒），事件保留期回退默认 %d 秒",
+            EVENT_TTL_ENV, _redact_env_value(raw), DEFAULT_EVENT_TTL_SECONDS,
+        )
+        return DEFAULT_EVENT_TTL_SECONDS
+    if ttl <= 0:
+        logger.warning(
+            "%s=%d 非正数（事件记录不允许永不过期），回退默认 %d 秒",
+            EVENT_TTL_ENV, ttl, DEFAULT_EVENT_TTL_SECONDS,
+        )
+        return DEFAULT_EVENT_TTL_SECONDS
+    return ttl
+
+
+# 写侧节流兜底清理（A69-03 §3.3-3）：console-only / 无 worker 部署里 janitor
+# 不跑，``store_event_sync`` 每次写顺便检查少量同桶成员。默认开启；失败只
+# WARNING，绝不影响落盘主路径。
+EVENT_INDEX_PRUNE_ON_WRITE_DISABLE_ENV = "PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE"
+_EVENT_INDEX_PRUNE_ON_WRITE_INTERVAL_SECONDS = 60.0
+_EVENT_INDEX_PRUNE_ON_WRITE_MAX_MEMBERS = 8
+#: ``{type_key: {"last": monotonic, "offset": 下一个起检位置}}``——offset 轮转
+#: 保证兜底清理能覆盖整桶，而不是永远只看 score 最小的那 8 个。
+_event_index_write_prune_state: Dict[str, Dict[str, float]] = {}
+_event_index_write_prune_lock = threading.Lock()
+
+
+def _prune_event_index_on_write(
+    client, type_key: str, key_prefix: str,
+) -> None:
+    """写侧节流清理：每 type 每 60s 检查至多 8 个成员，缺失即 ZREM。
+
+    这是兜底而不是主路径（主路径是读时惰性清理 + ``IndexJanitor``）：只覆盖
+    「有写者、无 worker/janitor」的部署形态。检查窗口按 ``offset`` 轮转（每次
+    前进 8 个成员），避免小窗口永远只覆盖同一批成员。任何失败只 WARNING。
+    """
+    if os.environ.get(EVENT_INDEX_PRUNE_ON_WRITE_DISABLE_ENV, "").strip() == "1":
+        return
+    now = time.monotonic()
+    with _event_index_write_prune_lock:
+        entry = _event_index_write_prune_state.get(type_key)
+        if (
+            entry is not None
+            and now - float(entry.get("last", 0.0)) < _EVENT_INDEX_PRUNE_ON_WRITE_INTERVAL_SECONDS
+        ):
+            return
+        # 桶名随事件类型增长；给进程级状态一个硬上界，超限整体丢弃（最坏只是
+        # 提前再做一次兜底清理，不丢数据）。
+        if len(_event_index_write_prune_state) >= 1024 and entry is None:
+            _event_index_write_prune_state.clear()
+        entry = _event_index_write_prune_state.setdefault(
+            type_key, {"last": 0.0, "offset": 0.0}
+        )
+        entry["last"] = now
+    try:
+        card = int(client.zcard(type_key))
+        offset = int(entry.get("offset", 0))
+        if offset >= card:
+            offset = 0
+        raw_members = client.zrange(
+            type_key, offset, offset + _EVENT_INDEX_PRUNE_ON_WRITE_MAX_MEMBERS - 1
+        )
+        members = [_as_str(m) for m in raw_members]
+        # 下一轮从这里继续；到桶尾则回到起点。
+        entry["offset"] = 0.0 if offset + len(members) >= card else float(
+            offset + len(members)
+        )
+        if not members:
+            return
+        pipe = client.pipeline(transaction=False)
+        for event_id in members:
+            pipe.exists(event_record_key(event_id, key_prefix))
+        flags = pipe.execute()
+        missing = [eid for eid, ok in zip(members, flags) if not int(ok)]
+        if missing:
+            client.zrem(type_key, *missing)
+            logger.info(
+                "事件索引写侧兜底清理: 桶 %s 检查 %d 个成员，移除 %d 个载荷缺失成员",
+                type_key, len(members), len(missing),
+            )
+    except Exception as exc:  # noqa: BLE001 — 兜底失败不影响落盘
+        logger.warning(
+            "事件索引写侧兜底清理失败（不影响事件落盘）: %s",
+            _scrub_exception_text(exc),
+        )
+
+
+def store_event_sync(
+    client,
+    event: Event,
+    ttl: int,
+    key_prefix: str = DEFAULT_EVENT_KEY_PREFIX,
+) -> None:
+    """同步写正典事件（console / base service 共用）。
+
+    与 ``RedisEventStorage.store_event`` 完全同形：记录 string + 类型 ZSET +
+    同 TTL。同步客户端由调用方提供（console 的 ``app.state.redis`` /
+    base service 的 ``_redis_client``），用于绕开 aioredis 跨 loop 问题。
+    写后按 ``PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE`` 做有界兜底清理。
+    """
+    record_key = event_record_key(event.event_id, key_prefix)
+    type_key = event_type_index_key(event.event_type, key_prefix)
+    pipe = client.pipeline()
+    pipe.set(record_key, event.model_dump_json(), ex=ttl)
+    pipe.zadd(type_key, {event.event_id: event.timestamp})
+    pipe.expire(type_key, ttl)
+    pipe.execute()
+    _prune_event_index_on_write(client, type_key, key_prefix)
+
+
+# 索引清扫状态：进程内游标（不写 Redis 永久键，重启从头扫，幂等）。
+# 结构：``{index_key: {"cursor": int, "pending": [member, ...]}}``。
+
+
+async def _adrain_index_members(
+    redis, key: str, state: Dict[str, Any], allowance: int, scan_name: str,
+) -> List[str]:
+    """从索引键的有界游标里取出至多 ``allowance`` 个成员。
+
+    ``SCAN`` 家族只保证「最终覆盖」，单次返回条数与 ``count`` 无关；超出预算
+    的成员放进进程内 ``pending``，下一 tick 继续检查——游标只在整批处理完后
+    才前进（不丢成员）。``scan_name`` 为 ``zscan``（事件 ZSET）或 ``sscan``
+    （订阅 SET）。
+    """
+    state.setdefault("cursor", 0)
+    state.setdefault("pending", [])
+    state.setdefault("cycle_done", False)
+    members: List[str] = []
+    while allowance > 0:
+        pending = state["pending"]
+        if pending:
+            take = pending[:allowance]
+            del pending[: len(take)]
+            members.extend(take)
+            allowance -= len(take)
+            if allowance <= 0:
+                break
+            if state.get("cycle_done"):
+                # 本轮完整遍历已结束，pending 也清空了：不再同一个 tick 里
+                # 立刻重开一轮（否则小预算下会把预算浪费在重复检查上）。
+                break
+        scan = getattr(redis, scan_name)
+        raw_cursor, batch = await scan(
+            key, state["cursor"], count=max(1, min(allowance, 100))
+        )
+        if scan_name == "zscan":
+            batch_members = [
+                _as_str(member) for member, _score in batch
+            ]
+        else:
+            batch_members = [_as_str(member) for member in batch]
+        state["cursor"] = int(raw_cursor)
+        state["pending"].extend(batch_members)
+        if state["cursor"] == 0:
+            state["cycle_done"] = True
+            if not state["pending"]:
+                break
+            # pending 还有剩就留到下一 tick（allowance 可能已耗尽）。
+            if allowance <= 0:
+                break
+        elif not batch_members and not state["pending"]:
+            # 防御：游标未归零却空批（异常服务端）——本 tick 放弃该桶。
+            break
+    return members
+
+
+def _prune_state_finished(state: Dict[str, Any]) -> bool:
+    """游标已回到 0 且 pending 已排空：一个完整遍历周期结束。"""
+    return int(state.get("cursor", 0)) == 0 and not state.get("pending")
+
+
+def _as_str(value) -> str:
+    """把 zset/set member、scan key 归一化为 ``str``（bytes 客户端也安全）。
+
+    ``decode_responses=False``（生产 ``aioredis.from_url`` 默认）下
+    ``zrangebyscore`` / ``zscan`` / ``scan`` 返回 **bytes**。旧代码把 bytes
+    ``event_id`` 直接 f-string 进 ``events:{id}`` 键（变成
+    ``...:b'<uuid>'``），与写入的 str 键不符 ⇒ 读面/回扫恒空。
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8")
+    return str(value)
+
+
+async def _exists_flags(redis, keys: List[str]) -> List[int]:
+    pipe = redis.pipeline(transaction=False)
+    for key in keys:
+        pipe.exists(key)
+    return [int(flag) for flag in await pipe.execute()]
+
 
 
 class RedisEventStorage(EventStorage):
@@ -664,7 +896,11 @@ class RedisEventStorage(EventStorage):
         self.redis_url = redis_url
         self.key_prefix = key_prefix
         self.redis = None
-        self.ttl = ttl if ttl is not None else self.DEFAULT_TTL
+        # 优先级：显式 ttl > PLAITA_EVENT_TTL_SECONDS > 默认 7d（A69-02）。
+        self.ttl = ttl if ttl is not None else event_retention_ttl_seconds()
+        # A69-03：索引清扫的进程内游标/待检查成员（见 prune_indexes）。
+        self._index_prune_state: Dict[str, Dict[str, Any]] = {}
+        self._index_prune_rotation = 0
     
     async def initialize(self):
         """初始化Redis连接（按事件循环缓存客户端）。
@@ -703,16 +939,16 @@ class RedisEventStorage(EventStorage):
             self._lock_loop = loop
     
     async def store_event(self, event: Event) -> str:
-        """存储事件"""
+        """存储事件（正典键形见 :func:`event_record_key` / :func:`event_type_index_key`）"""
         await self.initialize()
         
         # 将事件序列化为JSON
         event_data = event.model_dump_json()
         
-        event_key = f"{self.key_prefix}events:{event.event_id}"
+        event_key = event_record_key(event.event_id, self.key_prefix)
         await self.redis.set(event_key, event_data, ex=self.ttl)
         
-        type_key = f"{self.key_prefix}types:{event.event_type}"
+        type_key = event_type_index_key(event.event_type, self.key_prefix)
         await self.redis.zadd(type_key, {event.event_id: event.timestamp})
         await self.redis.expire(type_key, self.ttl)
         
@@ -728,8 +964,8 @@ class RedisEventStorage(EventStorage):
         
         for event in events:
             event_data = event.model_dump_json()
-            event_key = f"{self.key_prefix}events:{event.event_id}"
-            type_key = f"{self.key_prefix}types:{event.event_type}"
+            event_key = event_record_key(event.event_id, self.key_prefix)
+            type_key = event_type_index_key(event.event_type, self.key_prefix)
             
             pipe.set(event_key, event_data, ex=self.ttl)
             pipe.zadd(type_key, {event.event_id: event.timestamp})
@@ -744,7 +980,7 @@ class RedisEventStorage(EventStorage):
         """获取事件"""
         await self.initialize()
         
-        event_key = f"{self.key_prefix}events:{event_id}"
+        event_key = event_record_key(event_id, self.key_prefix)
         event_data = await self.redis.get(event_key)
         
         if not event_data:
@@ -759,16 +995,10 @@ class RedisEventStorage(EventStorage):
     def _as_str(value) -> str:
         """把 zset member / scan key 归一化为 ``str``（bytes 客户端也安全）。
 
-        ``move to module level``：``decode_responses=False``（生产
-        ``aioredis.from_url`` 默认）下 ``zrangebyscore`` / ``scan`` 返回
-        **bytes**。旧代码把 bytes ``event_id`` 直接 f-string 进
-        ``f"{prefix}events:{event_id}"``（变成 ``...events:b'<uuid>'``），与
-        ``store_event`` 写入的 str 键不符，mget 全 miss ⇒ ``list_events`` 在
-        生产连接配置下**恒返回空**（fakeredis 已复现：显式类型 []、全量 []）。
+        ``move to module level``：解码实现收敛到模块级 :func:`_as_str`，本方法
+        仅保留为既有私有调用入口（#79/#109/#110 的调用点不必改）。
         """
-        if isinstance(value, (bytes, bytearray)):
-            return value.decode("utf-8")
-        return str(value)
+        return _as_str(value)
 
     @staticmethod
     def _zset_member_ids(event_ids) -> List[str]:
@@ -804,21 +1034,24 @@ class RedisEventStorage(EventStorage):
 
     async def _zrange_entries(
         self, type_keys: List[str], min_score, max_score, limit: int,
-    ) -> List[tuple]:
-        """把每个类型索引的前 ``limit`` 条 ``(score, event_id)`` 并起来。
+    ) -> List[Tuple[float, str, str]]:
+        """把每个类型索引的前 ``limit`` 条 ``(score, event_id, type_key)`` 并起来。
 
         #79：**不再只遍历前 10 个类型**。每个类型各取 ``limit`` 条就足以复原
         「全类型里最早的 ``limit`` 条」——任何类型里第 ``limit + 1`` 早的条目都
         不可能进入全局前 ``limit``，因此这样并合并不会漏条目。
+
+        A69-03：返回 ``type_key`` 以便 ``list_events`` 对「载荷缺失」的成员按桶
+        分组做惰性 ``ZREM``（读一次即收敛，避免下次重复 ERROR）。
         """
-        found: List[tuple] = []
+        found: List[Tuple[float, str, str]] = []
         for type_key in type_keys:
             entries = await self.redis.zrangebyscore(
                 type_key, min_score, max_score, 
                 start=0, num=limit, withscores=True
             )
             for member, score in entries:
-                found.append((float(score), self._as_str(member)))
+                found.append((float(score), self._as_str(member), type_key))
         return found
 
     async def list_events(self, event_type: Optional[str] = None, 
@@ -858,11 +1091,14 @@ class RedisEventStorage(EventStorage):
             type_keys, min_score, max_score, limit=limit
         )
         # 同一 event_id 理论上只属于一个类型索引；防御性去重（保留最早 score）。
+        # A69-03：同时记住它所在的桶，载荷缺失时按桶清理。
         by_id: Dict[str, float] = {}
-        for score, event_id in entries:
+        id_to_type: Dict[str, str] = {}
+        for score, event_id, type_key in entries:
             current = by_id.get(event_id)
             if current is None or score < current:
                 by_id[event_id] = score
+                id_to_type[event_id] = type_key
 
         selected = sorted(
             ((event_id, score) for event_id, score in by_id.items()),
@@ -872,21 +1108,27 @@ class RedisEventStorage(EventStorage):
             return []
 
         event_keys = [
-            f"{self.key_prefix}events:{event_id}" for event_id, _score in selected
+            event_record_key(event_id, self.key_prefix)
+            for event_id, _score in selected
         ]
         event_data_list = await self.redis.mget(*event_keys)
 
         result: List[Event] = []
+        missing_by_type: Dict[str, List[str]] = {}
         for (event_id, _score), event_data in zip(selected, event_data_list):
             if not event_data:
                 # #79：索引里有 member 但载荷缺失（过期/被逐出/半写）是数据面
                 # 损坏——必须**响亮**（ERROR）而不是静默跳过，否则运维看不到
-                # 回扫正在丢事件。
+                # 回扫正在丢事件。A69-03：同一轮把该成员移出索引（惰性清理），
+                # 否则同一条损坏会每轮重复 ERROR。
                 logger.error(
                     "事件存储: 索引成员载荷缺失（已过期/被逐出/半写）: "
                     "event_id=%s key=%s",
-                    event_id, f"{self.key_prefix}events:{event_id}",
+                    event_id, event_record_key(event_id, self.key_prefix),
                 )
+                type_key = id_to_type.get(event_id)
+                if type_key:
+                    missing_by_type.setdefault(type_key, []).append(event_id)
                 continue
             try:
                 result.append(Event.model_validate_json(event_data))
@@ -896,9 +1138,127 @@ class RedisEventStorage(EventStorage):
                     _scrub_exception_text(exc),
                 )
 
+        if missing_by_type:
+            await self._prune_missing_event_members(missing_by_type)
+
         # 以载荷里的时间戳为权威再排一次（与 zset score 理论一致；防御分数漂移）。
         result.sort(key=lambda event: (event.timestamp, event.event_id))
         return result
+
+    async def _prune_missing_event_members(
+        self, missing_by_type: Dict[str, List[str]],
+    ) -> int:
+        """读路径惰性清理：把已确认载荷缺失的成员按类型桶 ``ZREM``。
+
+        失败只 WARNING（读结果已经返回；下一次读会重试清理），不清空调用方
+        结果。返回移除的成员数（供日志/指标读取）。
+        """
+        total = 0
+        try:
+            pipe = self.redis.pipeline(transaction=False)
+            for type_key, event_ids in missing_by_type.items():
+                total += len(event_ids)
+                pipe.zrem(type_key, *event_ids)
+            await pipe.execute()
+        except Exception as exc:  # noqa: BLE001 — 清理失败不影响读路径
+            logger.warning(
+                "事件索引惰性清理失败（下次读重试）: %s",
+                _scrub_exception_text(exc),
+            )
+            return 0
+        logger.info(
+            "事件索引惰性清理: 移除 %d 个载荷缺失成员（%d 个类型桶）",
+            total, len(missing_by_type),
+        )
+        return total
+
+    async def prune_indexes(self, budget: int = 500) -> Tuple[int, int, int]:
+        """有界清扫类型索引：剔除数据键已消失的成员（A69-03）。
+
+        返回 ``(examined, pruned, errors)``。语义：
+
+        * **只按 EXISTS 判死活**——score 是事件时间戳（生产者可控/可回填），
+          按 score 裁剪会误删「时间戳老但载荷仍活」的事件；
+        * 每 tick 最多**检查** ``budget`` 个成员（不是删除数），保证高存活桶也
+          不会单 tick 无界；游标在进程内，重启从头扫，幂等；
+        * 单个桶失败（WRONGTYPE 等）只 WARNING 并计入 ``errors``，继续其余桶。
+        """
+        await self.initialize()
+        try:
+            budget = max(1, int(budget))
+        except (TypeError, ValueError):
+            budget = 500
+
+        try:
+            type_keys = await self._scan_type_keys()
+        except Exception as exc:  # noqa: BLE001 — 本 tick 放弃，下一轮重试
+            logger.warning(
+                "事件索引清扫: SCAN 类型桶失败（本 tick 跳过）: %s",
+                _scrub_exception_text(exc),
+            )
+            return 0, 0, 1
+
+        live_keys = set(type_keys)
+        for stale_key in [k for k in self._index_prune_state if k not in live_keys]:
+            self._index_prune_state.pop(stale_key, None)
+        if not type_keys:
+            return 0, 0, 0
+
+        # 轮转起点：budget 很小时（如 1）多个桶也能轮流被检查，不会饿死后面的桶。
+        rotation = self._index_prune_rotation % len(type_keys)
+        type_keys = type_keys[rotation:] + type_keys[:rotation]
+        self._index_prune_rotation = (rotation + 1) % len(type_keys)
+
+        per_key = max(1, budget // len(type_keys))
+        remaining = budget
+        examined = pruned = errors = 0
+        for type_key in type_keys:
+            if remaining <= 0:
+                break
+            allowance = min(remaining, per_key)
+            try:
+                members, removed = await self._prune_one_event_bucket(type_key, allowance)
+            except Exception as exc:  # noqa: BLE001 — 单桶失败不阻断其余桶
+                errors += 1
+                logger.warning(
+                    "事件索引清扫: 桶 %s 失败（继续其余桶，下 tick 重试）: %s",
+                    type_key, _scrub_exception_text(exc),
+                )
+                continue
+            examined += len(members)
+            pruned += removed
+            remaining -= len(members)
+        return examined, pruned, errors
+
+    async def _prune_one_event_bucket(
+        self, type_key: str, allowance: int,
+    ) -> Tuple[List[str], int]:
+        """检查单桶至多 ``allowance`` 个成员并 ZREM 缺失者。
+
+        返回 ``(已检查成员, 移除数)``。
+        """
+        state = self._index_prune_state.setdefault(type_key, {"cursor": 0, "pending": []})
+        members = await _adrain_index_members(
+            self.redis, type_key, state, allowance, "zscan"
+        )
+        self._drop_finished_prune_state(type_key, state)
+        if not members:
+            return [], 0
+        flags = await _exists_flags(
+            self.redis, [event_record_key(eid, self.key_prefix) for eid in members]
+        )
+        missing = [eid for eid, ok in zip(members, flags) if not ok]
+        if missing:
+            await self.redis.zrem(type_key, *missing)
+            logger.info(
+                "事件索引清扫: 桶 %s 检查 %d 个成员，移除 %d 个载荷缺失成员",
+                type_key, len(members), len(missing),
+            )
+        return members, len(missing)
+
+    def _drop_finished_prune_state(self, key: str, state: Dict[str, Any]) -> None:
+        if _prune_state_finished(state):
+            self._index_prune_state.pop(key, None)
     
     async def delete_event(self, event_id: str) -> bool:
         """删除事件"""
@@ -910,11 +1270,11 @@ class RedisEventStorage(EventStorage):
             return False
             
         # 从事件类型索引中移除
-        type_key = f"{self.key_prefix}types:{event.event_type}"
+        type_key = event_type_index_key(event.event_type, self.key_prefix)
         await self.redis.zrem(type_key, event_id)
         
         # 删除事件数据
-        event_key = f"{self.key_prefix}events:{event_id}"
+        event_key = event_record_key(event_id, self.key_prefix)
         result = await self.redis.delete(event_key)
         
         return result > 0
@@ -953,6 +1313,9 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         self.key_prefix = key_prefix
         self.redis = None
         self.lock = asyncio.Lock()  # 用于原子操作
+        # A69-03：索引清扫的进程内游标/待检查成员（见 prune_indexes）。
+        self._index_prune_state: Dict[str, Dict[str, Any]] = {}
+        self._index_prune_rotation = 0
 
     async def initialize(self):
         """初始化Redis连接（按事件循环缓存客户端）。
@@ -1060,17 +1423,22 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         await self.initialize()
         
         # 确定使用哪个索引（#110：correlation_id 选择性更高，优先）
+        index_key: Optional[str] = None
         if correlation_id:
             key = f"{self.key_prefix}correlation:{correlation_id}"
+            index_key = key
             subscription_ids = await self.redis.smembers(key)
         elif event_type:
             key = f"{self.key_prefix}type:{event_type}"
+            index_key = key
             subscription_ids = await self.redis.smembers(key)
         elif flow_id:
             key = f"{self.key_prefix}flow:{flow_id}"
+            index_key = key
             subscription_ids = await self.redis.smembers(key)
         elif node_id:
             key = f"{self.key_prefix}node:{node_id}"
+            index_key = key
             subscription_ids = await self.redis.smembers(key)
         else:
             data_keys = []
@@ -1104,12 +1472,36 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
             else:
                 str_ids.append(sid)
         
-        # 批量获取订阅数据
+        # 批量获取订阅数据（A69-03：一次 MGET 替代逐条 GET 的 N+1）。
+        # 解析语义保持不变：缺失跳过；畸形仍抛 EventError（数据面损坏要响亮）。
+        data_keys = [f"{self.key_prefix}data:{sid}" for sid in str_ids]
+        raw_list = await self.redis.mget(*data_keys)
         result = []
-        for subscription_id in str_ids:
-            subscription = await self.get_subscription(subscription_id)
-            if subscription:
-                result.append(subscription)
+        missing_ids: List[str] = []
+        for subscription_id, raw in zip(str_ids, raw_list):
+            if not raw:
+                missing_ids.append(subscription_id)
+                continue
+            try:
+                result.append(EventSubscription.model_validate_json(raw))
+            except Exception as e:
+                raise EventError(f"解析订阅数据失败: {e}")
+
+        # A69-03 读时惰性清理：被选中的索引桶里，data 键已消失的成员一次 SREM。
+        # 全量 SCAN 路径没有桶信息，交给 IndexJanitor；清理失败只 WARNING，
+        # 不影响本次返回（下一次读会重试）。
+        if index_key and missing_ids:
+            try:
+                await self.redis.srem(index_key, *missing_ids)
+                logger.info(
+                    "订阅索引惰性清理: 桶 %s 移除 %d 个数据缺失成员（返回 %d 条）",
+                    index_key, len(missing_ids), len(result),
+                )
+            except Exception as exc:  # noqa: BLE001 — 清理失败不影响读路径
+                logger.warning(
+                    "订阅索引惰性清理失败（下次读重试）: %s",
+                    _scrub_exception_text(exc),
+                )
 
         # #110（r5）：索引只是候选集，给出的每个条件都要生效（AND），与 memory /
         # sqlalchemy 的 list 过滤同口径。过滤不产生额外 Redis 往返。
@@ -1127,6 +1519,101 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
             result = [row for row in result if _keep(row)]
 
         return result
+
+    #: 订阅四索引的桶前缀（``prune_indexes`` 覆盖全部冷/热桶）。
+    _INDEX_BUCKET_PATTERNS = ("type:", "correlation:", "flow:", "node:")
+
+    async def prune_indexes(self, budget: int = 500) -> Tuple[int, int, int]:
+        """有界清扫订阅四索引：剔除 data 键已消失的成员（A69-03）。
+
+        返回 ``(examined, pruned, errors)``。四个 pattern（type/correlation/
+        flow/node）分别 ``SCAN``，每个桶用 ``SSCAN`` 游标 + 进程内 pending；
+        每 tick 最多检查 ``budget`` 个成员。``subscription_id`` 全局唯一不复用，
+        因此 ``EXISTS data`` 为 0 就可以安全 ``SREM``，不会误删同 id 的新数据。
+        单桶失败只 WARNING 并计入 ``errors``，不终止其余桶。
+        """
+        await self.initialize()
+        try:
+            budget = max(1, int(budget))
+        except (TypeError, ValueError):
+            budget = 500
+
+        buckets: List[str] = []
+        errors = 0
+        for pattern in self._INDEX_BUCKET_PATTERNS:
+            try:
+                keys = []
+                cursor = 0
+                while True:
+                    cursor, batch = await self.redis.scan(
+                        cursor, match=f"{self.key_prefix}{pattern}*", count=100
+                    )
+                    keys.extend(_as_str(k) for k in batch)
+                    if cursor == 0:
+                        break
+                buckets.extend(keys)
+            except Exception as exc:  # noqa: BLE001 — 单 pattern 失败不阻断其余
+                errors += 1
+                logger.warning(
+                    "订阅索引清扫: SCAN %s* 失败（继续其余 pattern）: %s",
+                    f"{self.key_prefix}{pattern}", _scrub_exception_text(exc),
+                )
+
+        live_keys = set(buckets)
+        for stale_key in [k for k in self._index_prune_state if k not in live_keys]:
+            self._index_prune_state.pop(stale_key, None)
+        if not buckets:
+            return 0, 0, errors
+
+        rotation = self._index_prune_rotation % len(buckets)
+        buckets = buckets[rotation:] + buckets[:rotation]
+        self._index_prune_rotation = (rotation + 1) % len(buckets)
+
+        per_key = max(1, budget // len(buckets))
+        remaining = budget
+        examined = pruned = 0
+        for bucket in buckets:
+            if remaining <= 0:
+                break
+            allowance = min(remaining, per_key)
+            try:
+                members, removed = await self._prune_one_subscription_bucket(
+                    bucket, allowance
+                )
+            except Exception as exc:  # noqa: BLE001 — 单桶失败不阻断其余桶
+                errors += 1
+                logger.warning(
+                    "订阅索引清扫: 桶 %s 失败（继续其余桶，下 tick 重试）: %s",
+                    bucket, _scrub_exception_text(exc),
+                )
+                continue
+            examined += len(members)
+            pruned += removed
+            remaining -= len(members)
+        return examined, pruned, errors
+
+    async def _prune_one_subscription_bucket(
+        self, bucket: str, allowance: int,
+    ) -> Tuple[List[str], int]:
+        state = self._index_prune_state.setdefault(bucket, {"cursor": 0, "pending": []})
+        members = await _adrain_index_members(
+            self.redis, bucket, state, allowance, "sscan"
+        )
+        if _prune_state_finished(state):
+            self._index_prune_state.pop(bucket, None)
+        if not members:
+            return [], 0
+        flags = await _exists_flags(
+            self.redis, [f"{self.key_prefix}data:{sid}" for sid in members]
+        )
+        missing = [sid for sid, ok in zip(members, flags) if not ok]
+        if missing:
+            await self.redis.srem(bucket, *missing)
+            logger.info(
+                "订阅索引清扫: 桶 %s 检查 %d 个成员，移除 %d 个数据缺失成员",
+                bucket, len(members), len(missing),
+            )
+        return members, len(missing)
     
     async def delete_subscription(self, subscription_id: str) -> bool:
         """删除事件订阅"""

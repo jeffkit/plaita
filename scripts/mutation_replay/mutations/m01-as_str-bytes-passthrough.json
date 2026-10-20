@@ -7,6 +7,6 @@
   "expect_fail": [
     "tests/unit/test_issue79_event_storage_list_events.py::test_bytes_client_returns_stored_event"
   ],
-  "old": "        return value.decode(\"utf-8\")",
-  "new": "        return value"
+  "old": "    if isinstance(value, (bytes, bytearray)):\n        return value.decode(\"utf-8\")\n    return str(value)",
+  "new": "    if isinstance(value, (bytes, bytearray)):\n        return value\n    return str(value)"
 }

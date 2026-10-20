@@ -1,13 +1,13 @@
 {
- "name": "m110-redis-list-events-type-prefix",
- "issue": "110",
- "concern": "D3-split",
- "file": "plaita/event/redis.py",
- "rationale": "全量分支退回 split(':')[-1] ⇒ 含 ':' 的 event_type 被截断、该类型事件静默丢失",
- "expect_fail": [
-  "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_all_types_branch_keeps_colon_event_type",
-  "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
- ],
- "old": "            type_keys = await self._scan_type_keys()",
- "new": "            type_keys = [\n                f\"{self.key_prefix}types:{key.split(':')[-1]}\"\n                for key in await self._scan_type_keys()\n            ]"
+  "name": "m110-redis-list-events-type-prefix",
+  "issue": "110",
+  "concern": "D3-split",
+  "file": "plaita/event/redis.py",
+  "rationale": "全量分支退回 split(':')[-1] ⇒ 含 ':' 的 event_type 被截断、该类型事件静默丢失",
+  "expect_fail": [
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_all_types_branch_keeps_colon_event_type",
+    "tests/unit/test_issue109_110_r3_parity.py::Test110ListEventsProductionConnection::test_reconciler_scan_once_replays_colon_events"
+  ],
+  "old": "        if event_type:\n            type_keys = [f\"{self.key_prefix}types:{event_type}\"]\n        else:\n            type_keys = await self._scan_type_keys()",
+  "new": "        if event_type:\n            type_keys = [f\"{self.key_prefix}types:{event_type}\"]\n        else:\n            type_keys = [\n                f\"{self.key_prefix}types:{key.split(':')[-1]}\"\n                for key in await self._scan_type_keys()\n            ]"
 }

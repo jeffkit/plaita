@@ -9,6 +9,6 @@
     "tests/unit/test_issue109_110_event_redis_parity.py::Test110CorrelationIndexPriority::test_equivalent_to_correlation_only_query",
     "tests/unit/test_issue109_110_event_redis_parity.py::Test110CorrelationIndexPriority::test_cross_backend_parity_with_memory"
   ],
-  "old": "        if correlation_id:\n            key = f\"{self.key_prefix}correlation:{correlation_id}\"\n            subscription_ids = await self.redis.smembers(key)\n        elif event_type:\n            key = f\"{self.key_prefix}type:{event_type}\"\n            subscription_ids = await self.redis.smembers(key)",
-  "new": "        if event_type:\n            key = f\"{self.key_prefix}type:{event_type}\"\n            subscription_ids = await self.redis.smembers(key)\n        elif correlation_id:\n            key = f\"{self.key_prefix}correlation:{correlation_id}\"\n            subscription_ids = await self.redis.smembers(key)"
+  "old": "        if correlation_id:\n            key = f\"{self.key_prefix}correlation:{correlation_id}\"\n            index_key = key\n            subscription_ids = await self.redis.smembers(key)\n        elif event_type:\n            key = f\"{self.key_prefix}type:{event_type}\"\n            index_key = key\n            subscription_ids = await self.redis.smembers(key)",
+  "new": "        if event_type:\n            key = f\"{self.key_prefix}type:{event_type}\"\n            index_key = key\n            subscription_ids = await self.redis.smembers(key)\n        elif correlation_id:\n            key = f\"{self.key_prefix}correlation:{correlation_id}\"\n            index_key = key\n            subscription_ids = await self.redis.smembers(key)"
 }

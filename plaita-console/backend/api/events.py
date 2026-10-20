@@ -34,6 +34,10 @@ try:  # A2R24-01：异常文本脱敏
 except ImportError:
     from error_contract import scrubbed_detail  # type: ignore
 
+# A69-02：console 发布事件写引擎正典键形，与回扫/引擎读面同源。
+from plaita.event.core import Event
+from plaita.event.redis import event_retention_ttl_seconds, store_event_sync
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -99,10 +103,14 @@ class SubscriptionListResponse(BaseModel):
     skipped: int = 0
 
 
-#: A55-S5：事件类型是 Redis 键的一部分（``plaita:event:type:{event_type}``），
+#: A55-S5：事件类型是 Redis 键的一部分（``plaita:event:types:{event_type}``），
 #: 只能是受限字符集；空白/控制字符会制造怪异键名，``:dlq`` 后缀会被
 #: 队列发现逻辑误认成死信。
 _EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9._:/=-]{1,128}$")
+
+#: A69-02：引擎正典事件记录键前缀（``plaita:event:events:{id}``）。同 id 的
+#: 旧 console 形（``plaita:event:{id}``）仍可能并存，列表按此判定优先级。
+_CANONICAL_EVENT_KEY_PREFIX = "plaita:event:events:"
 
 
 class PublishEventRequest(StrictRequestModel):
@@ -164,7 +172,10 @@ async def list_events(
     keys = _scan_keys(redis, pattern)
     tenant = tenant_scope(request) if request is not None else None
 
-    events: List[EventInfo] = []
+    events_by_id: Dict[str, EventInfo] = {}
+    # 同 id 两形并存时 canonical 优先（A69-02）：键形决定覆盖顺序，而不是
+    # SCAN 的随机顺序。
+    canonical_ids: set = set()
     skipped = 0
     for key in keys:
         if any(seg in key for seg in (":subscription:", ":processing:", ":type:", ":types:", ":channel:")):
@@ -185,19 +196,29 @@ async def list_events(
             # data 里的 tenant_id 是载荷，绝不作为归属判据（#191）。
             if tenant and _record_tenant(info) != tenant:
                 continue
-            events.append(EventInfo(
-                event_id=info.get("event_id", key.split(":")[-1]),
+            event_id = info.get("event_id", key.split(":")[-1])
+            is_canonical = key.startswith(_CANONICAL_EVENT_KEY_PREFIX)
+            if event_id in events_by_id and not is_canonical:
+                if event_id in canonical_ids:
+                    continue
+            events_by_id[event_id] = EventInfo(
+                event_id=event_id,
                 event_type=info.get("event_type", "unknown"),
                 data=info.get("data", {}),
                 timestamp=info.get("timestamp"),
                 correlation_id=info.get("correlation_id"),
                 source=info.get("source"),
-            ))
+            )
+            if is_canonical:
+                canonical_ids.add(event_id)
+            else:
+                canonical_ids.discard(event_id)
         except Exception:  # noqa: BLE001 - 单键读取失败计入 degraded
             # A2R19-04：读不到的键不得静默混入「空列表」。
             skipped += 1
             continue
 
+    events = list(events_by_id.values())
     if skipped:
         logger.warning(
             "事件列表读取降级：%d/%d 个键读取失败（返回 %d 条，degraded=true）",
@@ -240,42 +261,51 @@ async def publish_event(
             body.event_type, tenant, client_tenant,
         )
 
-    event_id = str(uuid.uuid4())
-    event_data = {
-        "event_id": event_id,
-        "event_type": body.event_type,
-        "data": payload,
-        "timestamp": time.time(),
-        "correlation_id": body.correlation_id,
-        "source": "plaita-console",
+    # A69-02：单次构造 Event，记录体与 zset score 共用同一个 timestamp。
+    event = Event(
+        event_id=str(uuid.uuid4()),
+        event_type=body.event_type,
+        data=payload,
+        timestamp=time.time(),
+        correlation_id=body.correlation_id,
+        source="plaita-console",
         # 受信租户（服务端字段）：EventFilter 只认它决定执行状态命名空间
-        "tenant_id": tenant,
-    }
+        tenant_id=tenant,
+    )
 
-    event_key = f"plaita:event:{event_id}"
-    redis.set(event_key, json.dumps(event_data), ex=86400)
+    # 正典写：与引擎 ``RedisEventStorage.store_event`` 同键形/TTL（7d 默认），
+    # 引擎 get_event/list_events 与 EventReconciler 回扫都可见。
+    # 不再写 legacy ``plaita:event:{id}`` / ``plaita:event:type:{type}``
+    # （旧键只读兼容、自然过期）。
+    store_event_sync(redis, event, ttl=event_retention_ttl_seconds())
+    event_json = event.model_dump_json()
 
-    type_key = f"plaita:event:type:{body.event_type}"
-    redis.zadd(type_key, {event_id: time.time()})
-    redis.expire(type_key, 86400)
-
-    # 引擎 RedisEventBus 的订阅频道是 plaita:events:{type}——
-    # 历史上只发 plaita:event:channel:{type}，引擎侧永远收不到
-    redis.publish(f"plaita:events:{body.event_type}", json.dumps(event_data))
-    redis.publish(f"plaita:event:channel:{body.event_type}", json.dumps(event_data))
+    # 引擎 RedisEventBus 的订阅频道是 plaita:events:{type}。
+    # legacy 频道 ``plaita:event:channel:{type}`` 保留一个 release（仓内无
+    # 订阅者，但可能有外部消费者），下个 release 删除。
+    try:
+        redis.publish(f"plaita:events:{body.event_type}", event_json)
+        redis.publish(f"plaita:event:channel:{body.event_type}", event_json)
+    except Exception:
+        # 已落盘：回扫可补偿通知丢失，但客户端必须看到失败（不静默成功）。
+        logger.error(
+            "事件已落盘但 Pub/Sub 通知失败（可经事件回扫补偿）: event_id=%s type=%s",
+            event.event_id, body.event_type,
+        )
+        raise
 
     _audit(
-        request, "event.publish", event_id,
+        request, "event.publish", event.event_id,
         {
             "event_type": body.event_type,
             "correlation_id": body.correlation_id,
-            "event_id": event_id,
+            "event_id": event.event_id,
         },
         tenant_id=tenant,
     )
     return {
         "success": True,
-        "event_id": event_id,
+        "event_id": event.event_id,
         "event_type": body.event_type,
         "message": "事件已发布",
     }
@@ -420,6 +450,11 @@ async def delete_subscription(
         pipe.srem(f"plaita:subscription:correlation:{info['correlation_id']}", subscription_id)
     if info.get("flow_id"):
         pipe.srem(f"plaita:subscription:flow:{info['flow_id']}", subscription_id)
+    # A69-03：补齐引擎侧 ``node:`` 索引——console 删除此前漏掉这一桶，
+    # 冷桶孤儿只能等 janitor 兜底；与引擎 delete_subscription / 租户 purge
+    # 的四索引清理对齐。
+    if info.get("node_id"):
+        pipe.srem(f"plaita:subscription:node:{info['node_id']}", subscription_id)
     pipe.execute()
     _audit(
         request, "event.subscription_delete", subscription_id,

@@ -13,16 +13,10 @@ from redis import Redis
 
 from ...logger import logger
 from ...event.core import EventBus, Event
+from ...event.redis import event_retention_ttl_seconds, store_event_sync
 from ..registry import RegistryMixin, ServiceRegistry
 from ..control import ControlMixin
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
-
-# resume 事件尽力落盘的键前缀与 TTL（Track P2 任务2）：与 RedisEventStorage
-# （event/redis.py，key_prefix 默认 "plaita:event:"、DEFAULT_TTL 7 天）键格式
-# 耦合——EventReconciler 靠同一格式扫描补偿；若那边改前缀/键形状，这里必须
-# 同步，否则服务直发的 resume 事件回扫不到。
-RESUME_EVENT_STORAGE_PREFIX = "plaita:event:"
-RESUME_EVENT_TTL_SECONDS = 7 * 86400
 
 
 class ResumePublishError(RuntimeError):
@@ -331,9 +325,9 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         publish_resume_event 用同步 redis 直发 plaita:events:{type} 频道，
         不经 RedisEventBus.publish → 事件不落存储 → EventReconciler（扫事件
         存储 zset 索引做兜底）补偿不到，Pub/Sub 丢通知窗口内 resume 照样丢。
-        这里按 RedisEventStorage.store_event 的键格式（plaita:event:events:
-        {id} SET + plaita:event:types:{type} ZADD，score=事件时间戳，TTL
-        7 天）同步直写。
+        这里复用引擎同步 writer ``store_event_sync``（与
+        ``RedisEventStorage.store_event`` 同一键形/TTL），
+        禁止在服务层再拼一份键格式（A69-02 抽共享 writer）。
 
         选同步直写而非复用 store_event：其一，handle_task 运行在线程池新开
         的 loop 里，asyncio.run 包 async store_event 会嵌套运行中 loop 直接
@@ -348,13 +342,11 @@ class BaseExtendedService(RegistryMixin, ControlMixin, ABC):
         if self._redis_client is None:
             return
         try:
-            event_key = f"{RESUME_EVENT_STORAGE_PREFIX}events:{event.event_id}"
-            type_key = f"{RESUME_EVENT_STORAGE_PREFIX}types:{event.event_type}"
-            pipe = self._redis_client.pipeline()
-            pipe.set(event_key, event.model_dump_json(), ex=RESUME_EVENT_TTL_SECONDS)
-            pipe.zadd(type_key, {event.event_id: event.timestamp})
-            pipe.expire(type_key, RESUME_EVENT_TTL_SECONDS)
-            pipe.execute()
+            store_event_sync(
+                self._redis_client,
+                event,
+                ttl=event_retention_ttl_seconds(),
+            )
         except Exception as e:  # noqa: BLE001 — 兜底链路失败不外溢
             logger.warning(
                 "resume 事件落盘失败（不影响直发主链路，回扫补偿缺失窗口）: %s",

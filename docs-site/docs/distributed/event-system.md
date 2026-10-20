@@ -1100,6 +1100,74 @@ subscription_id = await event_bus.register_subscription(**subscription_params)
   全量 SCAN 路径按**已知前缀** `{prefix}data:` 剥离 id（不再 `split(':')[-1]`）——
   后者在 `subscription_id` 含 `:` 时取到截断值、GET 落空而**静默返回空**。
 
+## 事件保留期与索引清理（A69-02 / A69-03）
+
+### 正典键形（console publish 与引擎同源）
+
+console `POST /api/events/publish` 自 **A69-02** 起不再自建旁路键，而是与引擎
+`RedisEventStorage.store_event` 同形落盘（共享 writer
+`plaita.event.redis.store_event_sync`）：
+
+| 键 | 类型 | 内容 | TTL |
+|---|---|---|---|
+| `plaita:event:events:{event_id}` | string | `Event.model_dump_json()` | `PLAITA_EVENT_TTL_SECONDS`（默认 7d） |
+| `plaita:event:types:{event_type}` | ZSET | member=`event_id`，score=`event.timestamp` | 同上 |
+
+因此 console 手动发布会进入引擎 `get_event` / `list_events` 与
+`EventReconciler` 的回扫面：Pub/Sub 通知丢失（EventFilter 重启/重连窗口）后仍可
+补偿。记录体与 zset score 共用**同一个** `Event.timestamp`（旧实现两次
+`time.time()` 会漂移）。
+
+**legacy 键只读兼容**：升级前的 `plaita:event:{id}` / `plaita:event:type:{type}`
+（24h）不再有新写者，console `GET /events` 仍展示它们并按 24h 自然过期。同一
+`event_id` 两形并存时列表按 id 去重、canonical 优先。滚动升级期间旧 console 实例
+仍写 legacy（回扫不可见），全部实例升级后窗口消失；**不做双写**（新代码无法替旧
+实例写 canonical）。回滚只需回退 console 代码——旧读面的 `SCAN` + string 解析能读
+canonical 键，无 Redis schema 变更。
+
+升级前 ≤24h 的关键手动事件如需回扫补偿，由 operator 显式执行一次性脚本
+`scripts/migrate_console_events.py`（默认 dry-run，`--apply` 才写入；按剩余 TTL
+复制成 canonical，**不删旧键**，canonical 已存在则跳过）。
+
+### 索引续期 + 读时惰性清理 + 有界 janitor（A69-03）
+
+索引桶在写入时续期整键 TTL，但**成员**不会随数据键过期而消失：活跃流量下桶永不
+整体过期，`zcard`/`scard` 持续高于 live 数。单纯停续期会把仍存活成员的桶一起放死，
+因此采用三层组合：
+
+1. **继续续期**（写路径不变）；
+2. **读时惰性清理**：
+   * `RedisEventStorage.list_events` 对已确认载荷缺失的成员按类型桶 `ZREM`
+     （ERROR 日志保留：数据面损坏仍要可见，但不再每轮重复）；
+   * `RedisEventSubscriptionStorage.list_subscriptions` 一次 `MGET` 取候选
+     （替代逐条 GET 的 N+1），对**被选中桶**里 data 缺失的成员 `SREM`；全量
+     `SCAN data:*` 路径没有桶信息，交给 janitor；
+3. **有界 janitor**（`plaita.event.index_janitor.IndexJanitor`，由
+   `EventFilter.start()/stop()` 同生命周期挂载，不依赖 EventReconciler 是否启用）：
+   `SCAN` 索引键 + `ZSCAN`/`SSCAN` 游标，每 tick 只**检查** `PLAITA_EVENT_INDEX_SWEEP_BUDGET`
+   个成员（默认 500），`EXISTS data` 缺失即 `ZREM`/`SREM`。覆盖惰性清理够不到的
+   冷桶（订阅 `flow:`/`node:`）。
+
+关键边界：
+
+* **只按 EXISTS 判死活，不按 score 裁剪**——事件 zset 的 score 是事件时间戳
+  （生产者可控/可回填），按 score 会误删「时间戳老但载荷仍活」的事件；
+* 游标只存在进程内，不新建永久 Redis 键；重启从头扫，幂等；
+* 单桶失败（WRONGTYPE 等）只 WARNING 并计入错误计数，不终止其余桶/下一 tick；
+* 关闭 janitor（`PLAITA_DISABLE_EVENT_INDEX_SWEEP=1`）必须在启动打 WARNING：
+  这是「过期成员继续累积」的已知降级，不得静默；
+* console 删除订阅已补齐 `node:` 索引（此前只清 type/correlation/flow），与引擎
+  `delete_subscription` 和租户 purge 的四索引口径一致；
+* 指标：进程级 `event_index_sweep_examined_total` / `event_index_sweep_pruned_total`
+  / `event_index_sweep_errors_total`（`index_sweep_metrics()` 读取，日志每 tick
+  汇总），事件层不依赖 `plaita.server.metrics`。
+
+**Phase 2（ZSET v2）不在本轮**。触发条件（任一）：①
+`examined_total - pruned_total` 的滞后在 7d 内持续上升；② 单桶 `zcard/scard` >
+2× live 且 janitor 一个周期清不完；③ 内存/延迟告警指向索引。设计：新键
+`plaita:subscription:zidx:{kind}:{value}`（ZSET，score=`created_at+ttl`），双读旧
+SET + 新 ZSET、写双写、删除双清，一个 TTL 窗口后停旧写、再一个窗口停旧读；
+`ZREMRANGEBYSCORE -inf now` 在读/写路径执行。
 
 ## 下一步
 

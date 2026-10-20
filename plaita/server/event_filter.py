@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List
 from redis import Redis
 
 from plaita.event.core import Event, EventSubscription, EventSubscriptionStorage, EventBus, EventStorage
+from plaita.event.index_janitor import IndexJanitor
 from plaita.event.timeout import SubscriptionTimeoutChecker
 from plaita.redis_client import make_redis_client
 from plaita.server.event_reconcile import EventReconciler
@@ -82,6 +83,10 @@ class EventFilter:
         # Track C 任务3：事件回扫宿主（start/stop 同生命周期挂载）
         self.event_storage = event_storage
         self._reconciler: Optional["EventReconciler"] = None
+        # A69-03：事件/订阅索引的有界清扫（start/stop 同生命周期挂载）。
+        # 不依赖 EventReconciler 是否启用——PLAITA_DISABLE_EVENT_RECONCILE=1
+        # 时清理不能跟着停摆。
+        self._index_janitor: Optional[IndexJanitor] = None
         self._running = False
         self._subscription_id = None
         # 波次④：EventNode 订阅自动超时的宿主。checker 只消费 subscription.timeout
@@ -424,6 +429,27 @@ class EventFilter:
                         "事件回扫未挂载：事件总线不带事件存储（内存总线场景）"
                     )
 
+            # A69-03：索引清扫随过滤器同生命周期挂载。事件存储沿用回扫的
+            # 探测口径；订阅存储没有 prune_indexes（内存后端）时 janitor
+            # 自动跳过该项。任何启动失败只记 WARNING——清理是降载手段，
+            # 绝不阻断事件主链路。
+            try:
+                janitor_event_storage = (
+                    self.event_storage
+                    or getattr(self.event_bus, "event_storage", None)
+                )
+                self._index_janitor = IndexJanitor(
+                    event_storage=janitor_event_storage,
+                    subscription_storage=self.subscription_storage,
+                )
+                await self._index_janitor.start()
+            except Exception as e:  # noqa: BLE001 — 清扫挂载失败不影响事件主链路
+                self._index_janitor = None
+                logger.warning(
+                    "索引清扫未挂载（过期索引成员将继续累积）: %s",
+                    _scrub_exception_text(e),
+                )
+
             # 保持运行直到停止
             while self._running:
                 await asyncio.sleep(1)
@@ -453,6 +479,14 @@ class EventFilter:
             except Exception as e:  # noqa: BLE001 — 同上
                 logger.error("停止事件回扫时出错: %s", _scrub_url_text(e))
             self._reconciler = None
+
+        # 停索引清扫（与 start 对称）
+        if self._index_janitor is not None:
+            try:
+                await self._index_janitor.stop()
+            except Exception as e:  # noqa: BLE001 — 同上
+                logger.error("停止索引清扫时出错: %s", _scrub_url_text(e))
+            self._index_janitor = None
 
         # 取消事件订阅
         if self._subscription_id and self.event_bus:

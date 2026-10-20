@@ -429,18 +429,18 @@ class Test110ListSubscriptionsConjunction(unittest.IsolatedAsyncioTestCase):
 
         storage = RedisEventSubscriptionStorage(
             "redis://localhost:6379/9", self.prefix)
-        gets = []
+        mget_keys = []
         with _patch_from_url():
             await storage.initialize()
             for sid, etype, corr in rows:
                 await self._store_row(storage, sid, etype, corr)
-            real_get = storage.redis.get
+            real_mget = storage.redis.mget
 
-            async def counting_get(key):
-                gets.append(key)
-                return await real_get(key)
+            async def counting_mget(*keys):
+                mget_keys.extend(keys)
+                return await real_mget(*keys)
 
-            storage.redis.get = counting_get
+            storage.redis.mget = counting_mget
             red = await storage.list_subscriptions(
                 event_type="shared.type", correlation_id="CID")
             await storage.close()
@@ -460,10 +460,11 @@ class Test110ListSubscriptionsConjunction(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s.subscription_id for s in red], ["sub-hit"],
                          "redis correlation 分支漏了 event_type 过滤（#110 反例）")
         self.assertEqual([s.subscription_id for s in sql], ["sub-hit"])
-        data_gets = [k for k in gets if "data:" in str(k)]
-        self.assertEqual(len(data_gets), 2,
+        # A69-03：逐条 GET 改为一次 MGET；候选数断言不变（hit + wrong-type）。
+        data_keys = [k for k in mget_keys if "data:" in str(k)]
+        self.assertEqual(len(data_keys), 2,
                          "correlation 候选仍是 2（hit + wrong-type），"
-                         "索引不回落 type 索引、不额外 GET")
+                         "索引不回落 type 索引、不额外取数")
 
     async def test_single_condition_paths_unchanged(self):
         memory = None
