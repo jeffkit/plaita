@@ -148,11 +148,37 @@ def test_key_created_with_o_excl_0600_without_chmod_window(tmp_path, monkeypatch
     assert chmod_calls == [], chmod_calls
 
 
+def test_key_created_0600_even_with_umask_000_and_chmod_denied(tmp_path, monkeypatch):
+    """创建权限不依赖 umask 或后续 chmod：最坏 umask + chmod 拒绝仍是 0600。
+
+    负控（还原 write_bytes + chmod 旧实现）：umask=000 下 write_bytes 先落
+    0666，chmod 被拒绝后文件保持 0666——本条与 chmod 窗口用例同时红。
+    """
+    key_file = tmp_path / "new.key"
+    monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", str(key_file))
+    monkeypatch.delenv("PLAITA_CREDENTIALS_KEY", raising=False)
+
+    def deny_chmod(path, mode):
+        raise OSError("chmod denied")
+
+    monkeypatch.setattr(os, "chmod", deny_chmod)
+    previous_umask = os.umask(0o000)
+    try:
+        key = credentials_svc._load_key_bytes(generate=True)
+    finally:
+        os.umask(previous_umask)
+
+    assert key_file.read_bytes() == key
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+
+
 def test_key_creation_loser_reuses_winner_key(tmp_path, monkeypatch):
-    """O_EXCL 落败者不得重新生成 key（否则同一 DB 出现两把 key）。"""
+    """O_EXCL 落败者不得重新生成 key，并收紧胜者遗留的宽权限文件（A67-05）。"""
     key_file = tmp_path / "race.key"
     winner = Fernet.generate_key()
     key_file.write_bytes(winner)
+    # 滚动升级：旧版本可能刚以 0644 创建了胜者文件；落败者复用前须收紧。
+    key_file.chmod(0o644)
 
     real_open = os.open
 
@@ -165,6 +191,7 @@ def test_key_creation_loser_reuses_winner_key(tmp_path, monkeypatch):
 
     assert credentials_svc._create_key_file(key_file) == winner
     assert key_file.read_bytes() == winner
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
 
 
 def test_reconcile_tightens_existing_0644_key(tmp_path, monkeypatch, caplog):
