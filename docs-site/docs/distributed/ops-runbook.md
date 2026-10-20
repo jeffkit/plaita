@@ -118,7 +118,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_EVENT_INDEX_SWEEP_BUDGET` | `500` | `ctor`（janitor 构造） | 每 tick **每个存储**最多检查的索引成员数 | `<=0` 按 1 执行并 WARNING；预算语义是「检查数」而非「删除数」 |
 | `PLAITA_DISABLE_EVENT_INDEX_SWEEP` | unset | `startup` | `=1` 关闭 janitor（启动打 WARNING） | 冷桶（`flow:`/`node:`）的过期成员不再被主动清理，`zcard/scard` 可持续高于 live 数 |
 | `PLAITA_DISABLE_EVENT_INDEX_PRUNE_ON_WRITE` | unset | `call`（每次写后） | `=1` 关闭写侧节流兜底清理（每 type 60s、至多 8 个成员的 `EXISTS`+`ZREM`） | 仅影响 console-only/无 worker 部署；读时惰性清理不受影响 |
-| `PLAITA_METRICS_PORT` | unset / `0` | `startup` | worker 的 Prometheus 抓取端端口 | 非法 → 0 + WARNING（端点关闭） |
+| `PLAITA_METRICS_PORT` | unset / `0` | `startup` | worker 的 Prometheus 抓取端端口 | 非整数 → 0 + WARNING；负数静默钳 0（均关闭端点） |
 | `PLAITA_METRICS_HOST` | `0.0.0.0` | `startup` | worker `/metrics` 监听地址 | 空白 → `0.0.0.0`；默认对全网卡，注意网络策略 |
 | `PLAITA_ALERT_WEBHOOK` | unset | `startup` | 死信/僵尸巡检事件的 JSON POST 出口 | 空白 → None；URL 可能含凭据，日志已掩码 |
 | `PLAITA_ALLOW_EXPERIMENTAL_DB` | unset | `call`（factory 调用时） | 允许创建 `db`/SQLAlchemy EventBus/Storage | 仅**精确 `1`**；否则 `ValueError`；生产控制面禁用 |
@@ -182,11 +182,11 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | 变量 | 默认 | 读取时机 | 作用与 0/非法值 | 陷阱 |
 |---|---|---|---|---|
 | `PLAITA_SANDBOX_TIMEOUT` | `10` 秒 | `import` | subprocess python/js 墙钟超时 | 0/负/小数/非整数 → import `ValueError`；0 不是无限 |
-| `PLAITA_SANDBOX_MEMORY_MB` | `0` = 不限 | `import` | subprocess `RLIMIT_AS`（Linux 才生效） | 负值被接受且等同不限；非整数 → import `ValueError` |
+| `PLAITA_SANDBOX_MEMORY_MB` | `0` = 不限 | `import` | subprocess `RLIMIT_AS`（Linux 才生效） | 负值/非整数 → import `ConfigError`（B2R31-03 起不再接受负值）；0 仍是不限 |
 | `PLAITA_SANDBOX_DOCKER_IMAGE` | `python:3.12-slim` | `import` | python docker 镜像 | 拉取/启动失败在节点执行期 |
 | `PLAITA_SANDBOX_DOCKER_TIMEOUT` | `30` 秒 | `import` | docker 墙钟超时 | 0/负/小数/非整数 → import `ValueError` |
 | `PLAITA_SANDBOX_DOCKER_MEMORY_MB` | `128` | `import` | `--memory` 参数 | 0/负原样传给 docker，执行期才暴露接受/拒绝；非整数 → import `ValueError` |
-| `PLAITA_SANDBOX_DOCKER_CPUS` | `"0.5"` | `import` | `--cpus` 字符串 | 任意字符串 import 期不校验，执行期 docker 才报错 |
+| `PLAITA_SANDBOX_DOCKER_CPUS` | `"0.5"` | `import` | `--cpus` 字符串 | 仅接受有限正数；`0`/`abc`/`nan`/`inf` → import `ConfigError`（B2R31-03 起不再延迟到执行期） |
 | `PLAITA_SANDBOX_DOCKER_USER` | `""`（镜像默认用户，python 镜像为 root） | `import` | `--user` | 设非 root 后写非 `/tmp` 路径会失败（预期约束） |
 | `PLAITA_SANDBOX_NODE_BIN` | `node` | `import` | js subprocess 的宿主可执行文件 | 缺失时执行期报错并提示 |
 | `PLAITA_SANDBOX_DOCKER_NODE_IMAGE` | `node:20-alpine` | `import` | js docker 镜像 | 内网部署需预拉/改镜像 |
@@ -202,11 +202,11 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_EXPR_MAX_RESULT_SIZE` | `100000` | `import` | 表达式结果基础上限 | 非法/≤0 → 默认 + WARNING |
 | `PLAITA_EXPR_GROWTH_FACTOR` | `4` | `import` | 单次放大倍数 | 同上 |
 | `PLAITA_EXPR_MAX_RESULT_HARD` | `100000000` | `import` | 单次结果硬上限 | 同上 |
-| `PLAITA_HTTP_DNS_TTL` | `30` 秒 | `call`（每次策略校验） | SSRF 判定 DNS 缓存 TTL | 0/负 → 0（唯一明确的关闭缓存）；非法 → 30 无 WARNING；NaN → 0；inf → 永不过期 |
-| `PLAITA_HTTP_CONNECTOR_LIMIT` | `100` | `call`（每次建会话） | 共享 connector 并发上限 | 0/负 → 1（不是无限）；非法 → 100 无 WARNING |
-| `PLAITA_HTTP_COOKIES` | 未设 = 关 | `call`（每次建会话） | flow cookie jar | 仅 `1/true/yes`（strip 后、区分大小写）；`TRUE` 不生效 |
-| `PLAITA_HTTP_MAX_RESPONSE_BYTES` | `10485760`（10MiB） | `call`（每次请求） | 响应体字节上限 | 0/负/非法 → 10MiB，不是关闭/无限 |
-| `PLAITA_HTTP_BLOCK_PRIVATE` | unset | `call`（每次策略校验） | 强制所有 `http` 节点屏蔽回环/内网/链路本地 | `1/true/yes`（strip + lower）；`0` 不关闭已配置的其他策略 |
+| `PLAITA_HTTP_DNS_TTL` | `30` 秒 | `call`（每次策略校验） | SSRF 判定 DNS 缓存 TTL | **0 = 关闭缓存**（唯一明确语义）；负/`nan`/`inf`/非法 → 30 + WARNING（不再出现“负值当 0”“inf 永不过期”） |
+| `PLAITA_HTTP_CONNECTOR_LIMIT` | `100` | `call`（每次建会话） | 共享 connector 并发上限 | 0/负/非法 → 100 + WARNING（不是“钳 1”，也不是静默回退） |
+| `PLAITA_HTTP_COOKIES` | 未设 = 关 | `call`（每次建会话） | flow cookie jar | strict bool：`1/true/yes/on`（`strip().lower()`，`TRUE` 生效）；非法 → false + WARNING |
+| `PLAITA_HTTP_MAX_RESPONSE_BYTES` | `10485760`（10MiB） | `call`（每次请求） | 响应体字节上限 | 0/负/非法 → 10MiB + WARNING，不是关闭/无限 |
+| `PLAITA_HTTP_BLOCK_PRIVATE` | unset | `call`（每次策略校验） | 强制所有 `http` 节点屏蔽回环/内网/链路本地 | strict bool（`1/true/yes/on`，`strip().lower()`）；非法值 fail-closed 为 true + WARNING，启动预检拒绝；`0` 不关闭已配置的其他策略 |
 | `PLAITA_BG_THREAD_WORKERS` | `8` | `import` | 后台线程池大小 | 非整数 → import `ValueError`；0/负 → import 通过，首次建池运行期 `ValueError` |
 | `PLAITA_BG_PROCESS_WORKERS` | `cpu_count()` | `import` | 后台进程池大小 | 同上 |
 | `PLAITA_BG_STATE_MAX` | `256` | `import` | 并发节点状态 LRU 容量 | 非整数 → import `ValueError`；0/负 → 状态立即淘汰，后台错误不可见 |
@@ -222,13 +222,13 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | `startup`（`init_engine` 一次） | 流程/版本/执行历史 SQLAlchemy URL | 凭据文件/密钥目录由它推导；**相对 URL 按各进程 cwd 解析**，PG/未设置/内存库回退 cwd 并打 WARNING（A67-04）；官方 compose 默认无持久卷 |
 | `PLAITA_CONSOLE_ENV` | `dev` | `request` / 每次发布 | 环境标识；仅精确 `prod` 时删除需 admin | 其他值（test/staging）无额外语义 |
 | `PLAITA_CONSOLE_ADMIN_API_KEY` | `""` | `request`（`get_settings`） | 管理面 API Key | 空且未 `ALLOW_INSECURE_ADMIN` → 管理 API 503 |
-| `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN` | `false` | `request` | 显式允许无管理 Key（仅本地开发） | 仅 `.lower()=="true"`；`" true "`/`1`/`yes`/`on` **不**生效 |
+| `PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN` | `false` | `request` | 显式允许无管理 Key（仅本地开发） | strict bool：`1/true/yes/on`（`strip().lower()`，`" true "`/`TRUE` 均生效）；非法 → false + WARNING，启动预检拒绝 |
 | `PLAITA_CONSOLE_ADMIN_PASSWORD` | 未设 | `startup`（bootstrap） | 设置且 users 表为空 → 自动建 `admin`（平台管理员） | 未设**不会**自动建号/打印随机密码，走前端创建向导 |
 | `PLAITA_CONSOLE_RECONCILE_ORPHANS` | `suspend` | `startup`（lifespan） | 本地模式启动对账：`suspend` / `fail` / `off`（strip + 大小写不敏感） | 非法值 WARNING + 回退 `suspend`；只处理启动时 `running` 的执行 |
 | `PLAITA_CONSOLE_SECRET_ID` / `_SECRET_KEY` | `""` | `request` | 全局契约 HMAC 密钥；空 → 全局契约路径 503 | 租户契约密钥仍可用 |
 | `PLAITA_CONSOLE_NODE_MODULES` | 未设；逗号分隔 | `startup`（import） | 加载业务节点并注册 CodeNode | 失败 WARNING（console 不退出），流程运行期才报未知节点 |
 | `PLAITA_CONSOLE_NODE_PATH` | 未设；`os.pathsep` | `startup`（import） | 逐项插 `sys.path` | 不校验目录存在 |
-| `PLAITA_CONSOLE_LANGFUSE` | `auto` | `call`（每次执行） | `false` 强制关；`true` 强制开；`auto` 配了 `LANGFUSE_PUBLIC_KEY` 才开 | **未知值（如 `bogus`）也当开**；拼写错误的 fail-open 方向是“多采集/多出网” |
+| `PLAITA_CONSOLE_LANGFUSE` | `auto` | `call`（每次执行） | `false` 强制关；`true` 强制开；`auto` 配了 `LANGFUSE_PUBLIC_KEY` 才开 | strict enum：未知值（如 `bogus`）→ **false + WARNING**（B2R31-03 起不再 fail-open）；启动预检拒绝非法值 |
 | `PLAITA_CREDENTIALS_FILE` | SQLite：DB 同目录；非 SQLite/无 DB env：cwd（WARNING） | `call`（每次读/写） | 引擎/console 凭据文件；console 按租户写旁文件 | 未显式设置且无法推断共享目录 → 回退 cwd + WARNING（A67-04）；**多副本必须绝对路径**；空文件 → `CredentialStoreCorruptError`，不是空 store |
 | `PLAITA_CREDENTIALS_KEY` | 未设 | `call`（每次加解密） | 内联 Fernet key，优先于文件；**同时是 DB 字段加密主密钥**（`local_executions.input_json/context_json`、`tenants.contract_secret_key` 经 HKDF 派生用途子密钥） | 非法 key → `CredentialError`/`FieldCryptoError`；不要传给子进程；**丢失/轮换会让历史 checkpoint 与既有租户契约密钥不可恢复** |
 | `PLAITA_CREDENTIALS_KEY_FILE` | console：DB 同目录；引擎：cwd（WARNING） | `call`（每次加解密） | 密钥文件路径（凭据与 DB 字段加密共用） | console 首次用 `O_EXCL` 直接以 0600 创建；存量 0644 在启动对账/读取时收紧 + WARNING（A67-05）；引擎缺文件 fail-closed；**DB 备份须与密钥文件同等级保护且分开放置** |
@@ -272,7 +272,7 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
 | `PLAITA_WORKER_MIN_FREE_DISK_GIB` | 0 = 关闭；负 → 0 | 明确关闭 |
 | `PLAITA_WORKER_DRAIN_TIMEOUT` | 0 = 不等待；负 → 0 | 立即进入 force-stop；在途步若在进程退出前完成仍可 ack |
 | `PLAITA_EVENT_RECONCILE_INTERVAL` | 0/负/非法 → 300 + WARNING（启动预检拒绝） | 不再接受紧环 |
-| `PLAITA_EVENT_RECONCILE_BACKFILL` | 0/负 → 默认 + WARNING | 回填窗口为空/未来，不是全量 |
+| `PLAITA_EVENT_RECONCILE_BACKFILL` | 0 → 0（空窗口）；负/非法 → 3600 + WARNING | 0 不是“全量回扫”，是启动时不回填 |
 | `PLAITA_CHECK_INTERVAL` | 0/负/非法 → 1 + WARNING（启动预检拒绝） | 不再接受紧环 |
 | `PLAITA_BG_THREAD_WORKERS` / `_PROCESS_WORKERS` | 0/负 import 通过 | 首次建池运行期 `ValueError`，不是无限 |
 | `PLAITA_BG_STATE_MAX` | 0/负 import 通过 | 状态 LRU 立即淘汰，后台错误不可见 |
