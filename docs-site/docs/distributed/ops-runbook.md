@@ -340,6 +340,14 @@ worker 启动时计算并打印 `event=config.effective`，同时写入 registry
   旧世代的迟到写具名拒绝（DLQ 消息不 ack、留 pending；订阅写拒绝），同名重建
   的新租户读不到前代 payload。`PLAITA_DISABLE_FENCING=1` 只关闭 execution 状态
   写的 fencing，本闸独立于该开关生效（状态写回滚路径的既有风险按原样注记）。
+- **世代随消息走（#283）**：任务信封新增 `tenant_generation`；重投/交接/
+  归一化副本继承源值，worker dispatch 入口与 DLQ/订阅写闸比对**源世代**而非
+  读取时 meta。无该字段的存量载体按 legacy 口径：dispatch 宽限、写闸在当前
+  世代已发布时 fail-closed（消息留 pending）；DLQ replay 继承 DLQ 信封源世代。
+  订阅无世代上下文且当前世代已发布 → 拒绝写入（不再自动 adopt 当前世代）。
+- **create_tenant 世代先于 active（#284）**：flush 后、commit 前发布新世代，
+  发布失败 ⇒ 建租户失败并回滚（不进入 active）；启动对账同样按
+  generation → status 顺序，世代失败不发布 active。
 - **租户状态纪元**：console 每次状态写入/对账都刷新
   `plaita:tenant_status:epoch`（值来自 `PLAITA_DEPLOYMENT_EPOCH`）。worker
   发现 Redis epoch 缺失/更旧 → 非 default 租户拒绝、default 保持 #237

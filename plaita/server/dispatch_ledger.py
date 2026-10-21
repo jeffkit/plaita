@@ -465,7 +465,14 @@ def enqueue_with_ledger(
     recorded["enqueued"] = True
 
     try:
-        message_id = enqueue_task(redis_client, stream_key, body)
+        from plaita.server.tenant_status import read_tenant_generation
+
+        message_id = enqueue_task(
+            redis_client, stream_key, body,
+            tenant_generation=read_tenant_generation(
+                redis_client, body.get("tenant_id")
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 — 入队失败=没派发（调用方决定重试）
         logger.error("任务入队失败（不记台账，避免假台账）: %s", _scrub_exception_text(exc))
         out["error"] = f"enqueue-failed: {type(exc).__name__}: {exc}"

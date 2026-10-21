@@ -243,9 +243,13 @@ def fire_schedule(
         # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
         # B2R31-01：新生产消息写当前三维代际。
         from plaita.runtime_config import envelope_for_stream
+        from plaita.server.tenant_status import read_tenant_generation
 
         msg_id = enqueue_task(
             redis_client, queue_name, message,
+            tenant_generation=read_tenant_generation(
+                redis_client, message.get("tenant_id")
+            ),
             **envelope_for_stream(queue_name, role="schedule"),
         )
         enqueue_ok = True

@@ -131,10 +131,12 @@ from plaita.server.tenant_context import (
 from plaita.tenant_context import (
     DEFAULT_TENANT_ID,
     TENANT_SOURCE_EXPLICIT,
+    TenantWriteRejected,
+    current_tenant_generation,
     reset_current_tenant_generation,
     set_current_tenant_generation,
 )
-from plaita.server.tenant_status import tenant_is_active
+from plaita.server.tenant_status import read_tenant_generation, tenant_is_active
 # plaita#28：每租户 start 准入配额（最小公平性原语）。console 入口超限 429、
 # worker 对无名额的外部生产方消息超限延迟重投；原语细节见 tenant_quota 模块。
 from plaita.server.tenant_quota import (
@@ -280,6 +282,10 @@ def _requeue_envelope_kwargs(source: Any) -> Dict[str, Any]:
     effective_at = getattr(source, "config_effective_at", None)
     if isinstance(effective_at, str) and effective_at:
         kwargs["config_effective_at"] = effective_at
+    # plaita#283：源租户世代随副本走；旧副本不得在新租户下被读成当前世代。
+    tenant_generation = getattr(source, "tenant_generation", None)
+    if isinstance(tenant_generation, str) and tenant_generation:
+        kwargs["tenant_generation"] = tenant_generation
     return kwargs
 
 
@@ -2866,6 +2872,9 @@ class FlowWorker:
                         {} if schema_version is None
                         else {"schema_version": schema_version}
                     )
+                    source_generation = current_tenant_generation()
+                    if source_generation:
+                        enqueue_kwargs["tenant_generation"] = source_generation
                     enqueue_task(redis_client, queue_name, resume_msg, **enqueue_kwargs)
                 except Exception as e:  # noqa: BLE001 — 入队失败让 start 消息重投
                     raise ServiceDispatchError(
@@ -6331,6 +6340,29 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             )
             return
 
+        # plaita#283：消费循环已按载体源世代设置 ContextVar；dispatch 入口
+        # 必须与当前租户世代一致——同名重建后的旧 requeue 副本不得按新世代
+        # 正常执行（不能等 dead_letter 才拒绝）。无世代的存量载体按 legacy
+        # 宽限（写闸仍 fail-closed）。
+        source_generation = current_tenant_generation()
+        if source_generation:
+            current_generation = read_tenant_generation(
+                getattr(self, "redis_client", None),
+                message_data.get("tenant_id"),
+            )
+            if current_generation is None or source_generation != current_generation:
+                logger.warning(
+                    "丢弃旧世代任务载体 %s（tenant=%s source_gen=%r current_gen=%r, "
+                    "flow=%s execution=%s）——不按当前世代执行",
+                    message_data.get("type"),
+                    message_data.get("tenant_id") or "default",
+                    source_generation,
+                    current_generation,
+                    message_data.get("flow_id"),
+                    message_data.get("execution_id"),
+                )
+                return
+
         # A51-01/A2R25-04：执行删除墓碑闸。放在配额闸**之前**——已删执行的
         # start 载体不得占用 tenant_running 名额（A51-03）；放在租户状态闸
         # 之后，停用租户消息仍走既有丢弃路径。命中即返回（消费循环随后
@@ -6918,6 +6950,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # 仍可续跑 ⇒ 归一化重投 continue 副本；真 #33 错配/终态/
                     # 挂起 ⇒ 原样 ack。
                     acked = self._handle_resume_protocol_error(task, queue, exc)
+                except TenantWriteRejected as rejected:
+                    # plaita#282：派发过程中（如订阅写入）的旧世代拒写不是
+                    # 消息畸形——不 ack、不 poison（否则唯一恢复载体被吞），
+                    # 计数 + ERROR 后留 pending，循环继续；后续正常消息照常处理。
+                    rejected_tenant = str(rejected.tenant_id or "?")
+                    rejected_reason = str(rejected.reason or "unknown")
+                    queue.note_tenant_write_rejected()
+                    logger.error(
+                        "任务 %s 旧世代写拒绝（留 pending，继续消费）: "
+                        "tenant=%s reason=%s: %s",
+                        task.message_id,
+                        rejected_tenant,
+                        rejected_reason,
+                        _scrub_url_text(rejected),
+                    )
                 except ValueError as exc:
                     # 畸形消息：ack 掉避免 poison pill 无限重投
                     logger.error("丢弃无效任务 %s: %s", task.message_id, _scrub_url_text(exc))
@@ -6968,6 +7015,21 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     self._bump_active(-1)
                     if not acked:
                         logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
+            except TenantWriteRejected as rejected:
+                # plaita#282：#277 的世代拒写是 fail-closed 的写闸，不是消费
+                # 循环故障。残留的旧世代超投递载体可能在 read() 内部被拒；这里
+                # 兜底计数 + 短退避继续，绝不退出消费线程/进程。消息留 pending
+                # （dead_letter_if_allowed 已不 ack），等有界年龄闸/人工处置。
+                rejected_tenant = str(rejected.tenant_id or "?")
+                rejected_reason = str(rejected.reason or "unknown")
+                queue.note_tenant_write_rejected()
+                logger.error(
+                    "消费循环捕获旧世代写拒绝（消息留 pending，继续消费）: "
+                    "tenant=%s reason=%s: %s",
+                    rejected_tenant, rejected_reason, _scrub_url_text(rejected),
+                )
+                time.sleep(0.05)
+                continue
             except (RedisError, socket.timeout) as exc:
                 # #48：**消费循环级兜底，绝不退出进程**。上面的 read() 已就地吞掉
                 # 瞬时故障族；但循环体内还有 ack/handover/sweep 等 Redis 调用，

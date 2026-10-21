@@ -261,6 +261,9 @@ class EventFilter:
 
                         enqueue_task(
                             self.redis_client, self.queue_name, resume_task,
+                            tenant_generation=getattr(
+                                subscription, "tenant_generation", None
+                            ),
                             **envelope_for_stream(self.queue_name, role="event_filter"),
                         )
                     except Exception as exc:
@@ -374,6 +377,9 @@ class EventFilter:
 
             enqueue_task(
                 self.redis_client, self.queue_name, resume_task,
+                tenant_generation=getattr(
+                    subscription, "tenant_generation", None
+                ),
                 **envelope_for_stream(self.queue_name, role="event_filter"),
             )
         except Exception as exc:

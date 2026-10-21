@@ -151,19 +151,20 @@ def clear_tenant_status(redis_client, tenant_id: Optional[str]) -> None:
 
 def publish_tenant_generation(
     redis_client, tenant_id: Optional[str], generation: Optional[str]
-) -> None:
+) -> bool:
     """写入租户当前世代（plaita#277）；None 清除该租户的世代记录。
 
-    与 ``publish_tenant_status`` 同款 best-effort：Redis 失败只 WARNING，不
-    阻断 console 主流程；worker 侧读不到世代时按 fail-closed 处理（非 default
-    且调用方带 expected 世代时拒绝写）。
+    返回是否成功：Redis 失败 WARNING 并返回 False，由调用方决定语义
+    （plaita#284 的建租户/对账按 fail-closed 处理；其余同步路径可忽略）。
+    worker 侧读不到世代时按 fail-closed 处理（非 default 且调用方带 expected
+    世代时拒绝写）。
     """
     if redis_client is None or not tenant_id:
-        return
+        return True
     try:
         if generation is None:
             redis_client.hdel(TENANT_STATUS_META_KEY, tenant_id)
-            return
+            return True
         # 保留 meta 中其它附加字段（当前只有 tenant_generation，合并写更稳）。
         raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
         meta = {}
@@ -182,12 +183,14 @@ def publish_tenant_generation(
             key=tenant_id,
             value=json.dumps(meta, ensure_ascii=False),
         )
-    except Exception as exc:  # noqa: BLE001 — 同步失败只告警
+        return True
+    except Exception as exc:  # noqa: BLE001 — 调用方决定是否 fail-closed
         logger.warning(
             "租户 %s 世代同步到 Redis 失败: %s",
             tenant_id,
             _scrub_exception_text(exc),
         )
+        return False
 
 
 def read_tenant_generation(

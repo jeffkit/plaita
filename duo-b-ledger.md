@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第五十八轮，2026-10-22；任务书标称第五十六轮——台账第五十六/五十七轮已被 A69 复核轮占用，按台账序列顺延）：**#282/#283/#284 三单 P1 收口（基线 `3276c20`）**——① #282 超投递改走 `dead_letter_if_allowed`（拒写不 ack、消息留 pending）+ 消费循环捕获 `TenantWriteRejected`（计数/不退出），删除租户后不再崩溃重启；② #283 世代随信封走（requeue/handover/DLQ replay 继承源世代），dispatch 按 ContextVar 源世代比对当前 meta 拒旧副本，订阅无上下文且当前世代已发布即具名拒绝（不再 adopt）；③ #284 create_tenant 世代先于 active、发布失败回滚，启动对账同序。测试 unit **5P** + console **2P**；负控隔离副本组合回退 7 处 **6F→6P**；全量 unit **8741P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1086P/13S**、plaita-ai **293P/13S/12 subtests**、layering/wheel/size **46P**；`landing_gate.py ci` rc=0（`8c663df` CI + Console E2E 绿）。
+
 > 一行摘要（第五十七轮，2026-10-21；重复派单核验轮——本任务书（标称第五十轮：A69-02/03 修后复核 + A2R24-10 全端点扫尾核验）与第五十六轮 `b99cfa2` 同内容，属重复派单；按台账序列顺延，本轮不重做全量验收，做独立抽验 + 勘误）：**独立抽验全绿，第五十六轮计数勘误（基线 `origin/main` `b99cfa2`；零代码改动，新增残面 = 0）**——① **A69 族定向实数 44P 全绿**（cleanup 12 + prune_metrics 7 + write_prune 4 + backfill 4 + a78 残面 7 + r52 tombstone 10）；**勘误**：第五十六轮条目「50P／tombstone 16」系计数笔误——`test_r52_execution_tombstone.py` 自创建 `fc03041` 即 10 条（从未改动，全台账唯一一处「16」），已就地修正，实质结论（全绿）不变。② **janitor 预算/游标语义实现复核**（与第五十六轮记录一致）：`prune_indexes` 预算=实际检查成员数（allowance 耗尽即停）、`{cursor,pending}` 游标仅存进程内 `_index_prune_state` 不写 Redis 键、A78-05 EXISTS 判死+ZREM 单条 Lua、只按 EXISTS 不按 score、全库无 `KEYS` 命令（仅 Lua 脚本 KEYS 形参）；真实 Redis 探针不重跑（同一代码树，第五十六轮 21/21 在案）。③ **A2R24-10**：`test_issue_a2r24_request_strict.py` **14P**——cancel 专测 + `test_every_json_request_body_forbids_unknown_fields` OpenAPI 扫尾覆盖 enable/disable、tenants、cluster 等全部写端点；live 探针不重跑（同上）。④ **验收**：`tests/unit` 全量与 console 全量不重跑——`b99cfa2` 相对第五十六轮全量绿树 `4970e05` 仅差 3 行台账、代码零改动（对齐第五十轮 docs-only 不跑全量的先例）；`landing_gate.py ci` 独立 **rc=0**（main `b99cfa2` success；首跑因本机代理 `127.0.0.1:7897` 切断 api.github.com TLS 按 fail-closed rc=1，直连复核可用后摘代理重跑取 rc）；仓库源码/测试零改动（仅本台账勘误 + 追加；他席 `duo-b3-ledger.md` 与未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md` 未触碰）。
 
 > 一行摘要（第五十六轮，2026-10-21；任务书标称第五十轮——台账第五十轮已由 ops-runbook 环境变量实测定版轮占用，按台账序列顺延）：**A69-02/03 修后复核 + A2R24-10 全端点扫尾核验（两个已落批修复的验证轮；基线 `origin/main` `4970e05`；零代码改动，新增残面 = 0）**——① **A69-02/03**（B2 r51 `e374aa1` + 残面 `88607b0`/`3fec442` 均已落）：原 9+10 条规格负控**逐条单跑**全绿——console `test_a69_02_event_canonical.py` **11/11**（§2.6 九条 + TTL env 覆盖 + legacy 频道保留）、unit `test_a69_03_index_cleanup.py` **12/12**（§3.5 十条 + EventFilter 挂载 + 无 KEYS）；A69 族定向 **44P**（cleanup 12 + prune_metrics 7 + write_prune 4 + backfill 4 + a78 残面 7 + tombstone 10；原记 50P/16 为计数笔误，第五十七轮勘误）。**janitor 预算/游标语义**：实现复核（`prune_indexes` 预算=实际检查成员数、进程内 `{cursor,pending}` 游标不写 Redis 键、B78-01 按实际进入桶数轮转、A78-05 单条 Lua 判死删除、只按 EXISTS 不按 score）+ 真实 Redis 8.0.2 db9 探针 **21/21**：budget=1×7 桶×(1 live+1 dead) **7 tick 收敛**、rotation 逐 tick +1 无饿死、单 tick examined≤1、live 7/7 保留、死成员 7/7 清除、收敛后 pending 有界（≤1/桶）且续扫 7 tick 排干；订阅 4 桶×2 orphan **8 tick 收敛**且游标排干；budget=2 全 live examined=2/pruned=0、两 tick 累计覆盖 3 成员（小集合单页全量下「pending 优先+页内补足」）、零误删；全程零 KEYS（commandstats 0→0）、跑后 db9 dbsize=0。② **A2R24-10**（B1 r49 `3d9a741` + r55 `de5a592` 均已落）：抽 **5 类端点**独立探针 **21/21**，未知字段一律 422 `extra_forbidden`——执行控制 `POST /executions/{id}/cancel`（`{"reason"}`）、调度生命周期 `POST /schedules/{id}/enable|disable`（`{"force"}`）、租户生命周期 `DELETE /tenants/{id}`（`{"reason"}`）+ `POST /tenants`（strict create）、集群面 `POST /cluster/refresh` + `POST /cluster/tenant-status/reconcile`、流程 strict body `PUT /flows/{id}/versions/{v}`（拼错乐观锁字段）；其中 enable/disable、tenants、cluster 三族是 r55 落地测试未逐一覆盖的端点。兼容向不误伤：cancel `{}` 200、enable `{}` 200、`DELETE /tenants/ghost` `{}` 404（到达 handler）、正确 `base_updated_at` 200；拒绝无副作用（cancel 意图键未写、调度零入队且 enabled 未翻转、租户列表不变）。console 定向 **25P**（canonical 11 + request_strict 14，含 OpenAPI 扫尾 checked≥66）。③ **验收**：`tests/unit` 全量 **8599P/12S/3498 subtests（rc=0，790.97s）**；`landing_gate.py ci` 独立 **rc=0**（main `4970e05` success）；仓库源码/测试零改动（仅追加本台账；共享 clone 他席 `duo-b3-ledger.md` 与未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md` 未触碰）。
@@ -232,3 +234,52 @@
   plaita-ai **241P/14S/12 subtests**；layering/wheel/size 全绿；
   `landing_gate.py ci` rc=0（4379a76 CI success + Console E2E 绿）。
 - 单 commit 关闭 #280；未触碰他席未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第五十八轮 · #282/#283/#284（2026-10-22，B1 修复席；任务书标称第五十六轮——台账第五十六/五十七轮已被 A69 复核轮占用，按序列顺延）
+
+- 基线：`origin/main` `3276c20`；落地门 main 最近完成 run `8c663df`
+  CI success + Console E2E 绿。
+- **#282（P1）超投递绕过单一死信入口**：`_reclaim_one` 的
+  `max_deliveries` 分支改走 `dead_letter_if_allowed`（守卫/租户写闸拒绝
+  → False：不 ack、不写 DLQ、消息留 pending）；消费循环内层新增
+  `except TenantWriteRejected`（计数 + ERROR，不 ack、不 poison），外层
+  保留同类兜底（覆盖 read/ack 等循环体调用，短退避继续）；新增
+  `note_tenant_write_rejected` 计数。concurrency=1 不再崩溃/重启循环。
+- **#283（P1）世代读取时采样**：信封新增 `tenant_generation`
+  （`enqueue_task`/`RedisStreamTaskQueue.enqueue` 写入）；`_task_from_fields`
+  只解析信封，不再按当前 meta 采样；`_requeue_envelope_kwargs` 继承源世代
+  （retry/handover/死信守卫克隆全族）；DLQ 信封保留源世代、replay 继承；
+  console/schedule/event_filter/dispatch_ledger 生产消息入队时打当前世代。
+  dispatch 入口用消费循环已设置的 `current_tenant_generation()` ContextVar
+  比对当前 meta：不一致/当前缺失即丢弃（不执行）；**未改 `_dispatch_task`
+  签名**，与 #277 订阅写闸复用同源上下文，存量测试替身零感知。无世代存量
+  载体按 legacy 宽限（写闸仍 fail-closed）；`store_subscription` 无世代
+  上下文且当前世代已发布 → `TenantWriteRejected(subscription_generation_
+  missing)`，不再 auto-adopt。两条 87 变异锚点随 event_filter 入队形状同步
+  （old/new 均加 `tenant_generation`，变异语义不变）。
+- **#284（P1）建租户 generation/active 顺序**：`create_tenant` 在
+  `flush()`（取 `created_at`）后、`commit()` 前发布新世代；世代不可确定或
+  发布失败 → `TenantError`，事务回滚，不进入 active。成功后才 commit +
+  发布 active。`publish_tenant_generation` 改为返回 bool（失败 WARNING +
+  False）；启动对账按 generation → status，世代失败计 `failed` 并跳过
+  active。
+- 测试：unit `test_issue282_283_generation.py` **5P**（超投递 reclaim 不抛/
+  pending；副本保源世代；dispatch 拒旧副本；订阅无世代拒绝；consume-loop
+  捕获后继续并计数）；console `test_issue284_create_generation_order.py`
+  **2P**（发布失败回滚；generation→active 顺序 + 旧世代拒写）；既有 #277
+  队列读取用例改为显式信封世代。
+- 负控：隔离副本 `/tmp/r56-nc`（共享 clone 有并发席位）组合回退 7 处实现
+  → **6F**（NC 覆盖的 4 unit + 2 console：`TenantWriteRejected` 穿出
+  `read()`、`KeyError: 'tenant_generation'`、旧副本仍 start、
+  `DID NOT RAISE TenantWriteRejected`、`DID NOT RAISE TenantError`、顺序
+  `['active','generation']`）；还原 **6P**。日志
+  `docs/proofs/data/r56-generation-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8741P/12S/14 deselected/3493
+  subtests**（rebase 到 `8c663df` 后复跑）；e2e+integration **287P/4S**；
+  console **1086P/13S**（rebase 后复跑）；
+  plaita-ai **293P/13S/12 subtests**（`uv run --isolated --extra all`；
+  仓库 venv 缺 mcp/langchain extras，缺 extras 时 MCP stdio 冒烟因子进程
+  ImportError 变红，属环境面）；layering/wheel/size **46P**；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit 关闭 #282/#283/#284；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。

@@ -15,7 +15,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
 from plaita.tenant_context import TenantWriteRejected
-from plaita.server.tenant_status import read_tenant_generation, tenant_write_allowed
+from plaita.server.tenant_status import tenant_write_allowed
 from plaita.runtime_config import (
     LEGACY_GENERATION,
     normalize_generation,
@@ -64,6 +64,8 @@ CONFIG_GENERATION_FIELD = "config_generation"
 BUDGET_GENERATION_FIELD = "budget_generation"
 CONFIG_EFFECTIVE_AT_FIELD = "config_effective_at"
 CONFIG_REJECTED_REASON_FIELD = "config_rejected_reason"
+# plaita#283：租户世代随消息信封持久化（不再在读取时从当前 meta 采样）。
+TENANT_GENERATION_FIELD = "tenant_generation"
 # C4-1：DLQ 保留条数。DLQ 是纯记录流（无消费者），不裁剪会无限增长；
 # 每次入队后 XTRIM 保留最近 N 条。env 可调（PLAITA_DLQ_MAX_LEN）。
 DEFAULT_DLQ_MAX_LEN = 1000
@@ -238,6 +240,17 @@ def _config_generation_from_fields(fields: Dict[Any, Any]) -> str:
     )
 
 
+def _tenant_generation_from_fields(fields: Dict[Any, Any]) -> Optional[str]:
+    """消息信封里的源租户世代（plaita#283）；缺失/空 → None（legacy 载体）。"""
+    for key in (TENANT_GENERATION_FIELD, TENANT_GENERATION_FIELD.encode()):
+        if key in fields:
+            raw = fields[key]
+            value = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+            value = value.strip()
+            return value or None
+    return None
+
+
 def _budget_generation_from_fields(fields: Dict[Any, Any]) -> str:
     return normalize_generation(
         _config_field_from_fields(fields, BUDGET_GENERATION_FIELD), kind="budget"
@@ -260,6 +273,7 @@ def enqueue_task(
     config_generation: Optional[str] = None,
     budget_generation: Optional[str] = None,
     config_effective_at: Optional[str] = None,
+    tenant_generation: Optional[str] = None,
 ) -> str:
     """Append a start/resume task. Creates the stream if needed.
 
@@ -303,6 +317,10 @@ def enqueue_task(
         envelope[BUDGET_GENERATION_FIELD] = budget_generation
     if config_effective_at is not None:
         envelope[CONFIG_EFFECTIVE_AT_FIELD] = config_effective_at
+    # plaita#283：源世代随载体走；重投/交接副本必须继承源值，不能按读取时
+    # 当前 meta 重新采样（同名重建会把旧副本洗成新世代）。
+    if tenant_generation is not None:
+        envelope[TENANT_GENERATION_FIELD] = str(tenant_generation)
     msg_id = redis_client.xadd(stream_key, envelope)
     return _decode(msg_id)
 
@@ -698,6 +716,7 @@ class RedisStreamTaskQueue:
         config_generation: Optional[str] = None,
         budget_generation: Optional[str] = None,
         config_effective_at: Optional[str] = None,
+        tenant_generation: Optional[str] = None,
     ) -> str:
         msg_id = enqueue_task(
             self.redis,
@@ -709,6 +728,7 @@ class RedisStreamTaskQueue:
             config_generation=config_generation,
             budget_generation=budget_generation,
             config_effective_at=config_effective_at,
+            tenant_generation=tenant_generation,
         )
         self._metrics["enqueued"] += 1
         return msg_id
@@ -1290,6 +1310,8 @@ class RedisStreamTaskQueue:
             "config_generation": task.config_generation,
             "budget_generation": task.budget_generation,
             "config_effective_at": task.config_effective_at,
+            # plaita#283：DLQ 保留源世代，replay 继承而不是按当前 meta 重采样。
+            "tenant_generation": task.tenant_generation,
             "payload": task.body if payload is _UNSET else payload,
         }
         if extra:
@@ -1436,7 +1458,7 @@ class RedisStreamTaskQueue:
             config_effective_at=_config_field_from_fields(
                 fields, CONFIG_EFFECTIVE_AT_FIELD
             ),
-            tenant_generation=self._tenant_generation_for({}),
+            tenant_generation=_tenant_generation_from_fields(fields),
         )
         return self.dead_letter_if_allowed(
             task,
@@ -1453,6 +1475,10 @@ class RedisStreamTaskQueue:
 
     def note_failed(self) -> None:
         self._metrics["failed"] += 1
+
+    def note_tenant_write_rejected(self) -> None:
+        """消费循环捕获的世代拒写计数（plaita#282；消息留 pending）。"""
+        self._metrics["tenant_write_rejected"] += 1
 
     def stats(self) -> Dict[str, Any]:
         """Operational snapshot (best-effort; fake/partial Redis ok)."""
@@ -1501,11 +1527,6 @@ class RedisStreamTaskQueue:
         msg_id, fields = messages[0]
         return self._task_from_fields(_decode(msg_id), fields, delivery_count)
 
-    def _tenant_generation_for(self, body: Any) -> Optional[str]:
-        """读取载体租户的当前世代（plaita#277）；读不到 → None（缺省）。"""
-        tenant_id = body.get("tenant_id") if isinstance(body, dict) else None
-        return read_tenant_generation(self.redis, tenant_id)
-
     def _task_from_fields(
         self, message_id: str, fields: Dict[Any, Any], delivery_count: int
     ) -> StreamTask:
@@ -1531,7 +1552,7 @@ class RedisStreamTaskQueue:
             config_effective_at=_config_field_from_fields(
                 fields, CONFIG_EFFECTIVE_AT_FIELD
             ),
-            tenant_generation=self._tenant_generation_for(body),
+            tenant_generation=_tenant_generation_from_fields(fields),
         )
 
     def _pending_delivery_count(self, message_id: str) -> int:
@@ -1791,11 +1812,14 @@ class RedisStreamTaskQueue:
                 self._reclaim_cursor = claimed_id
                 continue
             if task.delivery_count >= self.max_deliveries:
-                if self._guard_allows_dead_letter(task):
-                    self.dead_letter(
-                        task,
-                        reason=f"max_deliveries={self.max_deliveries}",
-                    )
+                # plaita#282：统一走单一入口——dead_letter() 的租户世代闸拒绝
+                # （TenantWriteRejected）由 dead_letter_if_allowed 捕获并返回
+                # False（消息留 pending、计数告警），异常不得穿出 read()/消费
+                # 循环（旧实现在此直调 dead_letter，租户删除后 worker 反复崩溃）。
+                self.dead_letter_if_allowed(
+                    task,
+                    reason=f"max_deliveries={self.max_deliveries}",
+                )
                 self._reclaim_cursor = claimed_id
                 continue
             self._reclaim_cursor = claimed_id

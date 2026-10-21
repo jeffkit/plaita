@@ -294,9 +294,12 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
     """
     queue = _task_queue_name()
     from plaita.runtime_config import envelope_for_stream
+    from plaita.server.tenant_status import read_tenant_generation
 
     return enqueue_task(
-        redis, queue, message, **envelope_for_stream(queue, role="console")
+        redis, queue, message,
+        tenant_generation=read_tenant_generation(redis, message.get("tenant_id")),
+        **envelope_for_stream(queue, role="console"),
     )
 
 

@@ -128,6 +128,7 @@ class TestDlqWriteGate:
             fake,
             STREAM,
             {"type": "start", "tenant_id": TENANT, "execution_id": "e"},
+            tenant_generation="gen-1",
         )
         queue = _queue(fake)
         queue.ensure_group()

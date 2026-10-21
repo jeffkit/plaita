@@ -1671,15 +1671,31 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         """存储事件订阅"""
         await self.initialize()
 
-        # plaita#277：worker 派发上下文里创建的在途订阅带当时世代；外部/
-        # console 订阅没有上下文时捕获当前世代。删除/重建后旧世代写被拒。
+        # plaita#277/#283：worker 派发上下文里创建的在途订阅带当时世代；
+        # 无上下文（外部/存量订阅）**不再**自动 adopt 当前世代——见下方闸门。
         expected_generation = (
             subscription.tenant_generation or current_tenant_generation()
         )
-        if expected_generation is None:
-            expected_generation = await self._read_tenant_generation_async(
+        if expected_generation is None and subscription.tenant_id not in (
+            None, "", "default"
+        ):
+            # plaita#283：无世代上下文（老执行/旧订阅）不能自动 adopt 当前世代
+            # ——同名重建后这会把旧订阅写进新租户。当前世代已发布 ⇒ fail-closed；
+            # 未发布（旧部署/无 meta）才按 legacy 放宽。
+            current_generation = await self._read_tenant_generation_async(
                 subscription.tenant_id
             )
+            if current_generation is not None:
+                logger.warning(
+                    "订阅写入拒绝（plaita#283）：tenant=%s subscription=%s "
+                    "无世代上下文且当前世代=%r——拒绝旧执行订阅",
+                    subscription.tenant_id,
+                    subscription.subscription_id,
+                    current_generation,
+                )
+                raise TenantWriteRejected(
+                    subscription.tenant_id, "subscription_generation_missing"
+                )
         if not await self._tenant_write_allowed(
             subscription.tenant_id, expected_generation
         ):

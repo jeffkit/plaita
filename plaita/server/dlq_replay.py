@@ -449,6 +449,10 @@ def replay_dead_letter(
     effective_at = envelope.get("config_effective_at")
     if isinstance(effective_at, str) and effective_at.strip():
         config_envelope["config_effective_at"] = effective_at.strip()
+    # plaita#283：DLQ replay 继承源租户世代（缺失=legacy，不按当前 meta 猜）。
+    tenant_generation = envelope.get("tenant_generation")
+    if isinstance(tenant_generation, str) and tenant_generation.strip():
+        config_envelope["tenant_generation"] = tenant_generation.strip()
     if schema_version > limit:
         # 入队前拒绝：先入队再靠消费侧死信会让超版本副本（或 A49-01 克隆）
         # 继续污染 DLQ。

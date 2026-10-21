@@ -216,15 +216,29 @@ def create_tenant(store, tenant_id: str, name: str = "",
             contract_secret_key=secret_key,
         )
         session.add(row)
+        # plaita#284：世必须先于 active 发布，且发布失败 ⇒ 建租户失败回滚。
+        # 在 flush（拿到 created_at）后、commit 前写 Redis：失败时事务回滚，
+        # 不产生「active + 旧世代」窗口；成功后才 commit + 发布 active。
+        session.flush()
+        row_generation = (
+            row.created_at.isoformat() if getattr(row, "created_at", None) else None
+        )
+        if not row_generation:
+            raise TenantError(
+                f"租户 {tenant_id} 创建失败：无法确定租户世代（created_at 缺失）"
+            )
+        if not _publish_generation(redis_client, tenant_id, row_generation):
+            raise TenantError(
+                f"租户 {tenant_id} 创建失败：世代发布失败（拒绝进入 active）"
+            )
         session.commit()
         session.refresh(row)
         result = _to_dict(row)
         result["contract_secret_key"] = secret_key  # 仅本次响应返回
     # plaita#255：删除写下的 disabled 墓碑必须被同名重建覆盖，否则新租户
-    # 在 Redis 短视图里仍是「已停用」而被 worker/调度拦截。
+    # 在 Redis 短视图里仍是「已停用」而被 worker/调度拦截。active 必须在
+    # 新世代发布成功之后（#284）。
     _publish_status(redis_client, tenant_id, "active")
-    # plaita#277：同名重建是新世代；旧在途执行的 DLQ/订阅迟到写据此被拒。
-    _publish_generation(redis_client, tenant_id, tenant_generation(store, tenant_id))
     return result
 
 
@@ -312,15 +326,15 @@ def _publish_status(redis_client, tenant_id: str, status: str) -> None:
     )
 
 
-def _publish_generation(redis_client, tenant_id: str, generation) -> None:
-    """把租户世代同步到 Redis meta（plaita#277）；失败只 WARNING。"""
+def _publish_generation(redis_client, tenant_id: str, generation) -> bool:
+    """把租户世代同步到 Redis meta（plaita#277/#284）；返回是否成功。"""
     if redis_client is None or not tenant_id:
-        return
+        return True
     try:
         from plaita.server.tenant_status import publish_tenant_generation
     except ImportError:
-        return
-    publish_tenant_generation(redis_client, tenant_id, generation)
+        return True
+    return publish_tenant_generation(redis_client, tenant_id, generation)
 
 
 def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
@@ -357,11 +371,16 @@ def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
     publish_tenant_status_epoch(redis_client, epoch)
     known = {t["id"]: t["status"] for t in list_tenants(store)}
     for tenant_id, status in known.items():
-        publish_tenant_status(redis_client, tenant_id, status, epoch=epoch)
-        # plaita#277：启动对账也补齐世代（Redis 被清空/旧版本升级后 meta 缺失）。
-        publish_tenant_generation(
+        # plaita#284：generation → status 顺序；世代发布失败不发布 active。
+        if not publish_tenant_generation(
             redis_client, tenant_id, tenant_generation(store, tenant_id)
-        )
+        ):
+            summary["failed"] += 1
+            logger.error(
+                "租户状态对账：租户 %s 世代发布失败，跳过 active 发布", tenant_id
+            )
+            continue
+        publish_tenant_status(redis_client, tenant_id, status, epoch=epoch)
         summary["published"] += 1
 
     try:

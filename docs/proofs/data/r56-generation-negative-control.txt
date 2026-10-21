@@ -1,0 +1,70 @@
+=== 负控 r56：#282/#283 世代载体 + #284 create_tenant 顺序 ===
+
+环境：隔离副本 /tmp/r56-nc（rsync 自本工作树，排除 .git/.venv/frontend），
+PYTHONPATH=/tmp/r56-nc，解释器 = 仓库 .venv/bin/python。
+隔离原因：共享 main clone 有并发席位在跑测试/改台账，负控必须只改副本，
+不得把预修复状态留在共享工作树。
+
+--- 变异（组合，脚本 /tmp/r56_mutate.py，每处断言唯一替换） ---
+#282/#283：
+  1. plaita/server/task_queue.py `_reclaim_one` 超投递分支：
+     dead_letter_if_allowed(...) 改回 `_guard_allows_dead_letter` + 直调
+     `dead_letter(...)`（TenantWriteRejected 重新穿出 read()）。
+  2. plaita/server/flow_worker.py `_requeue_envelope_kwargs`：
+     删除源世代继承块（副本不再携带 tenant_generation）。
+  3. plaita/server/task_queue.py `_task_from_fields`：
+     信封解析改回 `read_tenant_generation(self.redis, body.get("tenant_id"))`
+     （读取时从当前 meta 采样）。
+  4. plaita/server/flow_worker.py `_dispatch_task`：
+     删除 source_gen 与 current_gen 的门禁块（旧副本按当前世代执行）。
+  5. plaita/event/redis.py `store_subscription`：
+     恢复无上下文时 auto-adopt 当前世代（删除 #283 拒绝分支）。
+#284：
+  6. create_tenant 恢复旧顺序：commit → 发布 active → 最后 best-effort
+     发布 generation（删除 flush 后/commit 前的失败回滚块）。
+  7. `_publish_generation` 恢复吞错语义：调用后无条件 `return True`。
+
+命令（变异后，一次跑两个回归文件）：
+  cd /tmp/r56-nc && PYTHONPATH=/tmp/r56-nc \
+    /Users/kong/projects/infra4agent/plaita/.venv/bin/python -m pytest \
+    tests/unit/test_issue282_283_generation.py \
+    plaita-console/backend/tests/console/test_issue284_create_generation_order.py -q
+
+输出（节选；实际 rc=1，6 failed in 0.99s）：
+>       assert queue.read(block_ms=1) is None
+E       plaita.tenant_context.TenantWriteRejected: tenant write rejected:
+        tenant='acme' reason=tenant_disabled; the carrier belongs to a
+        deleted/stale tenant generation
+
+>       assert kwargs["tenant_generation"] == "gen-1"
+E       KeyError: 'tenant_generation'
+
+>           worker._dispatch_task(
+E       AssertionError: old-generation carrier must not start
+
+>       with pytest.raises(TenantWriteRejected):
+E       Failed: DID NOT RAISE TenantWriteRejected
+
+>       with pytest.raises(tenants_svc.TenantError):
+E       Failed: DID NOT RAISE TenantError
+
+>       assert order[:2] == ["generation", "active"], order
+E       AssertionError: ['active', 'generation']
+
+FAILED tests/unit/test_issue282_283_generation.py::TestReclaimTenantRejection::test_deleted_tenant_over_delivery_does_not_raise
+FAILED tests/unit/test_issue282_283_generation.py::TestGenerationTravels::test_requeue_copy_preserves_source_generation
+FAILED tests/unit/test_issue282_283_generation.py::TestGenerationTravels::test_dispatch_rejects_old_generation_copy
+FAILED tests/unit/test_issue282_283_generation.py::TestGenerationTravels::test_subscription_without_generation_is_rejected
+FAILED plaita-console/backend/tests/console/test_issue284_create_generation_order.py::test_generation_publish_failure_aborts_create
+FAILED plaita-console/backend/tests/console/test_issue284_create_generation_order.py::test_generation_published_before_active
+6 failed, 3 warnings in 0.99s
+
+--- 还原后（全部 .py.bak 原样回填） ---
+同一命令：
+  6 passed, 3 warnings in 0.82s
+
+说明：以上负控在**最终实现**（dispatch 经 ContextVar 读源世代）上重跑；
+首轮实现（kwargs 传参）负控同样是 6F，结论一致。
+
+结论：#282/#283 的 4 条契约与 #284 的 2 条契约在修复前均实红；修复后同
+命令 6/6 绿。负控未放宽任何断言，仅回退实现。
