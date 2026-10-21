@@ -57,6 +57,8 @@ try:
         InfrastructureConfig,
         config_redis_url,
         effective_redis_url,
+        frozen_service_redis_urls,
+        redis_url_source,
     )
 except ImportError:
     import sys
@@ -71,6 +73,8 @@ except ImportError:
         InfrastructureConfig,
         config_redis_url,
         effective_redis_url,
+        frozen_service_redis_urls,
+        redis_url_source,
     )
 
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
@@ -1850,7 +1854,12 @@ except ImportError:
 
 
 class ClusterInfoResponse(_RedactedResponseModel):
-    """集群信息响应"""
+    """集群信息响应
+
+    A2R40-01：``redis_url`` 是注册表元数据（plaita#65 优先级序末位），
+    ``data_plane_redis_url`` / ``data_plane_redis_source`` 是数据面真相与
+    裁决来源——两者错位时读/切面必须可见，不得只报元数据。
+    """
     id: str
     name: str
     description: str
@@ -1858,6 +1867,9 @@ class ClusterInfoResponse(_RedactedResponseModel):
     redis_url: str
     created_at: str
     is_active: bool
+    data_plane_redis_url: Optional[str] = None
+    data_plane_redis_source: Optional[str] = None
+    warnings: List[str] = []
 
 
 class ClustersListResponse(_RedactedResponseModel):
@@ -1905,6 +1917,52 @@ class SaveClusterConfigRequest(StrictRequestModel):
     config: dict
 
 
+#: A2R40-01：生效来源的人读标签（错误文案用）。
+_PIN_SOURCE_LABELS = {
+    "config_file": "集群配置文件 redis.url",
+    "console_env": "环境变量 PLAITA_CONSOLE_REDIS_URL",
+}
+#: A2R40-01：正确改面指引（错误文案用）。
+_PIN_SOURCE_HINTS = {
+    "config_file": "集群配置编辑面（PUT /api/clusters/{id}/config）",
+    "console_env": "调整 console 进程的 PLAITA_CONSOLE_REDIS_URL",
+}
+
+
+def _frozen_env_warnings(
+    config: Optional[dict], effective_url: Optional[str]
+) -> List[str]:
+    """A2R40-03：services.*.env 冻结的具体 Redis URL 与数据面生效 URL 不一致
+    的告警文案（``_resolve_env`` 只改写 localhost 占位，冻结字面量会原样
+    透传给服务进程）。"""
+    if not effective_url:
+        return []
+    return [
+        f"服务 {svc} 的 env 把 Redis URL 冻结在 {redact_url_userinfo(url)}，"
+        f"与数据面生效 URL {redact_url_userinfo(effective_url)} 不一致，"
+        "服务重启后仍连旧实例；请同步更新 services env 或改用 ${redis.url} 引用"
+        for svc, url in sorted(frozen_service_redis_urls(config).items())
+        if url != effective_url
+    ]
+
+
+def _redis_plane_view(registry, cluster: "ClusterInfo") -> Dict[str, Any]:
+    """集群数据面 Redis 的可观测视图（A2R40-01/A2R40-03）。
+
+    返回 ``data_plane_redis_url``（生效 URL，经响应序列化层脱敏）、
+    ``data_plane_redis_source``（裁决来源）与 ``warnings``（冻结 env 错位）。
+    """
+    config = registry.get_cluster_config(cluster.id)
+    config_url = config_redis_url(config)
+    source = redis_url_source(config_url)
+    effective = effective_redis_url(config_url, cluster.redis_url)
+    return {
+        "data_plane_redis_url": effective,
+        "data_plane_redis_source": source,
+        "warnings": _frozen_env_warnings(config, effective),
+    }
+
+
 @router.get("/clusters", response_model=ClustersListResponse)
 async def list_clusters(
     http_request: Request,
@@ -1930,7 +1988,8 @@ async def list_clusters(
                 config_path=c.config_path,
                 redis_url=c.redis_url,
                 created_at=c.created_at,
-                is_active=c.is_active
+                is_active=c.is_active,
+                **_redis_plane_view(registry, c)
             )
             for c in clusters
         ],
@@ -1962,7 +2021,8 @@ async def get_active_cluster(
         config_path=active.config_path,
         redis_url=active.redis_url,
         created_at=active.created_at,
-        is_active=True
+        is_active=True,
+        **_redis_plane_view(registry, active)
     )
 
 
@@ -1992,7 +2052,8 @@ async def get_cluster(
         config_path=cluster.config_path,
         redis_url=cluster.redis_url,
         created_at=cluster.created_at,
-        is_active=cluster.is_active
+        is_active=cluster.is_active,
+        **_redis_plane_view(registry, cluster)
     )
 
 
@@ -2034,7 +2095,8 @@ async def create_cluster(
         config_path=cluster.config_path,
         redis_url=cluster.redis_url,
         created_at=cluster.created_at,
-        is_active=cluster.is_active
+        is_active=cluster.is_active,
+        **_redis_plane_view(registry, cluster)
     )
 
 
@@ -2047,13 +2109,48 @@ async def update_cluster(
 ):
     """
     更新集群信息
+
+    A2R40-01：``redis_url`` 字段写的是注册表元数据，而元数据在 plaita#65
+    优先级序中仅是末位——集群配置文件具体地址 / CONSOLE env / 配置占位任一
+    存在时，改元数据对数据面是静默 no-op（PUT→GET→switch 却都回显新 URL）。
+    因此带 ``redis_url`` 且生效来源高于元数据、又与生效 URL 不同 ⇒ 具名 409
+    拒绝，文案给出生效来源与 URL；与生效 URL 相同（对齐真相）或元数据本就
+    生效时照常放行。
     """
     ensure_platform_admin(
         http_request, identity, action="cluster.registry.update",
         resource="cluster", target=cluster_id,
     )
     registry = get_cluster_registry()
-    
+    existing = registry.get_cluster(cluster_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("cluster_not_found", f"集群 {cluster_id} 不存在"),
+        )
+
+    if request.redis_url is not None:
+        config_url = config_redis_url(registry.get_cluster_config(cluster_id))
+        source = redis_url_source(config_url)
+        if source != "registry_metadata":
+            effective = effective_redis_url(config_url, existing.redis_url)
+            if request.redis_url != effective:
+                raise HTTPException(
+                    status_code=409,
+                    detail=error_detail(
+                        "cluster_redis_url_pinned",
+                        f"数据面 Redis 由{_PIN_SOURCE_LABELS[source]}钉住"
+                        f"（当前生效 {redact_url_userinfo(effective)}）；"
+                        "注册表元数据在 plaita#65 优先级序中仅为末位，本次修改"
+                        "不会改变数据面连接。请改用"
+                        f"{_PIN_SOURCE_HINTS[source]}后重试，或先把元数据"
+                        "对齐当前生效 URL。",
+                        effective_source=source,
+                        effective_redis_url=redact_url_userinfo(effective),
+                        cluster_id=cluster_id,
+                    ),
+                )
+
     try:
         cluster = registry.update_cluster(
             cluster_id=cluster_id,
@@ -2064,6 +2161,13 @@ async def update_cluster(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=error_detail("cluster_not_found", str(e)))
 
+    view = _redis_plane_view(registry, cluster)
+    if view["warnings"]:
+        logger.warning(
+            "集群 %s 元数据更新后数据面生效 URL 与服务 env 冻结 URL 不一致: %s",
+            cluster_id, "；".join(view["warnings"]),
+        )
+
     _audit_cluster(http_request, "registry.update", cluster_id,
                    {"id": cluster.id, "name": cluster.name})
     return ClusterInfoResponse(
@@ -2073,7 +2177,8 @@ async def update_cluster(
         config_path=cluster.config_path,
         redis_url=cluster.redis_url,
         created_at=cluster.created_at,
-        is_active=cluster.is_active
+        is_active=cluster.is_active,
+        **view
     )
 
 
@@ -2228,7 +2333,8 @@ async def switch_cluster(
         config_path=cluster.config_path,
         redis_url=cluster.redis_url,
         created_at=cluster.created_at,
-        is_active=True
+        is_active=True,
+        **_redis_plane_view(registry, cluster)
     )
 
 
@@ -2311,13 +2417,33 @@ async def save_cluster_config_detail(
         try:
             from ..services.service_manager import reset_service_manager
         except ImportError:  # 平铺布局（cwd=backend）运行时
-            from services.service_manager import reset_service_manager  # type: ignore
+            from services.service_manager import reset_service_manager
         reset_service_manager()
+
+    # A2R40-03：services.*.env 创建期冻结的具体 Redis URL 不随 redis.url 迁移
+    # （_resolve_env 只改写 localhost 占位），服务重启仍连旧实例——显式警告，
+    # 不静默。
+    target_info = registry.get_cluster(cluster_id)
+    save_effective = effective_redis_url(
+        config_redis_url(payload.config),
+        target_info.redis_url if target_info else None,
+    )
+    warnings = _frozen_env_warnings(payload.config, save_effective)
+    if warnings:
+        logger.warning(
+            "集群 %s 配置保存后数据面生效 URL 为 %s，但服务 env 仍冻结旧 URL: %s",
+            cluster_id,
+            redact_url_userinfo(save_effective) if save_effective else "<none>",
+            "；".join(warnings),
+        )
 
     # 配置内容含 redis.url / 进程参数 / docker env：只记目标集群与是否活动。
     _audit_cluster(
         request, "registry.save_config", cluster_id,
         {"id": cluster_id, "active_cluster": is_active_cluster},
     )
-    return {"success": True, "message": "配置已保存"}
+    response: Dict[str, Any] = {"success": True, "message": "配置已保存"}
+    if warnings:
+        response["warnings"] = warnings
+    return response
 
