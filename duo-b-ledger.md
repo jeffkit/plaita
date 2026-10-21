@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第五十九轮，2026-10-22；任务书标称第五十七轮——台账第五十七/五十八轮已被 A69 复核轮与 #282-284 轮占用，按台账序列顺延）：**#285 P1 owner CAS 收口（基线 `c08e118`）**——A 写占位行/入队/写 owner 前用 Lua 复核 map==我、无墓碑、owner==我（claiming TTL 过期但映射仍属我时原地续期），owner 写入改 CAS 绝不覆盖他 id；owner 键改独立前缀 `{ns}:start-dedup-owner:{key}` 修 `foo`/`foo:owner` 碰撞；败者不再 ghost 200（载体未落返回 409 in-progress，重试收敛），A 失去认领收敛当前映射或 409 superseded；占位行失败 503+Retry-After 并释放映射/写墓碑。测试 console **5P**（#280 并发用例按新契约调整，同 id/单载体断言保持）；负控 pre-fix worktree **5F→5P** + A1 探针 owner TTL=1s/force DELETE/后缀碰撞/3+ ghost 全部实红→单 id 单载体；全量 console **1091P/13S**、unit **8741P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、plaita-ai **293P/13S/12 subtests**、layering/wheel/size **46P**；`landing_gate.py ci` rc=0（`c08e118` CI + Console E2E 绿）。
+
 > 一行摘要（第五十八轮，2026-10-22；任务书标称第五十六轮——台账第五十六/五十七轮已被 A69 复核轮占用，按台账序列顺延）：**#282/#283/#284 三单 P1 收口（基线 `3276c20`）**——① #282 超投递改走 `dead_letter_if_allowed`（拒写不 ack、消息留 pending）+ 消费循环捕获 `TenantWriteRejected`（计数/不退出），删除租户后不再崩溃重启；② #283 世代随信封走（requeue/handover/DLQ replay 继承源世代），dispatch 按 ContextVar 源世代比对当前 meta 拒旧副本，订阅无上下文且当前世代已发布即具名拒绝（不再 adopt）；③ #284 create_tenant 世代先于 active、发布失败回滚，启动对账同序。测试 unit **5P** + console **2P**；负控隔离副本组合回退 7 处 **6F→6P**；全量 unit **8741P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1086P/13S**、plaita-ai **293P/13S/12 subtests**、layering/wheel/size **46P**；`landing_gate.py ci` rc=0（`8c663df` CI + Console E2E 绿）。
 
 > 一行摘要（第五十七轮，2026-10-21；重复派单核验轮——本任务书（标称第五十轮：A69-02/03 修后复核 + A2R24-10 全端点扫尾核验）与第五十六轮 `b99cfa2` 同内容，属重复派单；按台账序列顺延，本轮不重做全量验收，做独立抽验 + 勘误）：**独立抽验全绿，第五十六轮计数勘误（基线 `origin/main` `b99cfa2`；零代码改动，新增残面 = 0）**——① **A69 族定向实数 44P 全绿**（cleanup 12 + prune_metrics 7 + write_prune 4 + backfill 4 + a78 残面 7 + r52 tombstone 10）；**勘误**：第五十六轮条目「50P／tombstone 16」系计数笔误——`test_r52_execution_tombstone.py` 自创建 `fc03041` 即 10 条（从未改动，全台账唯一一处「16」），已就地修正，实质结论（全绿）不变。② **janitor 预算/游标语义实现复核**（与第五十六轮记录一致）：`prune_indexes` 预算=实际检查成员数（allowance 耗尽即停）、`{cursor,pending}` 游标仅存进程内 `_index_prune_state` 不写 Redis 键、A78-05 EXISTS 判死+ZREM 单条 Lua、只按 EXISTS 不按 score、全库无 `KEYS` 命令（仅 Lua 脚本 KEYS 形参）；真实 Redis 探针不重跑（同一代码树，第五十六轮 21/21 在案）。③ **A2R24-10**：`test_issue_a2r24_request_strict.py` **14P**——cancel 专测 + `test_every_json_request_body_forbids_unknown_fields` OpenAPI 扫尾覆盖 enable/disable、tenants、cluster 等全部写端点；live 探针不重跑（同上）。④ **验收**：`tests/unit` 全量与 console 全量不重跑——`b99cfa2` 相对第五十六轮全量绿树 `4970e05` 仅差 3 行台账、代码零改动（对齐第五十轮 docs-only 不跑全量的先例）；`landing_gate.py ci` 独立 **rc=0**（main `b99cfa2` success；首跑因本机代理 `127.0.0.1:7897` 切断 api.github.com TLS 按 fail-closed rc=1，直连复核可用后摘代理重跑取 rc）；仓库源码/测试零改动（仅本台账勘误 + 追加；他席 `duo-b3-ledger.md` 与未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md` 未触碰）。
@@ -282,4 +284,42 @@
   ImportError 变红，属环境面）；layering/wheel/size **46P**；
   `landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit 关闭 #282/#283/#284；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第五十九轮 · #285（2026-10-22，B1 修复席；任务书标称第五十七轮——台账第五十七/五十八轮已被 A69 复核轮与 #282-284 轮占用，按序列顺延）
+
+- 基线：`origin/main` `c08e118`；落地门 main 最近完成 run `c08e118`
+  CI success + Console E2E 绿。
+- **#285（P1）owner 过期/墓碑后原认领者 A 的迟到写**：
+  - `_start_claim_guard`（Lua）：A 在写 queued 占位行、入队前复核
+    map==我、无我的墓碑、owner==claiming:我；通过则续期。claiming TTL
+    过期但映射仍属我且无人接管 ⇒ 原地续期（不双 id）；被接管/墓碑 ⇒
+    放弃写/入队。Redis 故障 fail-closed。
+  - `_set_start_dedup_owner` 改 CAS（Lua）：只允许 map==我、无墓碑、owner
+    缺省或同 id（claiming→enqueued）；绝不覆盖他 id 的 owner。入队后 CAS
+    失败 ⇒ 清行/释放配额，收敛当前映射或 409。
+  - owner 键改独立前缀 `{ns}:start-dedup-owner:{key}`（旧 `<map>:owner`
+    在 `dedup_key="foo:owner"` 时与 `"foo"` 的 map 键碰撞）。
+  - 败者端：行不存在时有界等 A 落行，等不到且认领有效 ⇒ 409
+    `execution_start_in_progress`（同一 dedup_key 重试），映射释放/换主/
+    墓碑 ⇒ 重新认领；行存在但 owner=claiming 时也等 enqueued，不在载体
+    落盘前发 200（ghost 200）。
+  - 失败路径：占位行失败 503 + Retry-After，释放映射/配额并写执行墓碑
+    （经 `_discard_queued_placeholder`）；等待中的败者重查后换新 id。
+- 测试：console `test_issue285_owner_guards.py` **5P**（owner TTL=1s 慢
+  占位行、force DELETE+live claiming、foo/foo:owner 四键独立、3+ 败者
+  无 ghost 200、owner CAS 不覆盖）；#280 并发用例按新契约调整（B 先拿
+  409 in-progress，A 完成后同 key 重试收敛；同 id/单载体/配额断言不变）。
+  worker 侧零改动（#280 worker 消费去重未动）。
+- 负控：pre-fix `git worktree`（`c08e118`，本单未提交）+ 新用例 →
+  **5F**（A 返回自己 id、键碰撞 3==4、B 200 而非 409、`allow_from_state`
+  缺失）；主工作树同命令 **5P**。A1 r103 探针（ROOT 参数化）：owner TTL=1s
+  双 200/双载体/owner 覆盖；3+ 败者 ghost 200（queue 空）；force DELETE
+  A 200 墓碑 id+双载体；后缀碰撞重试队列增长——post-fix 均单 id/单载体/
+  409 或收敛。日志 `docs/proofs/data/r57-owner-cas-negative-control.txt`。
+- 验收：全量 console **1091P/13S**；unit `-m "not slow"` **8741P/12S/14
+  deselected/3493 subtests**；e2e+integration **287P/4S**；plaita-ai
+  **293P/13S/12 subtests**（`uv run --isolated --extra all`）；layering/
+  wheel/size **46P**；`landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit 关闭 #285；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

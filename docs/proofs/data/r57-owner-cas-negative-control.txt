@@ -1,0 +1,109 @@
+=== 负控 r57：#285 owner 过期/墓碑后原认领者的迟到写 ===
+
+修复前环境：`git worktree add --detach /tmp/r57-nc c08e118`（本单未提交，
+即 #280 后的缺陷态）；把新增 `test_issue285_owner_guards.py` 拷入后运行。
+修复后：主工作树（本单改动）。解释器 = 仓库 `.venv/bin/python`。
+
+--- A. 回归用例（先红后绿） ---
+命令：
+  cd <tree>/plaita-console/backend && PYTHONPATH=<tree>:<tree>/plaita-console/backend \
+    /Users/kong/projects/infra4agent/plaita/.venv/bin/python -m pytest \
+    tests/console/test_issue285_owner_guards.py -q
+
+修复前（rc=1）：
+FAILED ...::test_owner_expiry_slow_placeholder_single_id
+FAILED ...::test_force_delete_inflight_a_loses_claim
+FAILED ...::test_owner_key_namespace_avoids_suffix_collision
+FAILED ...::test_losers_get_in_progress_not_ghost_200_when_winner_fails
+FAILED ...::test_owner_cas_never_overwrites_other_id
+5 failed in 2.95s
+
+关键断言：
+>       assert resp_a.json()["execution_id"] == id_b, "A 不得返回自己的过期 id"
+E       AssertionError: A 不得返回自己的过期 id
+E       assert '1d89b6c5...' == '726536e6...'
+
+>       assert resp_a.json()["execution_id"] == id_b, "A 不得返回已墓碑的自己的 id"
+E       AssertionError: A 不得返回已墓碑的自己的 id
+
+>       assert len({map_foo, map_owner, owner_foo, owner_owner}) == 4
+E       AssertionError: assert 3 == 4
+E        +  where 3 = len({'plaita:start-dedup:foo',
+E        +                  'plaita:start-dedup:foo:owner',
+E        +                  'plaita:start-dedup:foo:owner:owner'})
+
+>           assert resp.status_code == 409, (name, resp.text)
+E       AssertionError: ('B', '{"status":"queued", ...,
+E            "message":"同 dedup_key 的 start 已受理（并发请求收敛到同一执行）"}')
+E       assert 200 == 409
+
+>       assert not executions_api._set_start_dedup_owner(..., allow_from_state=...)
+E       TypeError: _set_start_dedup_owner() got an unexpected keyword argument
+E       'allow_from_state'
+
+修复后（同一命令，主工作树）：
+  5 passed in 2.73s
+
+--- B. A1 r103 探针口径（owner TTL=1s / force DELETE） ---
+探针：/tmp/r57_probe_owner_edges.py、/tmp/r57_probe_force_delete.py（A1 原件
+仅把 ROOT 改为 argv[1]）。运行：
+  PYTHONPATH=<tree>:<tree>/plaita-console/backend \
+    .venv/bin/python /tmp/r57_probe_owner_edges.py <tree>
+
+B1. owner 过期 vs 慢占位行（case 2）
+修复前：
+  A: 200 d2ec810e71b244f583bb1e614e089dc4
+  B: 200 9dc310755dec4245b3a75c44b41017e3
+  map: 9dc310755dec4245b3a75c44b41017e3
+  owner: enqueued:d2ec810e71b244f583bb1e614e089dc4   ← A 覆盖 B
+  queue ids: ['9dc...', 'd2e...']                     ← 两条载体
+修复后：
+  A: 200 d61a99a84dd9451a83516c05d2e4e9ec
+  B: 200 d61a99a84dd9451a83516c05d2e4e9ec            ← 收敛同一 id
+  map: d61a99a84dd9451a83516c05d2e4e9ec
+  queue ids: ['d61a...']                              ← 单载体
+
+B2. 3+ 败者 + A 落行失败（case 3）
+修复前：
+  A 503 None None
+  B 200 43f8731919754e98bc0f180f068446d5 queued      ← ghost 200
+  C 200 43f8731919754e98bc0f180f068446d5 queued
+  D 200 43f8731919754e98bc0f180f068446d5 queued
+  queue ids: [] rows: [False, False, False, False]    ← 无行无载体
+修复后：
+  A 503 None None
+  B 409 None None                                     ← in-progress，重试
+  C 409 None None
+  D 409 None None
+  queue ids: []
+
+B3. force DELETE 与 live claiming 交错
+修复前：
+  A result: 200 {'execution_id': '3281accd...'}       ← 墓碑 id
+  B result: 200 {'execution_id': '43473b79...'}
+  map: 43473b79...  owner: enqueued:3281accd...       ← A 覆盖 B
+  queue ids: ['43473b79...', '3281accd...']           ← 两条载体
+  A row exists: False
+修复后：
+  A result: 200 {'execution_id': 'b3150c7f...', 'message':
+    '同 dedup_key 的 start 已受理（幂等重试收敛到既有执行）'}
+  B result: 200 {'execution_id': 'b3150c7f...'}
+  map: b3150c7f...
+  queue ids: ['b3150c7f...']                          ← 单载体
+  A row exists: False
+
+B4. dedup_key 后缀碰撞（case 1）
+修复前（queue 随重试增长）：
+  foo: c12ad1b9...  foo:owner: e68ca0af...
+  map foo: c12ad1b9...  map foo:owner: e68ca0af...
+  owner foo: e68ca0af...                              ← 占用 foo:owner 的 map 位
+  foo retry: c12ad1b9... → queue 再增一条 c12ad1b9
+  foo:owner retry: 52d678d5...                        ← 换新 id
+修复后：
+  map foo / map foo:owner 各自独立；owner 用
+  `{ns}:start-dedup-owner:{key}`（探针打印的旧 `<map>:owner` 位为 None 属预期）
+  foo retry → 03fee...；foo:owner retry → e845...（均稳定）
+  queue ids 不随重试增长（两条，各一次）
+
+结论：修复前两条 owner 边界均实红（双 200/双载体/owner 覆盖/ghost 200/键
+碰撞），修复后同一探针与回归用例全绿；未放宽断言。

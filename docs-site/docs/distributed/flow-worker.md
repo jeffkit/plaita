@@ -496,6 +496,17 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   （无自命中分支）消费带 dedup_key 的载体会按 hit 回报现状而不启动——
   **必须先升 worker 池、后升 console**（与 schema_version 升级同一纪律；
   无 dedup_key 的载体与 queued 占位行对新旧 worker 均按首投处理，不受影响）；
+- **生产侧所有权复核（plaita#285）**：认领者标记存独立键
+  `{ns}:start-dedup-owner:{key}`（不再用 `<map>:owner`——后者在
+  `dedup_key="foo:owner"` 时与 `"foo"` 的映射键碰撞）。原认领者 A 在写
+  queued 占位行、入队、写 `enqueued:<id>` 前都做一次 Lua 复核
+  「映射==我、无执行墓碑、owner==我」；claiming TTL 过期但映射仍属我且无人
+  接管时原地续期，被接管/force 删除则放弃写/入队。owner 写入是 CAS，绝不
+  覆盖另一个 id 的 owner。POST 的行为：载体尚未落盘时同 key 的并发请求返回
+  **409 `execution_start_in_progress`**（客户端用同一 dedup_key 重试；不返回
+  无载体的 ghost 200）；A 失去认领时收敛到当前映射的合法 id，或 409
+  `execution_start_superseded`。占位行写入失败返回 503 并释放映射 + 写执行
+  墓碑，之前收到 200 的调用方应重查（404/墓碑）后用同一 key 重试。
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。

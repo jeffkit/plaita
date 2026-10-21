@@ -137,10 +137,14 @@ def test_concurrent_same_key_returns_one_id_and_one_carrier(env, monkeypatch):
     thread_a.join(8)
 
     assert results["A"].status_code == 200, results["A"].text
-    assert results["B"].status_code == 200, results["B"].text
+    # plaita#285：载体尚未落盘时 B 不再返回（可能成为 ghost 的）200，而是
+    # 明确 409 in-progress；用同一 dedup_key 重试后收敛到 A。
+    assert results["B"].status_code == 409, results["B"].text
+    assert results["B"].json()["detail"]["error"] == "execution_start_in_progress"
     id_a = results["A"].json()["execution_id"]
-    id_b = results["B"].json()["execution_id"]
-    assert id_a == id_b, f"同 dedup_key 并发 POST 返回两个 id: {id_a} / {id_b}"
+    retry = _post_start(_client(env), dedup_key="race-key")
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["execution_id"] == id_a
     assert _queued_ids(env) == [id_a], "同 dedup_key 只能有一条 start 载体"
     assert tenant_running_count(env, TENANT) == 1
 
