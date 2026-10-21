@@ -34,6 +34,51 @@ def _run(cmd: list[str]) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
+def _console_e2e_verdict() -> tuple[str, dict | None]:
+    """Console E2E（argusai 全系统）对 main 最新 head 的判决。
+
+    返回 ``(state, run)``，state ∈ green/red/unknown/nodata。只认**最新
+    head** 上已完成的 run：老 head 的红/绿都只是历史（并发推送会取消旧
+    head 的 run），最新 head 尚无完成 run（排队/在跑）时按 unknown 处理、
+    不熔断。2026-10-21 教训：该工作流自 9fa0afd 起八连红（chaos-dlq），主门
+    ci.yml 全绿，本脚本对它失明。
+    """
+    rc, out = _run([
+        "gh", "run", "list", "-R", REPO, "--branch", "main",
+        "--workflow", "console-e2e.yml",
+        "--limit", "10", "--json", "conclusion,status,headSha,displayTitle,createdAt",
+    ])
+    if rc != 0:
+        return "unknown", None
+    import json
+
+    runs = json.loads(out or "[]")
+    if not runs:
+        return "nodata", None
+    newest_sha = runs[0]["headSha"]
+    deadline = time.time() + 600
+    while True:
+        for r in runs:
+            if r.get("headSha") != newest_sha or r.get("status") != "completed":
+                continue
+            return ("green" if r.get("conclusion") == "success" else "red"), r
+        # 最新 head 尚无完成 run（排队/在跑）：等待其判决（≤10 分钟），
+        # 超时按 unknown 处理、不放开（调用方 rc=2）。
+        if time.time() >= deadline:
+            return "unknown", None
+        time.sleep(20)
+        rc, out = _run([
+            "gh", "run", "list", "-R", REPO, "--branch", "main",
+            "--workflow", "console-e2e.yml",
+            "--limit", "10", "--json", "conclusion,status,headSha,displayTitle,createdAt",
+        ])
+        if rc != 0:
+            continue
+        runs = json.loads(out or "[]")
+        if runs and runs[0]["headSha"] != newest_sha:
+            newest_sha = runs[0]["headSha"]  # 又有新推送：以新 head 为准
+
+
 def cmd_ci(override: str | None) -> int:
     """检查 origin/main 上 ci.yml 最近一次已完成 run 的结论。"""
     rc, out = _run([
@@ -92,8 +137,28 @@ def cmd_ci(override: str | None) -> int:
         f"conclusion={latest['conclusion']}  |  {latest['displayTitle'][:60]}"
     )
     if latest["conclusion"] == "success":
-        print("[landing-gate] ✅ main CI 绿，允许落地")
-        return 0
+        print("[landing-gate] ✅ main CI 绿")
+        state, e2e = _console_e2e_verdict()
+        if state == "green":
+            print(f"[landing-gate] ✅ Console E2E 绿（{e2e['headSha'][:7]}）")
+            print("[landing-gate] ✅ 允许落地")
+            return 0
+        if state == "red":
+            print(
+                f"[landing-gate] ❌ Console E2E 红（{e2e['headSha'][:7]} "
+                f"conclusion={e2e['conclusion']} | {e2e.get('displayTitle', '')[:50]}）——落地熔断，"
+                "先修 main 或走双 ack 豁免（--override）",
+                file=sys.stderr,
+            )
+            if override:
+                print(f"[landing-gate] ⚠️ OVERRIDE（红灯豁免，留痕）：{override}")
+                return 0
+            return 1
+        print(
+            "[landing-gate] ⏳ Console E2E 最新 head 10 分钟无判决（排队/在跑/gh 不可读）"
+            "——无结论，不放开，稍后重试"
+        )
+        return 2
     if override:
         print(f"[landing-gate] ⚠️ OVERRIDE（红灯豁免，留痕）：{override}")
         return 0
