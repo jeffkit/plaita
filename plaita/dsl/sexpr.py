@@ -271,6 +271,23 @@ def _opt(kwargs: Dict[str, Any], *names: str) -> Any:
     return None
 
 
+def _reject_caps_none(kwargs: Dict[str, Any], *names: str) -> None:
+    """caps 数值字段（requestTimeout/maxRedirects/retryTimes）的显式 None 闸。
+
+    ``:max-redirects None`` 的 None 原子在词法层读成 Python ``None``
+    （nil/None/null 三拼写同源），与「键缺席=省略」在 ``_opt`` 里不可区分 ⇒
+    此前被当省略静默落默认，而 JSON/console（Pydantic 非可选数值字段的
+    int_type）/Builder/codeflow 对显式 None 具名拒——五入口对 None 口径统一
+    为拒。真正可选的字段（如 :subscription-timeout，模型本就 Optional）
+    不接此闸，None=省略照旧。
+    """
+    for n in names:
+        if n in kwargs and kwargs[n] is None:
+            raise SyntaxError(
+                f":{n} 不接受显式 None（caps 数值字段省略即用默认；"
+                "显式 None 与 JSON/Builder/codeflow 同口径拒绝）")
+
+
 def _value(x: Any) -> Any:
     """把原子转成 IR 值。Symbol/Keyword 都是 str 子类，直接用即可。
 
@@ -423,6 +440,7 @@ def _compile_error_handler(form: Any) -> Dict[str, Any]:
         strategy = "continue_with" if strategy == "continue-with" else strategy
         raise SyntaxError(f"unknown error handler strategy: {strategy!r}")
     spec: Dict[str, Any] = {"strategy": strategy}
+    _reject_caps_none(kw, "retry", "retry-times")
     retry = _opt(kw, "retry", "retry-times")
     if retry is not None:
         spec["retryTimes"] = retry
@@ -921,10 +939,12 @@ def _c_http(args: List[Any], ctx: _Ctx) -> Dict[str, Any]:
                 f"得到 {block!r}"
             )
         spec["blockPrivateNetworks"] = block
+    _reject_caps_none(kw, "request-timeout", "requestTimeout", "request_timeout")
     timeout = _positive_seconds(kw, "request-timeout", "requestTimeout",
                                  "request_timeout")
     if timeout is not None:
         spec["requestTimeout"] = timeout
+    _reject_caps_none(kw, "max-redirects", "maxRedirects", "max_redirects")
     redirects = _opt(kw, "max-redirects", "maxRedirects", "max_redirects")
     if redirects is not None:
         ok = (not isinstance(redirects, bool)

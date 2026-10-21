@@ -12,6 +12,7 @@
 - [ ] 没有跨分支同名赋值（变量名即节点 id，无 phi 合并）
 - [ ] 没在 map/集合子流程的 end 里引用 if 块内赋值的节点；跨作用域聚合走了 MAP 输出（`NODE.<集合id>`）或 run 级报告通道
 - [ ] 没把 `timeout=` 挪作他用（保留 kwargs，ISO 时长如 `PT5S`）
+- [ ] 节点传参没用动态 `**` 展开（只认字符串键的 dict 字面量，逐键等价具名 kwargs；caps 字段直接写具名 kwargs）
 - [ ] 接表达式的自定义节点字段声明为 `Optional[Any]` / `Optional[str]`，不是 `int`/`bool` 强类型
 - [ ] 用 `Flow.run(**input)` 入口时 `$INPUT` 就是该 dict；若直接操作 `FlowExecution.run`，运行参数走 `params=`
 - [ ] 大段 prompt 在业务节点预拼，flow 图里 `{% %}` 只引用预拼串
@@ -65,6 +66,12 @@ def bad(INPUT):
 ### 2.3 `timeout=` 是保留 kwargs
 
 所有节点通用字段 `id=` / `timeout=` / `on_error=ErrorHandler(...)` 走基类；`timeout` 收 ISO 时长（`PT5S`）。自定义节点别声明同名字段。
+
+**`**` 展开与 caps 字段**：节点调用上的 `**` 展开只认字符串键的 dict **字面量**
+（逐键等价具名 kwargs，合法值生效而非静默丢弃）；动态 dict（变量/调用）、非字符串
+键、与具名同键编译期具名拒（自定义节点调用的 `**` 仍不支持）。caps 字段
+`requestTimeout`/`maxRedirects`/`retryTimes` 过编译期字面量门：负数/表达式/显式
+None 具名拒，`+5`/`-0` 这类单层 `±` 字面量折叠放行。动态传参改用具名 kwargs。
 
 ### 2.4 接表达式的节点字段一律 `Optional[Any]`
 

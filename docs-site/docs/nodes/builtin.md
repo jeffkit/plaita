@@ -297,6 +297,9 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 （拒绝回环/内网/链路本地等私网段）、`maxRedirects`（默认 5，**上限 20**，必须是
 **非负整数**：负值 / 非有限 / 小数 / 布尔 / 字符串（含数字字符串 `"5"`）在构造期具名
 拒绝，`0` 合法 = 不跟随重定向；同步与异步同口径，超限报 `Too many redirects`）。
+三个 caps 字段的**显式 `None`** 与省略不同：省略即用默认，显式 `None` 具名拒绝
+（五入口同口径——S-expr 的 `:max-redirects nil` / `None` / `null` 三拼写同闸，
+`@flow` 的具名 `None` 与 `**` dict 字面量里的 `None` 同拒）。
 上述边界均在**构造期**校验：保存/发布/加载时越界直接失败，避免单个节点长期占用共享
 worker。负值必须在构造期拒绝——sync/async 的重定向循环对负值解释不同（sync 会先发
 一跳，async 的 `range(max_redirects+1)` 为空则一跳都不发）。执行级取消
