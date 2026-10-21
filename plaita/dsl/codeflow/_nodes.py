@@ -46,14 +46,23 @@ def _caps_literal(node: ast.AST, field: str, *, integer: bool) -> Any:
     要么在 ErrorHandler 里因「只认 ``ast.Constant``」被**静默丢弃**
     （``retry_times=-5`` 等价于没写）。现在构造期具名拒绝：负数、布尔、
     字符串、表达式，以及整数字段的非有限/带小数值——与其他四入口同口径。
+    ``+5``/``-0`` 是合法 Python 数值字面量（UnaryOp ± 于数值 Constant），
+    折叠为等价值放行，与 JSON/Builder 对同一数值的接受对齐；``--5`` 这类
+    叠套仍按「必须是数字字面量」具名拒（表达面止于单层 ±）。
     """
-    if (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
+    src_node = node  # 报错行号锚点：折叠后的合成 Constant 不带 lineno
+    if (isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, (ast.USub, ast.UAdd))
             and isinstance(node.operand, ast.Constant)
             and isinstance(node.operand.value, (int, float))
             and not isinstance(node.operand.value, bool)):
-        raise _CodeflowError(
-            f"{field} 不能为负数: -{node.operand.value!r}"
-            "（codeflow 编译期拒绝，与其他入口同口径）", node)
+        value = node.operand.value if isinstance(node.op, ast.UAdd) \
+            else -node.operand.value
+        if value < 0:
+            raise _CodeflowError(
+                f"{field} 不能为负数: {value!r}"
+                "（codeflow 编译期拒绝，与其他入口同口径）", src_node)
+        node = ast.Constant(value=value)
     if (not isinstance(node, ast.Constant)
             or isinstance(node.value, bool)
             or not isinstance(node.value, (int, float))):
@@ -61,16 +70,71 @@ def _caps_literal(node: ast.AST, field: str, *, integer: bool) -> Any:
             else type(node).__name__
         raise _CodeflowError(
             f"{field} 必须是数字字面量（布尔/字符串/表达式不支持）: {shown}",
-            node)
+            src_node)
     value = node.value
     if not math.isfinite(value):
-        raise _CodeflowError(f"{field} 必须是有限数字: {value!r}", node)
+        raise _CodeflowError(f"{field} 必须是有限数字: {value!r}", src_node)
     if integer:
         if int(value) != value:
             raise _CodeflowError(
-                f"{field} 必须是有限整数: {value!r}", node)
+                f"{field} 必须是有限整数: {value!r}", src_node)
         return int(value)
     return value
+
+
+def _fold_dict_display(d: ast.Dict) -> Dict[str, ast.AST]:
+    """dict 展示式 → ``{字符串键: 值 AST}``（``{**inner}`` 递归折叠，同键后者胜）。
+
+    键须是字符串字面量（数字/布尔等标量具名拒）；嵌套 ``**`` 源与非字面量键
+    静态不可校验，归入「caps 字段不支持动态展开」具名拒。
+    """
+    out: Dict[str, ast.AST] = {}
+    for k, v in zip(d.keys, d.values):
+        if k is None:  # 展示式内嵌 ** 展开
+            if isinstance(v, ast.Dict):
+                out.update(_fold_dict_display(v))
+                continue
+            raise _CodeflowError(
+                "caps 字段不支持动态展开: dict 字面量里嵌套了非字面量 ** 源"
+                "（@flow 编译期只接受字符串键的 dict 字面量，逐键过 caps 门）", v)
+        if not isinstance(k, ast.Constant):
+            raise _CodeflowError(
+                "caps 字段不支持动态展开: dict 字面量键不是字符串字面量"
+                "（@flow 编译期只接受字符串键的 dict 字面量）", k)
+        if not isinstance(k.value, str):
+            raise _CodeflowError(
+                f"caps 展开 dict 字面量的键必须是字符串字面量: {k.value!r}", k)
+        out[k.value] = v
+    return out
+
+
+def _merged_keywords(node: ast.Call) -> Dict[str, ast.AST]:
+    """具名关键字 + ``**`` 展开 dict 字面量的合并静态视图。
+
+    此前 ``{k.arg: k.value …}`` 把 ``**`` 展开存成 ``None`` 键、具名查找全部
+    落空 ⇒ ``HTTP(**{"max_redirects": -1})`` 绕过 caps 门静默落默认、
+    ``**{"retry_times": 5}`` 合法值被静默丢弃（配置丢失）。现在 dict 字面量
+    逐键并入具名视图，与具名写法同一条编译路径；非字面量源静态不可校验 →
+    「caps 字段不支持动态展开」具名拒；具名与展开同键与 Python TypeError
+    语义一致具名拒。
+    """
+    kw: Dict[str, ast.AST] = {}
+    for k in node.keywords:
+        if k.arg is not None:
+            kw[k.arg] = k.value
+            continue
+        if not isinstance(k.value, ast.Dict):
+            raise _CodeflowError(
+                "caps 字段不支持动态展开: ** 源不是 dict 字面量"
+                "（@flow 编译期只接受字符串键的 dict 字面量，逐键过 caps 门）",
+                k.value)
+        for key, v in _fold_dict_display(k.value).items():
+            if key in kw:
+                raise _CodeflowError(
+                    f"关键字参数 {key!r} 重复（具名与 ** 展开同键，"
+                    "Python 语义为 TypeError）", k.value)
+            kw[key] = v
+    return kw
 
 
 def _compile_node_call(
@@ -85,7 +149,12 @@ def _compile_node_call(
         if isinstance(node.func, ast.Name) and _is_upper_ident(node.func.id):
             _raise_if_unregistered_custom(node.func, ctx)
         raise _CodeflowError("不支持的节点调用", node)
-    kw = {k.arg: k.value for k in node.keywords}
+    if is_custom:
+        # 自定义节点保持原样：`**`（含 dict 字面量）由 _compile_custom_node
+        # 具名拒——自定义字段没有 caps 门可绕，不走合并视图。
+        kw = {k.arg: k.value for k in node.keywords}
+    else:
+        kw = _merged_keywords(node)
     pos = node.args
 
     def _const(k: Optional[ast.expr]) -> Any:
@@ -308,7 +377,7 @@ def _eval_error_handler(node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
     # ErrorHandler(...) 直接构造 —— 但函数体不执行，所以不能调；这里识别 AST 调用
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
             and node.func.id == "ErrorHandler":
-        kw = {k.arg: k.value for k in node.keywords}
+        kw = _merged_keywords(node)
         pos = node.args
         strategy = pos[0].value if pos and isinstance(pos[0], ast.Constant) else "abort"
         if "strategy" in kw and isinstance(kw["strategy"], ast.Constant):
