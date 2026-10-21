@@ -757,6 +757,37 @@ redis-cli KEYS 'plaita:execution:lease:*'
   一次，绕过 HTTP 的内部调用也不能物化全表；每次读取另写 `audit.read`，记录
   过滤条件、生效上限与返回行数。
 
+## start dedup 受理状态机迁移（r59） {#start-dedup-迁移}
+
+`dedup_key` 的 claim/占位行/入队/owner/release 现在统一走
+`plaita/server/start_dedup.py` 的 token CAS Lua（完整状态表见
+[FlowWorker · 受理状态机](flow-worker.md#start-dedup-受理状态机)）：
+
+- **滚动升级硬约束**：新代码只写新 owner/token 键
+  （`{ns}:start-dedup-owner:{key}` / `{ns}:start-dedup-token:{key}`），旧
+  console 读不到新键。升级 console 必须**先排空旧实例再启动新实例**，禁止
+  新旧 console 混跑；worker 池升级纪律不变（先升消费者）。
+- **旧键兼容**：旧 `<map>:owner=claiming:A` 在新代码下按 live claim 处理并
+  迁移到新键+token（不换 id、不重复补 carrier）；旧 `enqueued:A` 直接返回
+  A。旧键 7 天自然过期，**不要**脚本盲删：`start-dedup:foo:owner` 同时可能
+  是 `foo:owner` 的 map 键；新代码遇到该反向碰撞会先把 foo 的 owner 迁到新
+  键再释放共键，无法安全迁移时返回 409 `execution_start_legacy_collision`。
+- **schedule/cron**：同一 due 的重复触发在 schedule 入口预认领处收敛（不再
+  铸新 id/入队/占配额）；配额满/入队失败会释放 claim+配额，cron 重试不会把
+  配额耗尽。人工 `manual` 触发仍走独立唯一键。
+- **客户端语义**：`execution_start_in_progress` /
+  `execution_start_superseded` 409 带 `Retry-After: 1`；console 前端对
+  in-progress 自动用同一 `dedup_key` 退避重试并收敛到既有/终态 id。其他
+  调用方应同样重试同一 dedup_key，不要换 key。
+- **force DELETE**：guard/reservation 后、`mark_enqueued` 前被删除的 start
+  载体由失败路径 XDEL 清收（避免队列残留 tombstone 载体）；执行墓碑仍是
+  worker 侧最终防线。
+- **不变量**（A1 r106 对抗用）：① 同一 dedup_key 任意交错最多一个
+  execution_id/一条可执行 carrier/一个配额；② 任何写转换都要求
+  map==id、owner/token 匹配、无墓碑；③ release 只在 token 匹配（失败清理）
+  或 row 缺失且无 token（孤儿）时生效，墓碑例外；④ owner 不能被另一个 id
+  覆盖；⑤ 旧格式只读迁移，绝不静默把源 owner 写进不同 key 空间。
+
 ## 指标与告警（plaita#26） {#指标与告警}
 
 在此之前死信产生、队列积压、worker 全灭、观测丢弃**全是静默的**——没有指标

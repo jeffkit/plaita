@@ -34,6 +34,7 @@ from plaita.storage.redis import (
     execution_start_time_score,
 )
 from plaita.server.tenant_quota import tenant_running_key
+from plaita.server import start_dedup as _dedup
 
 try:  # 包布局（pip 安装 / `python -m plaita_console`）
     from ..services import obs_link
@@ -426,197 +427,127 @@ return 1
 def _start_dedup_map_key(tenant: Optional[str], dedup_key: str) -> str:
     """生产侧 start 幂等映射键——与 worker 消费侧**同一把键**（单源
     ``task_queue.start_dedup_map_key``，键形状/TTL 漂移即「同键必同 id」失效）。"""
-    from plaita.server.task_queue import start_dedup_map_key
-
-    return start_dedup_map_key(tenant_namespace(tenant), dedup_key)
+    return _dedup.map_key(tenant, dedup_key)
 
 
 def _start_dedup_owner_key(tenant: Optional[str], dedup_key: str) -> str:
-    """认领者标记键——**独立前缀**，不与 map 键共用键空间。
+    """认领者标记键——独立前缀（#285），值与旧格式同形 ``state:id``。
 
-    plaita#285：旧实现 ``<map>:owner`` 在 ``dedup_key="foo:owner"`` 时恰好
-    等于 ``dedup_key="foo"`` 的 map 键，两个合法 key 互相覆盖。
+    token 存独立键 ``{ns}:start-dedup-token:{key}``，不挤进 owner 值，保证
+    迁移窗口内旧格式 owner 可读；所有转换由 ``plaita.server.start_dedup``
+    的 Lua CAS 校验 token。
     """
-    from plaita.server.tenant_context import tenant_namespace
-
-    return f"{tenant_namespace(tenant)}:start-dedup-owner:{dedup_key}"
+    return _dedup.owner_key(tenant, dedup_key)
 
 
-# 认领者状态：claiming:<id> = owner 正在写占位行/入队；enqueued:<id> = 载体
-# 已入队。比映射短得多的 claiming TTL 让崩溃认领可被后续请求接管；enqueued
-# 与映射同 TTL，避免正常 queued 重试被误判为崩溃而重复入队。
+def _start_dedup_token_key(tenant: Optional[str], dedup_key: str) -> str:
+    return _dedup.token_key(tenant, dedup_key)
+
+
+def _start_dedup_legacy_owner_key(tenant: Optional[str], dedup_key: str) -> str:
+    return _dedup.legacy_owner_key(tenant, dedup_key)
+
+
+# 认领者状态（owner 值前缀；token 在独立键）。claiming/enqueueing 短 TTL 让
+# 崩溃认领可被接管；enqueued 与映射同 TTL。
 _START_DEDUP_OWNER_CLAIMING = "claiming:"
+_START_DEDUP_OWNER_ENQUEUEING = "enqueueing:"
 _START_DEDUP_OWNER_ENQUEUED = "enqueued:"
-_START_DEDUP_OWNER_CLAIM_TTL_SECONDS = 60
-
-# SET NX 与 owner 标记同一 Lua：否则 A 在两者之间崩溃会让 B 把在途认领当孤儿。
-_CLAIM_START_DEDUP_LUA = """
-if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then
-  redis.call('SET', KEYS[2], ARGV[3] .. ARGV[1], 'EX', ARGV[4])
-  return 1
-end
-return 0
-"""
-
-# plaita#285：A 的每次写入前复核所有权（map==我、无墓碑、owner==我），
-# 通过则顺带续期。失配返回 0，A 必须放弃写/入队/覆盖 owner。
-_START_DEDUP_GUARD_LUA = """
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
-if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
-local want = ARGV[3] .. ARGV[1]
-local cur = redis.call('GET', KEYS[3])
-if cur then
-  if cur ~= want then return 0 end
-elseif ARGV[4] ~= '1' then
-  return 0
-end
-redis.call('SET', KEYS[3], want, 'EX', ARGV[2])
-return 1
-"""
-
-# owner 写入 CAS：只允许 map==我；owner 只允许缺省/同 id（可从 claiming:
-# 迁到 enqueued:），绝不允许覆盖另一个 id 的 owner（#285）。
-_SET_START_DEDUP_OWNER_LUA = """
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
-if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
-local want = ARGV[2] .. ARGV[1]
-local cur = redis.call('GET', KEYS[3])
-if cur and cur ~= want and cur ~= ARGV[4] .. ARGV[1] then return 0 end
-redis.call('SET', KEYS[3], want, 'EX', ARGV[3])
-return 1
-"""
-
-# 只复核映射归属（B 的崩溃恢复补入队用；不要求 owner，因为该分支本来就是
-# 「行在、owner 已过期/缺失」）。
-_START_DEDUP_MAPPING_LUA = """
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
-if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
-return 1
-"""
+_START_DEDUP_OWNER_CLAIM_TTL_SECONDS = _dedup.CLAIM_TTL_SECONDS
 
 
 def _read_start_dedup_map(
     redis: Redis, tenant: Optional[str], dedup_key: str
 ) -> Optional[str]:
-    try:
-        raw = redis.get(_start_dedup_map_key(tenant, dedup_key))
-    except Exception:  # noqa: BLE001 — 读不到按无映射
-        return None
-    return (raw.decode() if isinstance(raw, bytes) else raw) or None
+    return _dedup.read_mapped(redis, tenant, dedup_key)
 
 
 def _read_start_dedup_owner(
     redis: Redis, tenant: Optional[str], dedup_key: str
 ) -> Optional[str]:
-    try:
-        raw = redis.get(_start_dedup_owner_key(tenant, dedup_key))
-    except Exception:  # noqa: BLE001 — 读不到按无 owner（由调用方的行/tombstone 判定）
+    """owner 值（``state:id``，双读新前缀/旧 ``<map>:owner``）；无则 None。"""
+    view = _dedup.read_owner(redis, tenant, dedup_key)
+    if not view.live or not view.execution_id:
         return None
-    return (raw.decode() if isinstance(raw, bytes) else raw) or None
+    return f"{view.state}:{view.execution_id}"
+
+
+def _read_start_dedup_token(
+    redis: Redis, tenant: Optional[str], dedup_key: str
+) -> Optional[str]:
+    try:
+        raw = redis.get(_start_dedup_token_key(tenant, dedup_key))
+    except Exception:
+        return None
+    text = raw.decode() if isinstance(raw, bytes) else raw
+    if not text or ":" not in text:
+        return None
+    return str(text).split(":", 1)[1] or None
 
 
 def _start_claim_guard(
     redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str,
-    *, state: str = _START_DEDUP_OWNER_CLAIMING,
+    token: Optional[str] = None, *,
+    state: str = _START_DEDUP_OWNER_CLAIMING,
     ttl: Optional[int] = None,
     allow_missing_owner: bool = True,
 ) -> bool:
-    """A 的写前所有权复核（#285）：map==我、无墓碑、owner==state:我。
+    """A 的写前所有权复核（token CAS）：map/owner/token/墓碑全部匹配才放行。
 
-    ``allow_missing_owner`` 只对 claiming 开放：慢存储导致 claiming TTL
-    过期但映射仍指向我且无人接管时，原地续期继续（不制造双 id）。复核通过
-    顺带续期，缩小「复核→写入」的过期窗口。Redis 故障按失配（fail-closed）。
+    ``token`` 缺省时从 token 键反查（兼容旧调用形状）；拿不到 token 一律
+    fail-closed。复核通过顺带续期。
     """
-    effective_ttl = (
-        _START_DEDUP_OWNER_CLAIM_TTL_SECONDS if ttl is None else ttl
-    )
-    try:
-        return bool(
-            redis.eval(
-                _START_DEDUP_GUARD_LUA,
-                3,
-                _start_dedup_map_key(tenant, dedup_key),
-                f"plaita:exec_tombstone:{execution_id}",
-                _start_dedup_owner_key(tenant, dedup_key),
-                execution_id,
-                str(max(1, int(effective_ttl))),
-                state,
-                "1" if allow_missing_owner else "0",
-            )
-        )
-    except Exception as exc:  # noqa: BLE001 — 无法证明所有权 ⇒ 放弃写
-        logger.warning(
-            "start 幂等认领所有权复核失败（fail-closed）: %s execution=%s: %s",
-            _start_dedup_map_key(tenant, dedup_key), execution_id,
-            _scrub_url_text(exc),
-        )
+    token = token or _read_start_dedup_token(redis, tenant, dedup_key)
+    if not token:
         return False
+    state_name = state[:-1] if state.endswith(":") else state
+    return _dedup.guard(
+        redis, tenant, dedup_key, execution_id, token,
+        state=state_name,
+        ttl=ttl if ttl is not None else _START_DEDUP_OWNER_CLAIM_TTL_SECONDS,
+    )
 
 
 def _start_dedup_mapping_is(
     redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str
 ) -> bool:
     """映射仍指向 execution_id 且无墓碑（只读复核，B 恢复补入队用）。"""
-    try:
-        return bool(
-            redis.eval(
-                _START_DEDUP_MAPPING_LUA,
-                2,
-                _start_dedup_map_key(tenant, dedup_key),
-                f"plaita:exec_tombstone:{execution_id}",
-                execution_id,
-            )
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "start 幂等映射复核失败（按失配处理）: %s execution=%s: %s",
-            _start_dedup_map_key(tenant, dedup_key), execution_id,
-            _scrub_url_text(exc),
-        )
+    if _read_start_dedup_map(redis, tenant, dedup_key) != execution_id:
         return False
+    return not _execution_tombstoned(redis, execution_id)
 
 
 def _set_start_dedup_owner(
     redis: Redis, tenant: Optional[str], dedup_key: str,
     execution_id: str, *, state: str, ttl: int,
     allow_from_state: Optional[str] = None,
+    token: Optional[str] = None,
 ) -> bool:
-    """CAS 式写 owner（#285）：map==我、无墓碑、owner 缺省或同 id 才写。
-
-    返回是否写入。过期认领者/后来者绝不覆盖另一个 id 的 owner。
-    """
-    try:
-        ok = redis.eval(
-            _SET_START_DEDUP_OWNER_LUA,
-            3,
-            _start_dedup_map_key(tenant, dedup_key),
-            f"plaita:exec_tombstone:{execution_id}",
-            _start_dedup_owner_key(tenant, dedup_key),
-            execution_id,
-            state,
-            str(max(1, int(ttl))),
-            allow_from_state or state,
-        )
-    except Exception as exc:  # noqa: BLE001 — 仅影响崩溃恢复的判定精度
-        logger.warning(
-            "start 幂等认领 owner 标记写入失败（忽略）: %s: %s",
-            _start_dedup_owner_key(tenant, dedup_key), _scrub_url_text(exc),
-        )
+    """owner 终态 CAS（token 校验）：只允许 enqueueing/claiming → enqueued。"""
+    token = token or _read_start_dedup_token(redis, tenant, dedup_key)
+    if not token:
         return False
+    if not state.startswith(_START_DEDUP_OWNER_ENQUEUED):
+        return False
+    ok = _dedup.mark_enqueued(
+        redis, tenant, dedup_key, execution_id, token, ttl=ttl
+    )
     if not ok:
         logger.warning(
-            "start 幂等认领 owner CAS 拒绝（映射/墓碑/他人 owner）: "
-            "key=%s execution=%s state=%s",
+            "start 幂等认领 owner CAS 拒绝: key=%s execution=%s state=%s",
             _start_dedup_map_key(tenant, dedup_key), execution_id, state,
         )
-    return bool(ok)
+    return ok
 
 
 def _clear_start_dedup_owner(
     redis: Redis, tenant: Optional[str], dedup_key: str
 ) -> None:
     try:
-        redis.delete(_start_dedup_owner_key(tenant, dedup_key))
+        redis.delete(
+            _start_dedup_owner_key(tenant, dedup_key),
+            _start_dedup_token_key(tenant, dedup_key),
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -624,94 +555,68 @@ def _clear_start_dedup_owner(
 def _execution_tombstoned(redis: Redis, execution_id: str) -> bool:
     """mapped 执行是否已有删除墓碑（force DELETE 后同 key 必须换新 id）。"""
     try:
-        return bool(redis.exists(f"plaita:exec_tombstone:{execution_id}"))
+        return bool(redis.exists(_dedup.tombstone_key(execution_id)))
     except Exception:  # noqa: BLE001 — 读不到按无墓碑（保守走 owner/行判定）
         return False
 
 
 def _claim_start_dedup_at_post(
     redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str
-) -> Tuple[bool, Optional[str]]:
-    """POST 入队前的 start 幂等认领（SET NX + owner 标记，与 worker 同键同 TTL）。
+):
+    """POST 入队前的 token 化 start 幂等认领（Lua 状态机）。
 
-    返回 ``(claimed, mapped)``：``(True, None)`` = 认领成功，本次提交持有该
-    逻辑 start；``(False, mapped)`` = 已有在先提交，mapped 是其 execution_id，
-    调用方必须返回 mapped（同键必同 id），**不得**把在途认领当孤儿删除。
-    认领瞬断按 ``(True, None)`` 放行（与 worker 认领失败同哲学：退化为存量
-    行为，消费侧 SET NX 仍兜底收敛）。
+    返回 ``StartClaim``（``claimed/mapped`` 二元组解包兼容）；``.token`` 供
+    后续 guard/reserve/mark/release 使用。旧格式 claiming owner 会迁移成带
+    token 的新键；``foo:owner`` 反向碰撞先迁 old owner 再认领。
     """
-    from plaita.server.task_queue import START_DEDUP_TTL_SECONDS
-
-    key = _start_dedup_map_key(tenant, dedup_key)
-    owner_key = _start_dedup_owner_key(tenant, dedup_key)
-    try:
-        claimed = redis.eval(
-            _CLAIM_START_DEDUP_LUA,
-            2,
-            key,
-            owner_key,
-            execution_id,
-            str(START_DEDUP_TTL_SECONDS),
-            _START_DEDUP_OWNER_CLAIMING,
-            str(_START_DEDUP_OWNER_CLAIM_TTL_SECONDS),
-        )
-        claimed = bool(claimed)
-    except Exception as exc:  # noqa: BLE001 — 认领瞬断：不阻塞提交（消费侧仍兜底）
-        logger.warning(
-            "start 幂等键生产侧认领失败（按未认领继续，消费侧兜底）: %s: %s",
-            key, exc,
-        )
-        try:
-            claimed = bool(
-                redis.set(key, execution_id, ex=START_DEDUP_TTL_SECONDS, nx=True)
-            )
-            if claimed:
-                _set_start_dedup_owner(
-                    redis, tenant, dedup_key, execution_id,
-                    state=_START_DEDUP_OWNER_CLAIMING,
-                    ttl=_START_DEDUP_OWNER_CLAIM_TTL_SECONDS,
-                )
-        except Exception:
-            return True, None
-    if claimed:
-        return True, None
-    try:
-        raw = redis.get(key)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("start 幂等键生产侧读取失败（按孤儿映射处理）: %s: %s", key, exc)
-        return False, None
-    return False, (raw.decode() if isinstance(raw, bytes) else raw) or None
+    return _dedup.claim(redis, tenant, dedup_key, execution_id)
 
 
 def _release_start_dedup_if_owner(
-    redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str
-) -> None:
-    """删除孤儿映射（GET==id 才 DEL，防误删并发后来者的认领；尽力而为）。"""
-    key = _start_dedup_map_key(tenant, dedup_key)
+    redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str,
+    *, token: Optional[str] = None, require_row_absent: bool = False,
+) -> bool:
+    """条件释放（Lua 原子复核 token/owner/row/墓碑；#286）。
+
+    token 给出 = 认领者失败清理；无 token = 孤儿回收（row 存在/token 在位/
+    enqueued 一律拒绝）。返回是否真的释放。
+    """
+    return _dedup.release(
+        redis, tenant, dedup_key, execution_id,
+        token=token, require_row_absent=require_row_absent,
+    )
+
+
+def _safe_xdel_carrier(redis: Redis, message_id: Optional[str]) -> None:
+    """清收刚入队但已失去认领的 start 载体（#r59 ⑤）。"""
+    if not message_id:
+        return
     try:
-        raw = redis.get(key)
-        current = raw.decode() if isinstance(raw, bytes) else raw
-        if current == execution_id:
-            redis.delete(key)
-            # #285：只清自己的 owner，绝不误清后来者（映射已归他人时上面的
-            # GET/DEL 本身也不会执行；这里再按 id 后缀复核一次）。
-            owner = _read_start_dedup_owner(redis, tenant, dedup_key)
-            if owner and owner.endswith(execution_id):
-                _clear_start_dedup_owner(redis, tenant, dedup_key)
-    except Exception as exc:  # noqa: BLE001 — 释放失败无害（键 7 天自动过期）
-        logger.warning("start 幂等键孤儿映射释放失败（忽略）: %s: %s", key, exc)
+        redis.xdel(_task_queue_name(), message_id)
+    except Exception as exc:  # noqa: BLE001 — 清收失败留 WARNING（worker 墓碑兜底）
+        logger.warning(
+            "失去认领后清理 start 载体失败（message=%s）: %s",
+            message_id, _scrub_url_text(exc),
+        )
 
 
-def _start_claim_lost_response(
+def _start_in_progress_error(mapped: Optional[str], dedup_key: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail=error_detail(
+            "execution_start_in_progress",
+            "同 dedup_key 的 start 正在受理，请稍后用同一 dedup_key 重试",
+            error="execution_start_in_progress",
+        ),
+        headers={"Retry-After": "1"},
+    )
+
+
+async def _start_claim_lost_response(
     redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str,
     request: Any, http_request: Request, *, stage: str,
 ) -> Dict[str, Any]:
-    """A 发现自己已失去认领后的响应（#285）。
-
-    映射已指向另一次提交且其行可读 ⇒ 收敛到该 id（200，同键幂等语义）；
-    否则明确 409 让客户端用同一 dedup_key 重试——绝不返回一个没有行/载体
-    的自己 id（ghost 200）。
-    """
+    """A 失去认领后的响应：收敛到当前合法 id，或 409（带 Retry-After）。"""
     mapped = _read_start_dedup_map(redis, tenant, dedup_key)
     if (
         mapped
@@ -720,7 +625,7 @@ def _start_claim_lost_response(
     ):
         row = _load_full_state(redis, _exec_key(tenant, mapped))
         if row is not None:
-            response = _dedup_hit_row_response(
+            response = await _dedup_hit_row_response(
                 redis, tenant, request, http_request, mapped, row
             )
             if response is not None:
@@ -745,51 +650,50 @@ def _start_claim_lost_response(
             "请用同一 dedup_key 重试",
             error="execution_start_superseded",
         ),
+        headers={"Retry-After": "1"},
     )
 
 
-def _dedup_hit_row_response(
+async def _dedup_hit_row_response(
     redis: Redis, tenant: Optional[str], request: Any, http_request: Request,
     mapped: str, row: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """mapped 行已存在时的幂等命中响应（#274/#280/#285）。
+    """mapped 行已存在时的幂等命中响应（#274/#280/#285/#286/#287）。
 
-    返回 None = 映射在判定期间已被换走/释放，调用方应重试认领（不复用旧 id）。
-
-    queued 行只有在 owner=``enqueued:<mapped>`` 时才直接 200；owner 仍是
-    ``claiming:<mapped>`` 时短暂等待 A 入队完成（失败则映射消失/换主），
-    超时返回 409 in-progress——不在载体存在前发出可能成为 ghost 的 200。
-    owner 缺失/过期才按「落行→入队」崩溃窗口用同 id 补入队（#280）。
+    返回 None = 映射/认领在判定期间变化，调用方应重试认领。
+    queued 行：enqueued → 200；claiming/enqueueing → 异步等待 A 完成
+    （不阻塞事件循环），超时 409 in-progress；无 token/owner → 原子建立
+    recovery reservation、补入队、mark_enqueued（同 id，不换主）。
     """
     from plaita.server.task_queue import START_DEDUP_TTL_SECONDS
 
     status = str(row.get("status") or "queued")
-    owner = _read_start_dedup_owner(redis, tenant, request.dedup_key)
+    owner = _dedup.read_owner(redis, tenant, request.dedup_key)
     requeued = False
     if status == "queued":
-        if owner and owner.startswith(_START_DEDUP_OWNER_ENQUEUED) and owner.endswith(
-            mapped
+        if (
+            owner.state == _dedup.STATE_ENQUEUED
+            and owner.execution_id == mapped
         ):
             pass  # 载体已入队：同 id 返回
-        elif owner and owner.startswith(_START_DEDUP_OWNER_CLAIMING) and owner.endswith(
-            mapped
+        elif (
+            owner.state in (_dedup.STATE_CLAIMING, _dedup.STATE_ENQUEUEING)
+            and owner.execution_id == mapped
         ):
-            # A 正在写行/入队：等它完成或失败；不把在途认领当孤儿（#280），
-            # 也不在载体未落前返回 200（#285）。
             for _ in range(10):
-                time.sleep(0.05)
-                owner = _read_start_dedup_owner(redis, tenant, request.dedup_key)
-                if owner and owner.startswith(
-                    _START_DEDUP_OWNER_ENQUEUED
-                ) and owner.endswith(mapped):
+                await asyncio.sleep(0.05)
+                owner = _dedup.read_owner(redis, tenant, request.dedup_key)
+                if (
+                    owner.state == _dedup.STATE_ENQUEUED
+                    and owner.execution_id == mapped
+                ):
                     break
                 if (
                     _read_start_dedup_map(redis, tenant, request.dedup_key) != mapped
                     or _execution_tombstoned(redis, mapped)
                 ):
                     return None
-                row_after = _load_full_state(redis, _exec_key(tenant, mapped))
-                if row_after is None:
+                if _load_full_state(redis, _exec_key(tenant, mapped)) is None:
                     return None
             else:
                 _audit(
@@ -799,18 +703,18 @@ def _dedup_hit_row_response(
                      "dedup_key": request.dedup_key},
                     tenant_id=tenant,
                 )
-                raise HTTPException(
-                    status_code=409,
-                    detail=error_detail(
-                        "execution_start_in_progress",
-                        "同 dedup_key 的 start 正在受理，请稍后用同一 dedup_key 重试",
-                        error="execution_start_in_progress",
-                    ),
-                )
+                raise _start_in_progress_error(mapped, request.dedup_key)
         else:
-            # 行已落、owner 已过期/缺失 = 崩溃在「落行→入队」之间；映射仍
-            # 属于该 id 才补入队，绝不复活已换主的 id（#285）。
-            if not _start_dedup_mapping_is(redis, tenant, request.dedup_key, mapped):
+            # 行已落、无 token/owner（崩溃在「落行→入队」之间）：只有映射仍
+            # 属于该 id 才能建立 recovery reservation；绝不复活已换主的 id。
+            if not _start_dedup_mapping_is(
+                redis, tenant, request.dedup_key, mapped
+            ):
+                return None
+            recovery_token = _dedup.adopt_for_recovery(
+                redis, tenant, request.dedup_key, mapped
+            )
+            if recovery_token is None:
                 return None
             recovery_message = {
                 "type": "start",
@@ -823,19 +727,18 @@ def _dedup_hit_row_response(
                 "dedup_key": request.dedup_key,
             }
             try:
-                _enqueue(recovery_message, redis)
-            except Exception as exc:  # noqa: BLE001 — 重试仍可再补
+                recovery_msg_id = _enqueue(recovery_message, redis)
+            except Exception as exc:  # noqa: BLE001 — reservation 到期后可重试
                 logger.error(
-                    "queued 占位行补入队失败（保留行，重试可再补）: "
+                    "queued 占位行补入队失败（reservation 保留，重试可再补）: "
                     "execution=%s: %s", mapped, _scrub_url_text(exc),
                 )
             else:
-                if not _set_start_dedup_owner(
-                    redis, tenant, request.dedup_key, mapped,
-                    state=_START_DEDUP_OWNER_ENQUEUED,
+                if not _dedup.mark_enqueued(
+                    redis, tenant, request.dedup_key, mapped, recovery_token,
                     ttl=START_DEDUP_TTL_SECONDS,
-                    allow_from_state=_START_DEDUP_OWNER_CLAIMING,
                 ):
+                    _safe_xdel_carrier(redis, recovery_msg_id)
                     return None
                 requeued = True
                 logger.warning(
@@ -2045,44 +1948,72 @@ async def start_execution(
     execution_id = uuid.uuid4().hex
     tenant = tenant_scope(http_request, required=True)
 
-    # start 幂等键生产侧认领（plaita#274/#280/#285）：铸造 id 后、入队前以
-    # worker 同源键 SET NX 认领；同键必同 id。命中后必须区分「行/载体已可读」
-    # 与「在途认领」：前者幂等返回，后者有界等行；A 失去认领（过期/墓碑/被
-    # 接管）时不得再写行/入队/覆盖 owner，更不能返回自己的 ghost id。
+    # start 幂等键生产侧认领（plaita#274/#280/#285/r59）：token 化 Lua 状态机。
+    # 命中后区分「行/载体已可读」与「在途认领」：前者幂等返回，后者异步等行；
+    # A 失去认领（过期/墓碑/被接管）时不得再写行/入队/覆盖 owner，更不能
+    # 返回自己的 ghost id。新认领才有 token；后续每步转换都校验它。
+    claim_token: Optional[str] = None
     if request.dedup_key:
         for _attempt in range(3):
-            claimed, mapped = _claim_start_dedup_at_post(
+            claim = _claim_start_dedup_at_post(
                 redis, tenant, request.dedup_key, execution_id
             )
-            if claimed:
+            if claim.error:
+                if claim.error == "legacy_owner_collision":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=error_detail(
+                            "execution_start_legacy_collision",
+                            "旧 owner 键与另一 dedup_key 的映射键冲突且无法安全迁移，"
+                            "请先按 runbook 清理旧 console 的 owner 键后重试",
+                            error="execution_start_legacy_collision",
+                        ),
+                        headers={"Retry-After": "1"},
+                    )
+                raise HTTPException(
+                    status_code=503,
+                    detail=error_detail(
+                        "execution_start_claim_failed",
+                        "start 幂等认领暂时不可用，请稍后重试",
+                    ),
+                    headers={"Retry-After": "1"},
+                )
+            if claim.claimed:
+                claim_token = claim.token
                 break
+            mapped = claim.mapped
             if not mapped:
-                # 映射读取瞬断：按未认领继续（消费侧仍兜底），保持存量行为。
-                break
+                raise HTTPException(
+                    status_code=503,
+                    detail=error_detail(
+                        "execution_start_claim_failed",
+                        "start 幂等认领暂时不可用，请稍后重试",
+                    ),
+                    headers={"Retry-After": "1"},
+                )
             row = _load_full_state(redis, _exec_key(tenant, mapped))
             if row is not None:
-                response = _dedup_hit_row_response(
+                response = await _dedup_hit_row_response(
                     redis, tenant, request, http_request, mapped, row
                 )
                 if response is not None:
                     return response
                 continue
-            owner = _read_start_dedup_owner(redis, tenant, request.dedup_key)
+            owner = _dedup.read_owner(redis, tenant, request.dedup_key)
             if (
-                owner
-                and owner.startswith(_START_DEDUP_OWNER_CLAIMING)
-                and owner.endswith(mapped)
+                owner.state in (_dedup.STATE_CLAIMING, _dedup.STATE_ENQUEUEING)
+                and owner.execution_id == mapped
                 and not _execution_tombstoned(redis, mapped)
             ):
-                # 并发同 key：owner 已认领但占位行尚未落盘。有界等行；等不到
-                # 且认领仍有效 ⇒ 409 让客户端重试（不返回尚无载体的 ghost id）。
+                # 并发同 key：认领已建立但占位行尚未落盘。异步等行；等不到
+                # 且认领仍有效 ⇒ 409 + Retry-After（不返回无载体的 ghost id）。
                 for _ in range(10):
-                    time.sleep(0.05)
+                    await asyncio.sleep(0.05)
                     row = _load_full_state(redis, _exec_key(tenant, mapped))
                     if row is not None:
                         break
                 if row is not None:
-                    response = _dedup_hit_row_response(
+                    response = await _dedup_hit_row_response(
                         redis, tenant, request, http_request, mapped, row
                     )
                     if response is not None:
@@ -2099,18 +2030,12 @@ async def start_execution(
                          "dedup_key": request.dedup_key},
                         tenant_id=tenant,
                     )
-                    raise HTTPException(
-                        status_code=409,
-                        detail=error_detail(
-                            "execution_start_in_progress",
-                            "同 dedup_key 的 start 正在受理，请稍后用同一 dedup_key 重试",
-                            error="execution_start_in_progress",
-                        ),
-                    )
+                    raise _start_in_progress_error(mapped, request.dedup_key)
             # 孤儿映射（行不存在；force DELETE 墓碑或 owner 过期/被接管）：
-            # 释放后重试认领；并发后来者抢先则下一轮返回其 id。
+            # Lua 条件释放（原子复核 token/row/墓碑），随后重试认领。
             _release_start_dedup_if_owner(
-                redis, tenant, request.dedup_key, mapped
+                redis, tenant, request.dedup_key, mapped,
+                require_row_absent=True,
             )
         else:
             _audit(
@@ -2119,13 +2044,15 @@ async def start_execution(
                  "dedup_key": request.dedup_key, "dedup_contended": True},
                 tenant_id=tenant,
             )
+            raise _start_in_progress_error(execution_id, request.dedup_key)
+        if claim_token is None:
             raise HTTPException(
-                status_code=409,
+                status_code=503,
                 detail=error_detail(
-                    "execution_start_in_progress",
-                    "同 dedup_key 的 start 认领竞争激烈，请稍后用同一 dedup_key 重试",
-                    error="execution_start_in_progress",
+                    "execution_start_claim_failed",
+                    "start 幂等认领暂时不可用，请稍后重试",
                 ),
+                headers={"Retry-After": "1"},
             )
 
     message = {
@@ -2156,7 +2083,8 @@ async def start_execution(
         # 认领失败路径不能让同 key 重试撞到一个永远没有行的在途映射。
         if request.dedup_key:
             _release_start_dedup_if_owner(
-                redis, tenant, request.dedup_key, execution_id
+                redis, tenant, request.dedup_key, execution_id,
+                token=claim_token,
             )
         raise HTTPException(
             status_code=429,
@@ -2179,10 +2107,14 @@ async def start_execution(
     # plaita#285：写占位行前复核所有权（map/owner 仍属我、无墓碑）。慢存储
     # 导致 claiming TTL 过期但无人接管时原地续期；被接管/删除即放弃。
     if request.dedup_key and not _start_claim_guard(
-        redis, tenant, request.dedup_key, execution_id
+        redis, tenant, request.dedup_key, execution_id, claim_token
     ):
         release_tenant_start(redis, tenant, execution_id)
-        return _start_claim_lost_response(
+        _release_start_dedup_if_owner(
+            redis, tenant, request.dedup_key, execution_id,
+            token=claim_token,
+        )
+        return await _start_claim_lost_response(
             redis, tenant, request.dedup_key, execution_id, request,
             http_request, stage="before_placeholder",
         )
@@ -2195,7 +2127,8 @@ async def start_execution(
             # 不会把本 id 当 ghost 200 长期持有（#285）。
             _discard_queued_placeholder(redis, tenant, execution_id)
             _release_start_dedup_if_owner(
-                redis, tenant, request.dedup_key, execution_id
+                redis, tenant, request.dedup_key, execution_id,
+                token=claim_token,
             )
         raise HTTPException(
             status_code=503,
@@ -2205,20 +2138,25 @@ async def start_execution(
             ),
             headers={"Retry-After": "1"},
         )
-    # 入队前再复核一次：占位行写入可能较慢，期间 owner 可能过期/被 force
-    # DELETE 墓碑化/被并发请求接管（#285）；失配则清掉自己的行并放弃入队。
-    if request.dedup_key and not _start_claim_guard(
-        redis, tenant, request.dedup_key, execution_id
+    # 入队前原子 reservation（claimed/row → enqueueing）：token/墓碑/映射在
+    # 同一 Lua 内复核；失配则清掉自己的行并放弃入队（#286/r59）。
+    if request.dedup_key and not _dedup.reserve_enqueue(
+        redis, tenant, request.dedup_key, execution_id, claim_token
     ):
         release_tenant_start(redis, tenant, execution_id)
         _discard_queued_placeholder(redis, tenant, execution_id)
-        return _start_claim_lost_response(
+        _release_start_dedup_if_owner(
+            redis, tenant, request.dedup_key, execution_id,
+            token=claim_token,
+        )
+        return await _start_claim_lost_response(
             redis, tenant, request.dedup_key, execution_id, request,
             http_request, stage="before_enqueue",
         )
     # 写入任务队列 Stream（FlowWorker 消费组消费）
+    enqueued_msg_id: Optional[str] = None
     try:
-        _enqueue(message, redis)
+        enqueued_msg_id = _enqueue(message, redis)
     except Exception:
         # 入队失败回滚名额，防泄漏（否则该 execution 的名额要等 TTL 才自愈）；
         # 占位行同步清掉，不留无人消费的幽灵 queued 行（清理失败留 ERROR）。
@@ -2226,7 +2164,8 @@ async def start_execution(
         _discard_queued_placeholder(redis, tenant, execution_id)
         if request.dedup_key:
             _release_start_dedup_if_owner(
-                redis, tenant, request.dedup_key, execution_id
+                redis, tenant, request.dedup_key, execution_id,
+                token=claim_token,
             )
         raise
     if request.dedup_key:
@@ -2239,10 +2178,14 @@ async def start_execution(
             state=_START_DEDUP_OWNER_ENQUEUED,
             ttl=START_DEDUP_TTL_SECONDS,
             allow_from_state=_START_DEDUP_OWNER_CLAIMING,
+            token=claim_token,
         ):
             release_tenant_start(redis, tenant, execution_id)
             _discard_queued_placeholder(redis, tenant, execution_id)
-            return _start_claim_lost_response(
+            # ⑤：guard 后/墓碑前的迟到载体在同一失败路径清收，留 tombstone
+            # 兜底 worker 拒收。
+            _safe_xdel_carrier(redis, enqueued_msg_id)
+            return await _start_claim_lost_response(
                 redis, tenant, request.dedup_key, execution_id, request,
                 http_request, stage="after_enqueue",
             )

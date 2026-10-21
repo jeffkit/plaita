@@ -1,0 +1,106 @@
+=== 负控 r59：start dedup token 状态机（#286/#287 + schedule/409/载体清收） ===
+
+环境：隔离副本 `/tmp/r59-nc`（rsync 自本工作树，排除 .git/.venv/frontend）。
+每个变异用 /tmp/r59_mutate.py 施加、跑指定用例、`--restore` 回填；断言未放宽。
+解释器 = 仓库 .venv/bin/python。
+
+--- NC A：release 回退为旧 GET→DEL（#286 TOCTOU） ---
+变异：_RELEASE_LUA 改为「map==id 即 DEL map/owner/token」，不校验 token/row/墓碑。
+命令：
+  pytest tests/unit/test_r59_start_dedup_state_machine.py::test_stale_release_after_owner_renewed_or_enqueued_cannot_delete \
+         plaita-console/backend/tests/console/test_issue286_287_owner_state_machine.py::test_stale_release_after_a_completed_cannot_delete
+修复前（rc=1）：
+FAILED ...test_stale_release_after_owner_renewed_or_enqueued_cannot_delete
+FAILED ...test_stale_release_after_a_completed_cannot_delete
+2 failed
+
+--- NC B：去掉旧 owner 双读（#287 迁移） ---
+变异：read_owner 新键缺失时直接返回空（不读 `<map>:owner`）。
+命令：
+  pytest ...test_legacy_claiming_owner_is_adopted_not_stolen \
+         ...test_legacy_enqueued_owner_is_authoritative \
+         console::test_legacy_claiming_owner_is_not_stolen \
+         console::test_legacy_enqueued_owner_does_not_requeue_carrier
+修复前（rc=1）：
+FAILED ...test_legacy_claiming_owner_is_adopted_not_stolen
+FAILED ...test_legacy_enqueued_owner_is_authoritative
+FAILED ...test_legacy_claiming_owner_is_not_stolen
+FAILED ...test_legacy_enqueued_owner_does_not_requeue_carrier
+4 failed, 2 passed
+
+--- NC C：schedule 不走预认领（③） ---
+变异：fire_schedule 的 claim 替换为 StartClaim(True,None,None)（无 map/token）。
+命令：
+  pytest ...test_schedule_same_due_single_id_single_carrier_and_quota
+修复前（rc=1）：
+>       assert len(ids) == 1, "同一 due 重触发不得再入队/铸新 id"
+E       assert 2 == 1
+
+--- NC D：409 丢掉 Retry-After（④） ---
+变异：所有 headers={"Retry-After":"1"} → headers={}。
+命令：
+  pytest console::test_legacy_claiming_owner_is_not_stolen
+修复前（rc=1）：
+>       assert resp.headers.get("Retry-After") == "1"
+E       AssertionError: assert None == '1'
+
+--- NC E：去掉迟到载体 XDEL（⑤） ---
+变异：final CAS 失败路径的 _safe_xdel_carrier(...) → pass。
+命令：
+  pytest console::test_force_delete_after_guard_xdels_late_carrier
+修复前（rc=1）：
+>       assert _queued_ids(env) == [id_b], "A 的迟到载体必须被 XDEL 清收"
+E       assert ['3826ccee...'] == ['3826ccee...']  （A id 残留在队列）
+
+--- NC F：guard 不校验 token ---
+变异：_GUARD_LUA 删除 token 比较（只看 map/墓碑/owner）。
+命令：
+  pytest ...test_guard_rejects_wrong_token_for_same_id
+修复前（rc=1）：
+>       assert sd.guard(redis, TENANT, "k", eid, "0" * 32) is False
+E       AssertionError: assert True is False
+
+--- NC G：mark_enqueued 不校验 token ---
+变异：_MARK_ENQUEUED_LUA 删除 token 比较（只看 map/墓碑/owner 状态）。
+命令：
+  pytest ...test_mark_enqueued_rejects_wrong_token_same_id
+修复前（rc=1）：
+>       assert sd.mark_enqueued(redis, TENANT, "k", eid, "0" * 32) is False
+E       AssertionError: assert True is False
+
+--- 还原后 ---
+主工作树同一批用例全绿：state machine 10P、console 286/287 5P、既有
+#280 5P + #285 5P。
+
+--- A1 r105 探针（ROOT=argv[1]） ---
+A. stale release /tmp/r59_probe_stale.py（pre = /tmp/plaita-r105-tree，dc31efa）
+pre：
+  A id / B id: 90eb6ca9... 9142344b...
+  distinct ids: 2
+  queue ids: ['90eb6ca9...', '9142344b...']
+  map: 9142344b...  owner: enqueued:9142344b...
+  quota: 2；A/B row status: queued
+post：由 test_stale_release_after_a_completed_cannot_delete 断言同一交错收敛到
+单 id/单载体/单配额（A 续期后 B 的 release Lua 失败，B 返回 A）。
+
+B. owner migration /tmp/r59_probe_mig.py
+pre：
+  new-code B: 200 {'execution_id': 'a39913b7...'}
+  after old A late write: queue ids: ['a39913b7...', 'aaaa...']
+  A row/B row: True/True（双 id 双载体）
+post：
+  new-code B: 409 execution_start_in_progress
+  map/owner: aaaa... / claiming:aaaa...
+  after old A late write: queue ids: ['aaaa...']
+  A row: True B row: False（新代码不抢 live legacy claim；旧实例必须 drain）
+
+C. force after guard /tmp/r59_probe_fd.py
+pre：
+  queue ids: ['441356e1...', '20f913ea...']  （A 迟到载体残留）
+post：
+  queue ids: ['991f839d...']                （A 载体被 XDEL）
+  tombstone A: True；A row: False
+
+结论：六条转换/迁移负控全部实红；A1 探针的 #286/#287/⑤ 症状在修复前可复现，
+修复后分别收敛/拒绝/清收。迁移窗口的旧实例晚期写仍可能入队一条（新代码无法
+阻止旧进程），因此 runbook 要求 console 先排空再升级——这是 #287 的硬约束。

@@ -519,6 +519,41 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   无载体的 ghost 200）；A 失去认领时收敛到当前映射的合法 id，或 409
   `execution_start_superseded`。占位行写入失败返回 503 并释放映射 + 写执行
   墓碑，之前收到 200 的调用方应重查（404/墓碑）后用同一 key 重试。
+- **受理状态机（r59 设计级收口，#286/#287）**：`plaita/server/start_dedup.py`
+  是 console 与 schedule 共用的唯一原语层；owner 值仍是 `state:id`，token 存
+  独立键 `{ns}:start-dedup-token:{key}`。每次转换都是 Lua CAS，校验
+  map/owner/token/墓碑；release 在同一 Lua 内复核 row，不再有 GET→DEL 窗口。
+
+  | 状态（owner） | 转换 | 原子检查 | 结果/失败去向 |
+  |---|---|---|---|
+  | 无 | `claim(id,token)` | map SET NX、无墓碑 | `claiming:id` + token（claiming TTL 60s）；失败=读既有映射 |
+  | `claiming:id` | `guard(token)` | map==id、token、owner==claiming、无墓碑 | 续期；owner/token 均缺失但 map 仍属我 ⇒ 同 token 原地续期；否则放弃写 |
+  | `claiming:id` | 写 queued 占位行 | 先过 guard | row 落盘；写失败⇒503+墓碑+token release |
+  | `claiming:id` | `reserve_enqueue(token)` | map、token、owner==claiming、无墓碑 | `enqueueing:id`（慢写跨 TTL 且 owner/token 缺失时同 token 续期） |
+  | `enqueueing:id` | XADD 载体 | reservation 已原子通过 | 记录 target message id |
+  | `enqueueing:id` | `mark_enqueued(token)` | map、token、owner∈{claiming,enqueueing}、无墓碑 | `enqueued:id`（TTL 7d）；失败⇒XDEL 载体+release+配额回滚 |
+  | `claiming/enqueueing` | `release(token)` | token、owner 未 enqueued | 失败清理：DEL map/owner/token（row 由调用方清） |
+  | 无/`claiming`（无 token） | `release(no token,row_absent)` | map==id、无 token、owner 缺失/claiming、row 不存在 | 墓碑在位直接清；否则仅孤儿可清（#286 的 stale release 在此失败） |
+  | 有 row、无 token/owner | `adopt_for_recovery` | map==id、无墓碑、row 存在、owner 缺失/claiming | 新 token + `enqueueing`，补 carrier 后 `mark_enqueued`；失败保持 reservation 等 TTL |
+  | 旧 `<map>:owner` | 只读迁移 | 新键缺失时读旧值 | `claiming` 视为 live 并迁移新键+token；`enqueued` 视为载体已入队 |
+  | 旧 owner 与 map 共键 | 反向碰撞迁移 | `foo:owner` 值是旧 owner、`foo` 映射仍属该 id | 先把 owner 迁到新键再释放共键；否则 409 legacy collision |
+
+  迁移纪律（#287）：新代码写路径只写新 owner/token 键，**旧格式 owner 仅作
+  迁移来源**；滚动升级必须**先排空旧 console 实例再升新实例**（旧实例读不到
+  新键，混跑会双 id）。旧 `claiming` 在新代码下是 live claim，不会被当孤儿；
+  旧 `enqueued` 只返回既有 id、不重复补 carrier。
+- **schedule/cron 同源预认领（r59 ③）**：`fire_schedule` 在配额 admission
+  **之前**先 claim 同一 dedup_key；同一 due 重触发命中映射 ⇒ 不再铸新 id/
+  入队/占配额，直接收敛到既有 execution_id；配额失败/入队失败/mark 失败都会
+  release claim + 回滚配额（+ XDEL 载体），cron 重试不会耗尽配额。
+- **409 与传输层退避（r59 ④）**：in-progress/superseded 409 带
+  `Retry-After: 1`；console 前端 `startExecution` 为每次提交生成（或复用调用方
+  传入的）`dedup_key`，对 `execution_start_in_progress` 按 Retry-After/指数
+  退避重试同一 body，收敛到既有/终态 id。后端 handler 的等待已改为
+  `asyncio.sleep`，不再用 `time.sleep` 阻塞事件循环。
+- **force DELETE 的迟到载体（r59 ⑤）**：A 通过 reservation 后才被 force
+  DELETE 时，`mark_enqueued` 失败路径会 XDEL 刚写入的 target message
+  （`_safe_xdel_carrier`），tombstone 仍兜底 worker 拒收；队列不残留 A 载体。
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。
@@ -536,13 +571,14 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
     `next_run_at`，该路径只在定义缺失且调用方未传 due 时可达）。
   手动 `POST /executions` 仍不自动加键。
   调度触发与手动 start 同一受理语义（A43-04 收口可见性双标）：`fire_schedule`
-  入队前以同款 worker 同源键**生产侧预认领**——同 due 重触发（状态回写失败 +
-  锁过期）不再产生第二条注定被 worker 吞掉的消息，而是收敛到首次触发的
-  execution_id（fire_record `enqueue="dedup"`）；入队前同步落 `queued` 占位状态行
+  入队前走 **token 化预认领**（r59 的 `start_dedup` 状态机，worker 同源映射
+  键）——同 due 重触发（状态回写失败 + 锁过期）不再产生第二条注定被 worker
+  吞掉的消息，而是收敛到首次触发的 execution_id（fire_record
+  `enqueue="dedup"`）；入队前同步落 `queued` 占位状态行
   （`invoker="schedule"`，消费时被 running 行覆盖接管），入队失败逐级回滚
-  （配额/占位行/映射）；fire_record 记 `execution_id`——worker 停机/积压期，
-  调度触发的执行可经 console history 定位、GET 占位行、CANCEL 直取消并回收配额，
-  与手动 start 的受理窗口完全一致。
+  （配额/占位行/token 认领）；fire_record 记 `execution_id`——worker 停机/
+  积压期，调度触发的执行可经 console history 定位、GET 占位行、CANCEL 直取消
+  并回收配额，与手动 start 的受理窗口完全一致。
 
 
 ## 职责

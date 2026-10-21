@@ -19,9 +19,12 @@ import {
   ApiError,
   buildHttpError,
   decodeSuccessBody,
+  isExecutionStartInProgress,
   isTerminalStatus,
+  parseRetryAfterMs,
   resolveApiUrl,
   shouldRetryQuery,
+  startRetryDelayMs,
 } from '../src/services/transport.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -218,6 +221,41 @@ check('S17-04：后端发 finished，前端监听并终态守卫', () => {
   assert.match(detailSrc, /addEventListener\('finished'/)
   assert.match(detailSrc, /isTerminalStatus\(cached\?\.status\)/)
   assert.match(detailSrc, /refetchInterval:\s*\(query\)\s*=>/)
+})
+
+console.log('[B] r59：409 in-progress Retry-After + start 退避重试接线')
+check('parseRetryAfterMs：秒数/HTTP-date/非法值', () => {
+  assert.equal(parseRetryAfterMs('1'), 1000)
+  assert.equal(parseRetryAfterMs(null), undefined)
+  assert.equal(parseRetryAfterMs('not-a-date'), undefined)
+  const now = Date.parse('2026-10-22T00:00:00Z')
+  assert.equal(parseRetryAfterMs('Thu, 22 Oct 2026 00:00:02 GMT', now), 2000)
+})
+check('isExecutionStartInProgress：仅 409 + execution_start_in_progress', () => {
+  const err = (status, detailError) =>
+    new ApiError('x', { kind: 'http', url: '/api/executions', status, detail: { error: detailError } })
+  assert.equal(isExecutionStartInProgress(err(409, 'execution_start_in_progress')), true)
+  assert.equal(isExecutionStartInProgress(err(409, 'other')), false)
+  assert.equal(isExecutionStartInProgress(err(500, 'execution_start_in_progress')), false)
+})
+check('startRetryDelayMs：Retry-After 优先，否则指数退避上限 1s', () => {
+  const hinted = new ApiError('x', {
+    kind: 'http', url: '/api/executions', status: 409,
+    detail: { error: 'execution_start_in_progress' }, retryAfterMs: 1500,
+  })
+  assert.equal(startRetryDelayMs(hinted, 0), 1500)
+  assert.equal(startRetryDelayMs(new Error('plain'), 0), 200)
+  assert.equal(startRetryDelayMs(new Error('plain'), 1), 400)
+  assert.equal(startRetryDelayMs(new Error('plain'), 5), 1000)
+})
+check('startExecution 生成/复用 dedup_key 且 409 重试同 body', () => {
+  assert.match(apiSrc, /dedup_key:\s*dedupKey/)
+  assert.match(apiSrc, /isExecutionStartInProgress\(error\)/)
+  assert.match(apiSrc, /startRetryDelayMs\(error, attempt\)/)
+  assert.match(apiSrc, /attempt >= 3/)
+})
+check('request 解析 Retry-After 并透传 buildHttpError', () => {
+  assert.match(apiSrc, /parseRetryAfterMs\(response\.headers\.get\('retry-after'\)\)/)
 })
 
 if (failures.length > 0) {

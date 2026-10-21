@@ -157,7 +157,11 @@ def test_expired_owner_allows_orphan_reclaim(env):
     )
     assert claimed and mapped is None
     # 模拟 owner 崩溃/过期（行从未写入）：B 可释放孤儿映射并换新 id。
-    env.delete(executions_api._start_dedup_owner_key(TENANT, "orphan-key"))
+    # r59：token 与 owner 同 TTL 一起过期（单独删 owner 会留下 live token）。
+    env.delete(
+        executions_api._start_dedup_owner_key(TENANT, "orphan-key"),
+        executions_api._start_dedup_token_key(TENANT, "orphan-key"),
+    )
 
     resp = _post_start(client, dedup_key="orphan-key")
     assert resp.status_code == 200, resp.text
@@ -176,8 +180,11 @@ def test_queued_row_without_carrier_is_requeued_with_same_id(env):
     assert executions_api._write_queued_placeholder(
         env, TENANT, old_id, "f1", None, datetime.now().isoformat()
     )
-    # 崩溃在「占位行落盘 → 入队」之间：owner 消失，行仍在。
-    env.delete(executions_api._start_dedup_owner_key(TENANT, "crash-key"))
+    # 崩溃在「占位行落盘 → 入队」之间：owner/token 消失，行仍在。
+    env.delete(
+        executions_api._start_dedup_owner_key(TENANT, "crash-key"),
+        executions_api._start_dedup_token_key(TENANT, "crash-key"),
+    )
 
     resp = _post_start(client, dedup_key="crash-key")
     assert resp.status_code == 200, resp.text

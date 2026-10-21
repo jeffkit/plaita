@@ -33,6 +33,8 @@ export interface ApiErrorOptions {
   status?: number
   detail?: unknown
   bodySnippet?: string
+  /** 409 in-progress 的 Retry-After（毫秒）；r59 传输层退避用。 */
+  retryAfterMs?: number
 }
 
 export class ApiError extends Error {
@@ -41,6 +43,7 @@ export class ApiError extends Error {
   readonly status?: number
   readonly detail?: unknown
   readonly bodySnippet?: string
+  readonly retryAfterMs?: number
 
   constructor(message: string, opts: ApiErrorOptions) {
     super(message)
@@ -50,6 +53,7 @@ export class ApiError extends Error {
     this.status = opts.status
     this.detail = opts.detail
     this.bodySnippet = opts.bodySnippet
+    this.retryAfterMs = opts.retryAfterMs
   }
 
   /** 面向 UI 的一句话；页面不得再把错误折算成空列表/零值。 */
@@ -129,6 +133,7 @@ export function buildHttpError(
   bodyText: string,
   contentType: string | null,
   url: string,
+  retryAfterMs?: number,
 ): ApiError {
   const text = bodyText || ''
   let rawDetail: unknown = null
@@ -147,7 +152,36 @@ export function buildHttpError(
     status,
     detail: rawDetail && typeof rawDetail === 'object' ? rawDetail : undefined,
     bodySnippet: isJson ? undefined : text.slice(0, 1024),
+    retryAfterMs,
   })
+}
+
+/** Retry-After → 毫秒（支持秒数与 HTTP-date；非法/缺失返回 undefined）。 */
+export function parseRetryAfterMs(raw: string | null, nowMs = Date.now()): number | undefined {
+  if (!raw) return undefined
+  const value = raw.trim()
+  if (/^\d+$/.test(value)) return Math.max(0, Number(value) * 1000)
+  const when = Date.parse(value)
+  if (Number.isNaN(when)) return undefined
+  return Math.max(0, when - nowMs)
+}
+
+/** 409 execution_start_in_progress：同 dedup_key 重试可收敛到既有 id。 */
+export function isExecutionStartInProgress(error: unknown): boolean {
+  const err = error as { status?: number; detail?: unknown } | null
+  if (!err || err.status !== 409) return false
+  const detail = err.detail as { error?: unknown } | null | undefined
+  return detail?.error === 'execution_start_in_progress'
+}
+
+/** 启动 409 的退避：优先服务端 Retry-After，否则 200ms 指数退避（上限 1s）。 */
+export function startRetryDelayMs(error: unknown, attempt: number): number {
+  const err = error as { retryAfterMs?: number } | null
+  const hinted = err?.retryAfterMs
+  if (typeof hinted === 'number' && Number.isFinite(hinted) && hinted >= 0) {
+    return Math.min(hinted, 5000)
+  }
+  return Math.min(200 * 2 ** Math.max(0, attempt), 1000)
 }
 
 /**

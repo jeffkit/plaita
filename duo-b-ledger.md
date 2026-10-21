@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十一轮，2026-10-22；任务书标称第六十轮——台账第六十轮已被 DLQ replay family 轮占用，按序列顺延）：**start dedup 受理 seam 设计级收口（#286/#287，基线 `ca39bc2`）**——新增 `plaita/server/start_dedup.py` token CAS 状态机（claim/guard/reserve_enqueue/mark_enqueued/release 全 Lua，每步校验 map/owner/token/墓碑；release 原子复核 row，修 #286 stale GET→DEL）；owner 双读旧 `<map>:owner` 并 adopt 迁移、`foo:owner` 反向碰撞先迁 owner 再释放共键（#287，滚动升级硬要求 console 先排空旧实例）；schedule/cron 与 console 共用预认领，同 due 不再铸新 id/入队/占配额，配额/入队失败回滚 claim；409 带 Retry-After + 前端同 dedup_key 退避重试 + 后端 `asyncio.sleep`；force DELETE 迟到载体 XDEL。测试 unit **11P** + console **5P** + 前端 node **29/29**；负控 A–G 七项全红；全量 unit **8769P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1115P/13S**；`landing_gate.py ci` rc=0（`1f01658` CI + Console E2E 绿）。#286/#287 关单回执另附。
+
 > 一行摘要（第六十轮，2026-10-22；任务书标称第五十九轮——台账第五十九轮已被 #285 占用，按序列顺延）：**DLQ replay 目标 family 校验（r58 a/P2，基线 `dc31efa`）**——replay 在源 `config_envelope` 后、marker/入队前解析目标 stream 的生效 family（默认按目标 stream + 生效 group/DLQ；自定义 group/DLQ 显式 `target_config_family`），源/目标不一致（含源 legacy）⇒ `target_family_mismatch`：不写 marker、目标 XLEN=0、源 DLQ 保留、审计记 rejection；管理员 `allow_family_mismatch=true` 才可跨 family（WARNING+审计），显式 family 非法/无法解析 ⇒ `target_family_unknown`。测试 unit **5P** + 既有 replay 三文件 **41P** + console replay 两文件 **19P**；负控 pre-fix worktree **3F/2P** + r104 规格探针「replayed ok 但目标 pending」实红→拒绝；全量 unit **8746P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1091P/13S**；`landing_gate.py ci` rc=0（`dc31efa` CI + Console E2E 绿）。无 issue 号（duo-a 第九十六轮 a/P2）。
 
 > 一行摘要（第五十九轮，2026-10-22；任务书标称第五十七轮——台账第五十七/五十八轮已被 A69 复核轮与 #282-284 轮占用，按台账序列顺延）：**#285 P1 owner CAS 收口（基线 `c08e118`）**——A 写占位行/入队/写 owner 前用 Lua 复核 map==我、无墓碑、owner==我（claiming TTL 过期但映射仍属我时原地续期），owner 写入改 CAS 绝不覆盖他 id；owner 键改独立前缀 `{ns}:start-dedup-owner:{key}` 修 `foo`/`foo:owner` 碰撞；败者不再 ghost 200（载体未落返回 409 in-progress，重试收敛），A 失去认领收敛当前映射或 409 superseded；占位行失败 503+Retry-After 并释放映射/写墓碑。测试 console **5P**（#280 并发用例按新契约调整，同 id/单载体断言保持）；负控 pre-fix worktree **5F→5P** + A1 探针 owner TTL=1s/force DELETE/后缀碰撞/3+ ghost 全部实红→单 id 单载体；全量 console **1091P/13S**、unit **8741P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、plaita-ai **293P/13S/12 subtests**、layering/wheel/size **46P**；`landing_gate.py ci` rc=0（`c08e118` CI + Console E2E 绿）。
@@ -364,3 +366,61 @@
   `landing_gate.py ci` rc=0 后单 commit 推送。
 - 无 issue 号（duo-a 第九十六轮 a/P2）；未触碰 #286/#287 dedup seam、他席
   `duo-b3-ledger.md` 与未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十一轮 · #286/#287（dedup 受理 seam 设计级收口，2026-10-22，B1 修复席；任务书标称第六十轮——已被 DLQ replay family 轮占用，按序列顺延）
+
+- 基线：`origin/main` `ca39bc2`；落地门 main 最近完成 run `ca39bc2`
+  CI success + Console E2E 绿。
+- **#286（P1）stale orphan release TOCTOU**：`_release_start_dedup_if_owner`
+  旧实现 GET map==id 后 DEL，B 可在决定与 DEL 之间停顿；A 续期/落行/入队/CAS
+  成功后 B 仍删 A 映射 → 双 200/双载体/双配额。现在 release 是 Lua 原子
+  复核 map/token/owner/row/墓碑：token 在位/row 存在/enqueued ⇒ 拒绝；
+  墓碑例外允许清映射。B 的 stale 决定失败后收敛到 A（或 409）。
+- **#287（P1）owner 键迁移**：`read_owner` 新键优先、缺失时只读旧
+  `<map>:owner`；旧 `claiming:A` 视为 live 并 `adopt_legacy` 迁到新键+token，
+  旧 `enqueued:A` 视为已入队（不重复补 carrier）。`foo:owner` 反向碰撞由
+  Lua 先把 foo 的 owner 迁到新键再释放共键；无法安全迁移 ⇒ 409
+  `execution_start_legacy_collision`。写路径只写新键；**console 滚动升级
+  必须先排空旧实例**（runbook 硬约束）。
+- **状态机**：`plaita/server/start_dedup.py`（console+schedule 共用）：
+  claim SET NX+owner claiming+token → guard（map/token/owner/墓碑，慢写跨
+  TTL 且 owner/token 缺失可同 token 续期）→ 写占位行 → reserve_enqueue
+  （enqueueing）→ XADD → mark_enqueued（enqueued，TTL 7d）。失败清理
+  token release；崩在落行→入队之间的行由 `adopt_for_recovery` 原子建立
+  reservation 后同 id 补 carrier。
+- **③ schedule/cron**：`fire_schedule` 在配额 admission 前 claim 同一
+  dedup_key；同 due 重触发收敛既有 execution_id（不入队/不占配额）；配额
+  满/入队失败/mark 失败均 release claim+回滚配额（+ XDEL 载体）。
+- **④ 409/transport**：in-progress/superseded 409 带 `Retry-After: 1`；
+  handler 等待改 `asyncio.sleep`（不再 time.sleep 阻塞事件循环）；前端
+  `startExecution` 生成/复用 `dedup_key`，对 in-progress 按 Retry-After/
+  指数退避重试同一 body，收敛既有/终态 id。
+- **⑤ force DELETE 迟到载体**：reservation 后 mark 失败路径
+  `_safe_xdel_carrier` 清收刚 XADD 的 target message；tombstone 仍是 worker
+  侧最终防线。
+- 测试：unit `test_r59_start_dedup_state_machine.py` **11P**（含 guard/mark
+  错误 token、stale release、旧 claiming/enqueued、反向碰撞、schedule 同 due/
+  配额/入队失败）；console `test_issue286_287_owner_state_machine.py` **5P**
+  （stale release 收敛 A、旧 claiming 409+Retry-After、旧 enqueued 不重复
+  carrier、反向碰撞、force DELETE 后 XDEL）；既有 #280/#285 **10P**、
+  schedule #198/#23/#28 **52P**、前端 node **29/29**。
+- 负控：隔离副本逐项变异 A–G（release 回退 GET→DEL / 去旧 owner 双读 /
+  schedule 不预认领 / 去 Retry-After / 去 XDEL / guard 去 token /
+  mark_enqueued 去 token）全部实红后还原；A1 r105 探针 pre 双 id/双载体
+  实红、post 收敛/409/单载体。证据
+  `docs/proofs/data/r59-dedup-state-machine-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8769P/12S/14 deselected/3493
+  subtests**（rebase 到 `1f01658` 后复跑）；e2e+integration **287P/4S**；
+  console **1115P/13S**（rebase 后复跑）；前端 node **29/29** + tsc 干净；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- **新状态机不变量（A1 r106 对抗清单）**：
+  1. 同一 dedup_key 任意交错最多一个 execution_id/一条可执行 carrier/一个配额；
+  2. 任何写转换要求 map==id、owner 状态、token 匹配、无墓碑；
+  3. release 原子复核 token/owner/row/墓碑；无 token 只在 row 缺失且
+     token 缺失、owner 缺失/claiming 时生效（墓碑例外）；
+  4. owner 不能被另一个 id 覆盖；enqueued 终态不可被失败清理删除；
+  5. 旧格式只读迁移；新写只写新键；console 升级必须先排空旧实例；
+  6. schedule/console 共用 claim 原语；XADD 前必有 reservation；
+  7. 失去认领的载体必须 XDEL，tombstone 是 worker 侧最终防线。
+- 单 commit 关闭 #286/#287；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。

@@ -45,12 +45,13 @@ from croniter import croniter
 from redis import Redis
 from redis.exceptions import WatchError
 
-from plaita.server.task_queue import START_DEDUP_TTL_SECONDS, enqueue_task, start_dedup_map_key
+from plaita.server.task_queue import enqueue_task
 
 from ...logger import logger
 from ..tenant_context import tenant_namespace
 from ..tenant_quota import release_tenant_start, try_admit_tenant_start
 from ..tenant_status import tenant_is_active
+from .. import start_dedup as _dedup
 from .base_service import BaseExtendedService
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 from plaita.storage.base import ExecutionState
@@ -235,29 +236,6 @@ def _discard_queued_placeholder(
         )
 
 
-def _release_dedup_claim(
-    redis_client: Redis, mapping_key: str, execution_id: str
-) -> None:
-    """回滚生产侧预认领：GET==id 才 DEL（防误删并发的后来者认领）。
-
-    比较与删除间的微小竞窗最多导致同键重复启动，与 worker
-    ``_release_start_dedup`` 同款取舍。回滚失败留 WARNING（映射 7 天 TTL
-    自愈，期间同键重触发按 dedup 收敛跳过）。
-    """
-    try:
-        raw = redis_client.get(mapping_key)
-        if raw is None:
-            return
-        mapped = raw.decode() if isinstance(raw, bytes) else raw
-        if mapped == execution_id:
-            redis_client.delete(mapping_key)
-    except Exception as exc:  # noqa: BLE001 — 回滚失败不阻塞主链路，WARNING 可观测
-        logger.warning(
-            "调度幂等映射回滚失败（键 %s 将等 TTL 自愈）: %s",
-            mapping_key, _scrub_url_text(exc),
-        )
-
-
 def fire_schedule(
     redis_client: Redis,
     schedule: Dict[str, Any],
@@ -310,83 +288,86 @@ def fire_schedule(
     # 到期自然重试，console「立即触发」拿到 None 显示未触发——这就是
     # 「超限排队/拒绝」在调度入口的形态。fail-open：未配额/redis 故障放行。
     execution_id = uuid.uuid4().hex
-    # 生产侧幂等预认领（#274 同款 worker 同源键，A43-04）：同 dedup_key 的
-    # 重触发（enqueue 成功而状态回写失败 + 30s 锁过期）收敛到既有 execution_id
-    # ——不再入队、不重复占配额。预认领是占位行的**前置正确性条件**：没有它，
-    # 重触发的第二条消息会被 worker dedup 吞掉，其占位行/配额成幽灵。
-    # 认领先于占配额（与 console POST 同序）——后置步骤失败逐级回滚。
-    mapping_key = start_dedup_map_key(tenant_namespace(tenant_id), dedup_key)
-    try:
-        claimed = redis_client.set(
-            mapping_key, execution_id, ex=START_DEDUP_TTL_SECONDS, nx=True
-        )
-    except Exception as exc:  # noqa: BLE001 — 认领瞬断按已认领继续（worker 侧同款退化）
-        logger.warning(
-            "调度 %s 幂等键预认领失败（按已认领继续，重触发由 worker dedup 兜底）: %s",
-            schedule_id, _scrub_url_text(exc),
-        )
-        claimed = True
-    if not claimed:
-        try:
-            raw = redis_client.get(mapping_key)
-            mapped = (raw.decode() if isinstance(raw, bytes) else raw) or ""
-        except Exception as exc:  # noqa: BLE001 — 读不出既有归属时按「未知」收敛（下方 WARNING 如实报）
-            logger.warning(
-                "调度 %s 既有幂等映射读取失败（按未知归属收敛）: %s",
-                schedule_id, _scrub_url_text(exc),
-            )
-            mapped = ""
-        logger.warning(
-            "调度 %s 同键重触发（dedup=%s 已由 execution=%s 受理），本次不入队",
-            schedule_id, dedup_key, mapped or "?",
-        )
-        _write_fire_record(
-            redis_client, schedule_id,
-            fired_at=now.isoformat(), trigger_kind=trigger_kind,
-            flow_id=schedule["flow_id"], version=schedule.get("version") or "",
-            dedup_key=dedup_key, enqueue="dedup", msg_id="",
-            execution_id=mapped or execution_id,
-        )
-        _advance_schedule_after_fire(
-            redis_client, schedule_id, schedule, trigger_kind, now,
-            enqueue_ok=None,
+    # r59 ③：schedule/cron 与 console 共用 token 预认领状态机（A43-04 的
+    # 占位行/受理可见性保留）。同 dedup_key 重触发收敛既有 id：不入队、
+    # 不重复占配额；首次触发才 admit + placeholder + enqueue。
+    claim = _dedup.claim(redis_client, tenant_id, dedup_key, execution_id)
+    claim_token: Optional[str] = None
+    dedup_hit = False
+    if claim.error:
+        logger.error(
+            "调度 %s 预认领失败（fail-closed）: %s", schedule_id, claim.error
         )
         return None
-    if not try_admit_tenant_start(redis_client, tenant_id, execution_id):
-        logger.info(
-            "租户 %s start 配额已满，跳过调度 %s 本次触发（execution=%s）",
-            tenant_id, schedule_id, execution_id,
+    if claim.claimed:
+        claim_token = claim.token
+        if not try_admit_tenant_start(redis_client, tenant_id, execution_id):
+            _dedup.release(
+                redis_client, tenant_id, dedup_key, execution_id,
+                token=claim_token, require_row_absent=True,
+            )
+            logger.info(
+                "租户 %s start 配额已满，跳过调度 %s 本次触发（execution=%s）",
+                tenant_id, schedule_id, execution_id,
+            )
+            return None
+    else:
+        mapped = claim.mapped
+        owner = _dedup.read_owner(redis_client, tenant_id, dedup_key)
+        if mapped and owner.live and owner.execution_id == mapped:
+            execution_id = mapped
+            dedup_hit = True
+            logger.warning(
+                "调度 %s 同键重触发（dedup=%s 已由 execution=%s 受理），本次不入队",
+                schedule_id, dedup_key, mapped,
+            )
+            _write_fire_record(
+                redis_client, schedule_id,
+                fired_at=now.isoformat(), trigger_kind=trigger_kind,
+                flow_id=schedule["flow_id"], version=schedule.get("version") or "",
+                dedup_key=dedup_key, enqueue="dedup", msg_id="",
+                execution_id=mapped,
+            )
+            _advance_schedule_after_fire(
+                redis_client, schedule_id, schedule, trigger_kind, now,
+                enqueue_ok=None,
+            )
+            return None
+        logger.warning(
+            "调度 %s 认领命中孤儿映射（mapped=%r owner=%r），本轮不重复入队，"
+            "等下一 due/人工处置",
+            schedule_id, mapped, owner.state,
         )
-        _release_dedup_claim(redis_client, mapping_key, execution_id)
         return None
 
-    # 入队**之前**同步落 queued 占位状态行（A43-04，#273 同款）：触发历史里的
-    # execution_id 立刻可 GET/列表可见，worker 消费时以 running 行覆盖接管。
-    # 落盘失败即不入队并逐级回滚（配额 + 幂等映射），与 console POST 的
-    # 5xx+回滚同语义——调度入口无 HTTP 响应，「不入队 + 返回 None」即其形态。
-    if not _write_queued_placeholder(
-        redis_client, tenant_id, execution_id,
-        schedule["flow_id"], schedule.get("version"), now.isoformat(),
-    ):
-        logger.error(
-            "调度 %s 占位状态行写入失败 execution=%s：本次触发不入队，"
-            "配额与幂等映射已回滚（cron 等下一次到期，manual 显示未触发）",
-            schedule_id, execution_id,
-        )
-        release_tenant_start(redis_client, tenant_id, execution_id)
-        _release_dedup_claim(redis_client, mapping_key, execution_id)
-        _write_fire_record(
-            redis_client, schedule_id,
-            fired_at=now.isoformat(), trigger_kind=trigger_kind,
-            flow_id=schedule["flow_id"], version=schedule.get("version") or "",
-            dedup_key=dedup_key, enqueue="failed", msg_id="",
-            execution_id=execution_id,
-        )
-        _advance_schedule_after_fire(
-            redis_client, schedule_id, schedule, trigger_kind, now,
-            enqueue_ok=False,
-        )
-        return None
+    if claim_token is not None:
+        # A43-04：入队前同步落 queued 占位行（invoker=schedule），失败逐级回滚。
+        if not _write_queued_placeholder(
+            redis_client, tenant_id, execution_id,
+            schedule["flow_id"], schedule.get("version"), now.isoformat(),
+        ):
+            logger.error(
+                "调度 %s 占位状态行写入失败 execution=%s：本次触发不入队，"
+                "配额与幂等认领已回滚（cron 等下一次到期，manual 显示未触发）",
+                schedule_id, execution_id,
+            )
+            release_tenant_start(redis_client, tenant_id, execution_id)
+            _dedup.release(
+                redis_client, tenant_id, dedup_key, execution_id,
+                token=claim_token,
+            )
+            _write_fire_record(
+                redis_client, schedule_id,
+                fired_at=now.isoformat(), trigger_kind=trigger_kind,
+                flow_id=schedule["flow_id"], version=schedule.get("version") or "",
+                dedup_key=dedup_key, enqueue="failed", msg_id="",
+                execution_id=execution_id,
+            )
+            _advance_schedule_after_fire(
+                redis_client, schedule_id, schedule, trigger_kind, now,
+                enqueue_ok=False,
+            )
+            return None
 
     message: Dict[str, Any] = {
         "type": "start",
@@ -409,29 +390,54 @@ def fire_schedule(
     if version:
         message["version"] = version
 
-    try:
-        # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
-        # B2R31-01：新生产消息写当前三维代际。
-        from plaita.runtime_config import envelope_for_stream
-        from plaita.server.tenant_status import read_tenant_generation
+    enqueue_ok = True
+    if dedup_hit:
+        msg_id = execution_id
+    else:
+        try:
+            # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
+            # B2R31-01：新生产消息写当前三维代际。
+            from plaita.runtime_config import envelope_for_stream
+            from plaita.server.tenant_status import read_tenant_generation
 
-        msg_id = enqueue_task(
-            redis_client, queue_name, message,
-            tenant_generation=read_tenant_generation(
-                redis_client, message.get("tenant_id")
-            ),
-            **envelope_for_stream(queue_name, role="schedule"),
-        )
-        enqueue_ok = True
-    except Exception as e:
-        logger.error("调度 %s 入队失败: %s", schedule_id, _scrub_exception_text(e))
-        msg_id = None
-        enqueue_ok = False
-        # 入队失败逐级回滚（plaita#28 + A43-04）：名额、占位行、幂等映射，
-        # 防泄漏到 TTL 才自愈、防无人消费的幽灵 queued 行。
-        release_tenant_start(redis_client, tenant_id, execution_id)
-        _discard_queued_placeholder(redis_client, tenant_id, execution_id)
-        _release_dedup_claim(redis_client, mapping_key, execution_id)
+            msg_id = enqueue_task(
+                redis_client, queue_name, message,
+                tenant_generation=read_tenant_generation(
+                    redis_client, message.get("tenant_id")
+                ),
+                **envelope_for_stream(queue_name, role="schedule"),
+            )
+        except Exception as e:
+            logger.error("调度 %s 入队失败: %s", schedule_id, _scrub_exception_text(e))
+            msg_id = None
+            enqueue_ok = False
+            # 入队失败逐级回滚（plaita#28 + A43-04）：名额、占位行、token 认领。
+            release_tenant_start(redis_client, tenant_id, execution_id)
+            _discard_queued_placeholder(redis_client, tenant_id, execution_id)
+            if claim_token:
+                _dedup.release(
+                    redis_client, tenant_id, dedup_key, execution_id,
+                    token=claim_token,
+                )
+        else:
+            if claim_token and not _dedup.mark_enqueued(
+                redis_client, tenant_id, dedup_key, execution_id, claim_token
+            ):
+                # 认领在入队窗口内被接管/墓碑化：清收刚入队的载体 + 回滚。
+                try:
+                    redis_client.xdel(queue_name, msg_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "调度 %s 失去认领后清收载体失败（msg=%s）: %s",
+                        schedule_id, msg_id, _scrub_url_text(exc),
+                    )
+                release_tenant_start(redis_client, tenant_id, execution_id)
+                _dedup.release(
+                    redis_client, tenant_id, dedup_key, execution_id,
+                    token=claim_token,
+                )
+                msg_id = None
+                enqueue_ok = False
 
     _write_fire_record(
         redis_client, schedule_id,

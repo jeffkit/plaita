@@ -6,7 +6,10 @@ import {
   ApiError,
   buildHttpError,
   decodeSuccessBody,
+  isExecutionStartInProgress,
+  parseRetryAfterMs,
   resolveApiUrl,
+  startRetryDelayMs,
 } from './transport'
 
 export {
@@ -230,7 +233,13 @@ async function request<T>(
     const contentType = response.headers.get('content-type')
 
     if (!response.ok) {
-      throw buildHttpError(response.status, text, contentType, fullUrl)
+      throw buildHttpError(
+        response.status,
+        text,
+        contentType,
+        fullUrl,
+        parseRetryAfterMs(response.headers.get('retry-after')),
+      )
     }
     // 204 / 空 body：现在没有该形态的端点，防御性返回 undefined。
     if (response.status === 204 || !text.trim()) return undefined as T
@@ -468,11 +477,24 @@ export const api = {
     flow_id: string
     version?: string
     params: Record<string, unknown>
+    /** r59：调用方可复用同一 key；缺省为本次提交生成一次并在内部重试间复用。 */
+    dedup_key?: string
   }): Promise<void> {
-    return request('/executions', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    })
+    const dedupKey =
+      params.dedup_key ||
+      (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    const body = JSON.stringify({ ...params, dedup_key: dedupKey })
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await request('/executions', { method: 'POST', body })
+      } catch (error) {
+        // 409 in-progress：同 dedup_key 重试收敛到既有/终态 id（r59）。
+        if (!isExecutionStartInProgress(error) || attempt >= 3) throw error
+        await new Promise((resolve) => setTimeout(resolve, startRetryDelayMs(error, attempt)))
+      }
+    }
   },
 
   async cancelExecution(executionId: string): Promise<{ success: boolean; message: string }> {
