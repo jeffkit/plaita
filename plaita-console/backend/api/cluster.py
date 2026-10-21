@@ -59,6 +59,7 @@ try:
         effective_redis_url,
         frozen_service_redis_urls,
         redis_url_source,
+        service_restart_redis_urls,
     )
 except ImportError:
     import sys
@@ -75,6 +76,7 @@ except ImportError:
         effective_redis_url,
         frozen_service_redis_urls,
         redis_url_source,
+        service_restart_redis_urls,
     )
 
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
@@ -1946,11 +1948,42 @@ def _frozen_env_warnings(
     ]
 
 
+def _derived_env_warnings(
+    config: Optional[dict], effective_url: Optional[str]
+) -> List[str]:
+    """#276：派生 worker 面（``${redis.url}`` 解析 / 进程继承 / worker 默认）
+    与数据面生效 URL 不一致的告警文案。冻结具体字面量面由
+    ``_frozen_env_warnings`` 承载，此处不重复告警。"""
+    if not effective_url:
+        return []
+    frozen = frozen_service_redis_urls(config)
+    return [
+        f"服务 {svc} 的 Redis URL 经派生（${{redis.url}} 引用或继承进程环境），"
+        f"重启后实际连 {redact_url_userinfo(url)}，"
+        f"与数据面生效 URL {redact_url_userinfo(effective_url)} 不一致；"
+        "请在 services env 显式设置 PLAITA_REDIS_URL"
+        "（可用 ${redis.url} 引用生效 URL）"
+        for svc, url in sorted(
+            service_restart_redis_urls(config, effective_url).items())
+        if svc not in frozen and url != effective_url
+    ]
+
+
+def _redis_plane_warnings(
+    config: Optional[dict], effective_url: Optional[str]
+) -> List[str]:
+    """数据面 Redis 错位告警全集：冻结字面量（A2R40-03）+ 派生面（#276）。"""
+    return _frozen_env_warnings(config, effective_url) + _derived_env_warnings(
+        config, effective_url
+    )
+
+
 def _redis_plane_view(registry, cluster: "ClusterInfo") -> Dict[str, Any]:
-    """集群数据面 Redis 的可观测视图（A2R40-01/A2R40-03）。
+    """集群数据面 Redis 的可观测视图（A2R40-01/A2R40-03/#276）。
 
     返回 ``data_plane_redis_url``（生效 URL，经响应序列化层脱敏）、
-    ``data_plane_redis_source``（裁决来源）与 ``warnings``（冻结 env 错位）。
+    ``data_plane_redis_source``（裁决来源）与 ``warnings``（冻结 env 与
+    派生 worker 面的 URL 错位）。
     """
     config = registry.get_cluster_config(cluster.id)
     config_url = config_redis_url(config)
@@ -1959,7 +1992,7 @@ def _redis_plane_view(registry, cluster: "ClusterInfo") -> Dict[str, Any]:
     return {
         "data_plane_redis_url": effective,
         "data_plane_redis_source": source,
-        "warnings": _frozen_env_warnings(config, effective),
+        "warnings": _redis_plane_warnings(config, effective),
     }
 
 
@@ -2164,7 +2197,7 @@ async def update_cluster(
     view = _redis_plane_view(registry, cluster)
     if view["warnings"]:
         logger.warning(
-            "集群 %s 元数据更新后数据面生效 URL 与服务 env 冻结 URL 不一致: %s",
+            "集群 %s 元数据更新后数据面生效 URL 与服务 env 冻结/派生 URL 不一致: %s",
             cluster_id, "；".join(view["warnings"]),
         )
 
@@ -2420,18 +2453,18 @@ async def save_cluster_config_detail(
             from services.service_manager import reset_service_manager
         reset_service_manager()
 
-    # A2R40-03：services.*.env 创建期冻结的具体 Redis URL 不随 redis.url 迁移
-    # （_resolve_env 只改写 localhost 占位），服务重启仍连旧实例——显式警告，
+    # A2R40-03 + #276：services.*.env 冻结的具体 Redis URL 不随 redis.url 迁移
+    # （原样透传），${redis.url}/继承等派生面解析错位同样静默——统一显式警告，
     # 不静默。
     target_info = registry.get_cluster(cluster_id)
     save_effective = effective_redis_url(
         config_redis_url(payload.config),
         target_info.redis_url if target_info else None,
     )
-    warnings = _frozen_env_warnings(payload.config, save_effective)
+    warnings = _redis_plane_warnings(payload.config, save_effective)
     if warnings:
         logger.warning(
-            "集群 %s 配置保存后数据面生效 URL 为 %s，但服务 env 仍冻结旧 URL: %s",
+            "集群 %s 配置保存后数据面生效 URL 为 %s，但服务 env 冻结/派生 URL 与之错位: %s",
             cluster_id,
             redact_url_userinfo(save_effective) if save_effective else "<none>",
             "；".join(warnings),

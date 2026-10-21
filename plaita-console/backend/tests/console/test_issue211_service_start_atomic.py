@@ -66,6 +66,7 @@ def _manager(max_instances: int, launcher: FakeLauncher) -> ServiceManager:
     )
     sm.instances = {}
     sm._resolve_env = lambda env: {}
+    sm._warn_redis_divergence = lambda *args, **kwargs: None  # #276 启动门告警面与本组无关
     sm.get_launcher = lambda: launcher
     return sm
 
