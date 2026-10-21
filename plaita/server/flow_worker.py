@@ -2847,6 +2847,7 @@ class FlowWorker:
         *,
         schema_version: Optional[int] = None,
         carrier_execution_id: Optional[str] = None,
+        dedup_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """处理幂等键命中：绝不二次 start。
 
@@ -2915,15 +2916,20 @@ class FlowWorker:
             return None
         status = getattr(state, "status", "") or ""
         if status in ("completed", "error", "cancelled"):
-            logger.info(
-                "start 幂等键命中：执行 %s 已终态 (%s)，不再二次启动",
-                mapped_execution_id, status,
+            # #289 消费点最后防线：载体命中的映射执行已终态——本载体具名
+            # 放弃（消费循环随后 ack），绝不因 mark 失败后的重试再次执行。
+            logger.warning(
+                "start 载体 %s 命中已终态执行 %s (%s)：具名放弃执行并 ack"
+                "（dedup_key=%s）",
+                carrier_execution_id or "?", mapped_execution_id, status,
+                dedup_key or "?",
             )
             return {
                 "execution_id": mapped_execution_id,
                 "status": status,
                 "already_terminal": True,
                 "deduplicated": True,
+                "discarded": True,
                 "result": getattr(state, "result", None),
                 "error": getattr(state, "error", None),
             }
@@ -3200,6 +3206,7 @@ class FlowWorker:
                     flow_id, mapped_execution_id, params=params,
                     schema_version=schema_version,
                     carrier_execution_id=execution_id,
+                    dedup_key=dedup_key,
                 )
                 if hit_result is not None:
                     # 本次没有真正启动：回收按本 id 装配的时间线采集器

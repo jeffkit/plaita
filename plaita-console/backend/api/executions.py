@@ -2180,10 +2180,44 @@ async def start_execution(
             allow_from_state=_START_DEDUP_OWNER_CLAIMING,
             token=claim_token,
         ):
+            # #289：mark 失败时 carrier 可能已被 worker 消费并执行——此时
+            # discard/墓碑/XDEL 撤不回运行，重试会换新 id 双执行。先原地恢复
+            # （guard→reserve→mark）；map 仍属本 id 且无墓碑时只 park，保留
+            # 载体/占位行/映射，同 key 重试收敛原 id；只有映射换主/墓碑才清收。
+            if _dedup.recover_after_mark_failure(
+                redis, tenant, request.dedup_key, execution_id, claim_token
+            ):
+                row = _load_full_state(redis, _exec_key(tenant, execution_id))
+                status = str((row or {}).get("status") or "queued")
+                _audit(http_request, "execution.start", execution_id,
+                       {"flow_id": request.flow_id, "version": request.version,
+                        "mode": "queue", "dedup_key": request.dedup_key,
+                        "mark_recovered": True, "status": status},
+                       tenant_id=tenant)
+                return {
+                    "status": status,
+                    "flow_id": (row or {}).get("flow_id") or request.flow_id,
+                    "execution_id": execution_id,
+                    "message": "流程启动请求已受理（mark 恢复后原 id 收敛）",
+                }
+            mapped = _read_start_dedup_map(redis, tenant, request.dedup_key)
+            tombstoned = _execution_tombstoned(redis, execution_id)
+            if mapped == execution_id and not tombstoned:
+                logger.warning(
+                    "start mark 失败但载体可能已被消费：park 原 id（不 discard/"
+                    "不 XDEL，同 key 重试收敛）: dedup_key=%s execution=%s",
+                    request.dedup_key, execution_id,
+                )
+                _audit(http_request, "execution.start", execution_id,
+                       {"flow_id": request.flow_id, "version": request.version,
+                        "mode": "queue", "dedup_key": request.dedup_key,
+                        "mark_parked": True},
+                       tenant_id=tenant)
+                raise _start_in_progress_error(execution_id, request.dedup_key)
+            # 映射已换主/墓碑：A 载体不会被 worker 执行（dedup hit/墓碑闸），
+            # 可以安全清收占位行与迟到载体。
             release_tenant_start(redis, tenant, execution_id)
             _discard_queued_placeholder(redis, tenant, execution_id)
-            # ⑤：guard 后/墓碑前的迟到载体在同一失败路径清收，留 tombstone
-            # 兜底 worker 拒收。
             _safe_xdel_carrier(redis, enqueued_msg_id)
             return await _start_claim_lost_response(
                 redis, tenant, request.dedup_key, execution_id, request,

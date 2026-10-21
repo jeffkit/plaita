@@ -550,6 +550,48 @@ def guard(
         return False
 
 
+def recover_after_mark_failure(
+    redis,
+    tenant: Optional[str],
+    dedup_key: str,
+    execution_id: str,
+    token: str,
+    *,
+    claim_ttl: int = CLAIM_TTL_SECONDS,
+    map_ttl: int = START_DEDUP_TTL_SECONDS,
+) -> bool:
+    """#289：mark_enqueued 失败后的原地恢复（carrier 可能已被消费）。
+
+    只在「map 仍指向本 id 且无墓碑」时尝试：guard（owner/token 缺失可同 token
+    续期）→ reserve_enqueue → mark_enqueued。成功返回 True（调用方保留载体/
+    占位行，按原 id 收敛）；失败返回 False 时调用方必须 park（不 discard/XDEL），
+    让同 key 重试收敛/409 in-progress，而不是铸新 id。
+    """
+    if read_mapped(redis, tenant, dedup_key) != execution_id:
+        return False
+    try:
+        if redis.exists(tombstone_key(execution_id)):
+            return False
+    except Exception as exc:  # noqa: BLE001 — 状态不可判 ⇒ 不恢复（park）
+        logger.warning(
+            "start-dedup mark 恢复前墓碑读取失败: %s: %s",
+            execution_id, _scrub_url_text(exc),
+        )
+        return False
+    if not guard(
+        redis, tenant, dedup_key, execution_id, token,
+        ttl=claim_ttl, allow_missing_claim=True,
+    ):
+        return False
+    if not reserve_enqueue(
+        redis, tenant, dedup_key, execution_id, token, ttl=claim_ttl
+    ):
+        return False
+    return mark_enqueued(
+        redis, tenant, dedup_key, execution_id, token, ttl=map_ttl
+    )
+
+
 def release(
     redis,
     tenant: Optional[str],

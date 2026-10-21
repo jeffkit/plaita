@@ -774,14 +774,20 @@ redis-cli KEYS 'plaita:execution:lease:*'
   键再释放共键，无法安全迁移时返回 409 `execution_start_legacy_collision`。
 - **schedule/cron**：同一 due 的重复触发在 schedule 入口预认领处收敛（不再
   铸新 id/入队/占配额）；写占位行后、XADD 前必须 reservation（慢写跨 claiming
-  TTL 先同 token 续期），配额/reservation/入队/mark 失败都会 discard 占位行
-  （墓碑）+释放 claim+回滚配额；孤儿映射清理后同调用重试新 id。人工 `manual`
-  触发仍走独立唯一键。
+  TTL 先同 token 续期），配额/reservation/入队失败逐级回滚。**mark 失败先原地
+  恢复；map 仍属本 id 且无墓碑时 park（保留载体/行/映射、不回滚配额），同 due
+  重试收敛原 id**；孤儿 row 在时同 id 恢复，只有 row 缺失/墓碑才清理换新 id。
+  人工 `manual` 触发仍走独立唯一键。
 - **客户端语义**：`execution_start_in_progress` /
   `execution_start_superseded` 409 带 `Retry-After: 1`；console 前端对两者
   自动用同一 `dedup_key` 退避重试，窗口 65s ≥ claiming TTL 60s；超窗提示刷新
   执行列表，**不要换 key 重复提交**（会形成第二次执行）。其他调用方应同样重试
   同一 dedup_key。
+- **mark 失败/carrier 已消费（#289）**：mark 失败不再 discard/墓碑/XDEL，而是
+  先 `recover_after_mark_failure`（guard→reserve→mark）原地恢复；map 仍属本 id
+  且无墓碑时 park，同 key/同 due 重试收敛原 id（409 in-progress 引导）。worker
+  消费点另有终态防线：载体命中的执行已 completed/error/cancelled 时具名放弃并
+  ack，不再执行。
 - **force DELETE**：guard/reservation 后、`mark_enqueued` 前被删除的 start
   载体由失败路径 XDEL 清收（避免队列残留 tombstone 载体）；执行墓碑仍是
   worker 侧最终防线。

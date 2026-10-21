@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十三轮，2026-10-22；任务书标称第六十二轮——台账第六十二轮已被 #288 reservation 轮占用，按序列顺延）：**#289 mark 失败 park-retry（基线 `39c875a`）**——`mark_enqueued` 失败不再 discard/墓碑/XDEL（carrier 可能已被 worker 消费执行）：新增 `recover_after_mark_failure`（guard→reserve→mark 原地恢复）；map 仍属本 id 且无墓碑时 **park**（保留载体/占位行/映射/配额），同 key/同 due 重试收敛原 id（console 409 in-progress + Retry-After）；只有映射换主/墓碑才清收。schedule 孤儿 row 在且无墓碑时用 `adopt_for_recovery` 同 id 恢复，不再清理换新 id。worker 消费点终态防线：载体命中的执行已 completed/error/cancelled 时具名 WARNING + `discarded=True`，ack 不执行。测试 unit **2P** + console **3P** + 既有 #288/schedule/状态机/console dedup 全绿；负控 A–C（console/schedule 回退 discard、worker 去 discarded）实红；全量 unit **8776P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1118P/13S**；`landing_gate.py ci` rc=0（`39c875a` CI + Console E2E 绿）。#289 关单回执另附。
+
 > 一行摘要（第六十二轮，2026-10-22；任务书标称第六十一轮——台账第六十一轮已被 #286/#287 状态机轮占用，按序列顺延）：**#288 schedule 接入 reservation 状态机（基线 `41085cc`）**——`fire_schedule` 在占位行后、XADD 前调用 `reserve_enqueue`（慢写跨 claiming TTL 先 guard 同 token 续期）；`_MARK_ENQUEUED_LUA` 收紧为只允许 `enqueueing→enqueued`（不变量 6 由状态机强制）；reservation/入队/mark 失败统一 discard 占位行（墓碑）+释放 claim+回滚配额（mark 失败另 XDEL）；同 due 孤儿清理后同调用重试新 id；A106-02 前端重试窗口 65s ≥ claiming TTL、superseded 入集合、超窗具名引导不换 key；后端 409 仍带 Retry-After。测试 unit **5P** + 既有 schedule/状态机 **69P** + console dedup **15P** + 前端 node **30/30**；负控 A–E 五类实红；全量 unit **8774P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1115P/13S**；`landing_gate.py ci` rc=0（`4985022` CI + Console E2E 绿）。#288 关单回执另附。
 
 > 一行摘要（第六十一轮，2026-10-22；任务书标称第六十轮——台账第六十轮已被 DLQ replay family 轮占用，按序列顺延）：**start dedup 受理 seam 设计级收口（#286/#287，基线 `ca39bc2`）**——新增 `plaita/server/start_dedup.py` token CAS 状态机（claim/guard/reserve_enqueue/mark_enqueued/release 全 Lua，每步校验 map/owner/token/墓碑；release 原子复核 row，修 #286 stale GET→DEL）；owner 双读旧 `<map>:owner` 并 adopt 迁移、`foo:owner` 反向碰撞先迁 owner 再释放共键（#287，滚动升级硬要求 console 先排空旧实例）；schedule/cron 与 console 共用预认领，同 due 不再铸新 id/入队/占配额，配额/入队失败回滚 claim；409 带 Retry-After + 前端同 dedup_key 退避重试 + 后端 `asyncio.sleep`；force DELETE 迟到载体 XDEL。测试 unit **11P** + console **5P** + 前端 node **29/29**；负控 A–G 七项全红；全量 unit **8769P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1115P/13S**；`landing_gate.py ci` rc=0（`1f01658` CI + Console E2E 绿）。#286/#287 关单回执另附。
@@ -467,4 +469,40 @@
   enqueueing 可 mark）；schedule 孤儿自愈（清理后同调用重试）；失败路径不得
   留无 carrier 的 queued 行/map。
 - 单 commit 关闭 #288；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十三轮 · #289（mark 失败 park-retry + worker 终态防线，2026-10-22，B1 修复席；任务书标称第六十二轮——已被 #288 reservation 轮占用，按序列顺延）
+
+- 基线：`origin/main` `39c875a`；落地门 `39c875a` CI + Console E2E 绿。
+- **#289（P1）**：mark_enqueued 失败时 carrier 可能已被 worker 消费并执行；
+  r59/r60 的 discard/墓碑/XDEL/释放 map 撤不回运行，同 key/同 due 重试铸 B
+  → A（已完成）+ B 双执行。修法：
+  - 新增 `start_dedup.recover_after_mark_failure`：map 仍属本 id、无墓碑时
+    guard（owner/token 缺失可同 token 续期）→ reserve → mark 原地恢复。
+  - 恢复失败但 map 仍属本 id、无墓碑 ⇒ **park**：不清收、不回滚配额；console
+    返回 409 in-progress（Retry-After），schedule 返回 None；同 key/同 due
+    重试走 hit/孤儿恢复，收敛原 id。只有映射换主/墓碑（载体不会执行）才
+    XDEL+discard+release+配额回滚。
+  - schedule 孤儿：row 存在且无墓碑 ⇒ `adopt_for_recovery` 补 carrier 同 id
+    恢复；row 缺失/墓碑才清理映射后新 id。
+  - worker 消费点终态防线：`_handle_start_dedup_hit` 命中 completed/error/
+    cancelled 时具名 WARNING + `discarded=True`，ack 不执行。
+- 测试：console `test_issue289_mark_race.py` **3P**（A 被消费完成后 mark 失败
+  → 200 completed/原 id/row 保留/同 key retry A；恢复不可用 → park 409/
+  row+map+配额保留/TTL 后同 id 恢复；worker 终态命中 discarded）；
+  `test_issue289_schedule_mark_race.py` **2P**（schedule 同场景原 id 收敛；
+  park 后孤儿同 id 恢复）。既有 #288 schedule 5P（孤儿/park 语义更新）、
+  r59 状态机 11P、#280/#285/#286 15P、schedule 49P 全绿。
+- 负控：隔离副本 A–C（console recover 关闭+旧 discard、schedule 同、
+  worker 去 discarded）全部实红；A1 r107 双探针 pre console A 409+墓碑+
+  同 key B、schedule first None+同 due B；post console A 200 completed/retry A、
+  schedule first A msg/同 due None/队列仅 A。证据
+  `docs/proofs/data/r61-mark-park-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8776P/12S/14 deselected/3501
+  subtests**；e2e+integration **287P/4S**；console **1118P/13S**；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 不变量更新：mark 失败 ≠ 未执行；carrier 已消费时只能恢复/park，不能
+  discard/换 id；worker 终态命中必须 ack 不执行。正常/迁移/reservation
+  路径不回退。
+- 单 commit 关闭 #289；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

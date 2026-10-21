@@ -1,0 +1,66 @@
+=== 负控 r61：#289 mark 失败在 carrier 已消费后 park/恢复 ===
+
+环境：隔离副本 `/tmp/r61-nc`（rsync 自本工作树，排除 .git/.venv/frontend
+node_modules）；变异用 /tmp/r61_mutate.py 施加，跑指定用例后 --restore。
+
+--- NC A：console 回退 discard/墓碑（mark 失败） ---
+变异：recover_after_mark_failure→False；park 分支 `if False`（走旧 discard）。
+命令：
+  cd plaita-console/backend && pytest \
+    tests/console/test_issue289_mark_race.py::test_mark_failure_after_carrier_consumed_converges_original_id
+输出（rc=1）：
+>       assert resp_a.status_code == 200, resp_a.text
+E       assert 409 == 200
+（A 已 completed 仍 409；旧路径 map 释放 → 同 key 重试铸 B）
+
+--- NC B：schedule 回退 discard（mark 失败） ---
+变异：recover→False；park 分支 `if False`。
+命令：pytest tests/unit/test_issue289_schedule_mark_race.py::test_schedule_mark_failure_after_consumed_converges_original_id
+输出（rc=1）：
+>       assert results["first"] is not None
+E       AssertionError: assert None is not None
+（first fire 失败 + discard A；同 due 再 fire 铸 B）
+
+--- NC C：worker 终态防线去掉 discarded 标记 ---
+变异：_handle_start_dedup_hit 终态返回删除 `"discarded": True`。
+命令：pytest console::test_worker_terminal_hit_discards_carrier
+输出（rc=1）：
+>       assert out["discarded"] is True
+E       AssertionError: assert False is True
+
+--- 基线（修复后） ---
+  tests/unit/test_issue289_schedule_mark_race.py: 2 passed
+  console tests/console/test_issue289_mark_race.py: 3 passed
+
+--- A1 r107 探针（ROOT=argv[1]） ---
+A. console /tmp/r61_probe_console.py
+pre（/tmp/plaita-r107-tree，39c875a）：
+  A row before mark failure: completed
+  A response: 409 execution_start_superseded
+  A row after mark failure: False tombstone: True
+  same-key retry: 200 execution_id=09d676...（B）
+  A id / retry id: 4230b9... / 09d676...  ← 双执行
+post：
+  A response: 200 status=completed execution=05a109...
+  A row after mark failure: True tombstone: False
+  same-key retry: 200 execution=05a109...
+  A id / retry id: 05a109... / 05a109...   ← 单执行，原 id 收敛
+
+B. schedule /tmp/r61_probe_schedule.py
+pre：
+  first fire result: None
+  A row after mark failure: False tombstone: True
+  map/owner/token: None None None
+  second same due: 1792615255487-0（B）
+  A id / second: 2678d7... / 1792615255487-0  ← 同 due 双执行
+post：
+  first fire result: 1792615256105-0
+  A row after mark failure: True tombstone: False
+  map/owner/token: e83b5d... / enqueued:e83b5d... / e83b5d:89af...
+  second same due: None（dedup 收敛）
+  queue after second: ['e83b5d...']            ← 单执行原 id
+  A id / second: e83b5d... / None
+
+结论：mark 失败不再把「未完成 mark」当「没有执行」；先原地恢复，无法恢复时
+park 原 id（保留载体/行/映射/配额），同 key/同 due 重试收敛原 id；只有映射
+换主/墓碑才清理。worker 终态命中具名 discarded，构成第二道防线。

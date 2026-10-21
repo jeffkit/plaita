@@ -531,7 +531,9 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   | `claiming:id` | 写 queued 占位行 | 先过 guard | row 落盘；写失败⇒503+墓碑+token release |
   | `claiming:id` | `reserve_enqueue(token)` | map、token、owner==claiming、无墓碑 | `enqueueing:id`（慢写跨 TTL 且 owner/token 缺失时同 token 续期） |
   | `enqueueing:id` | XADD 载体 | reservation 已原子通过 | 记录 target message id |
-  | `enqueueing:id` | `mark_enqueued(token)` | map、token、owner==enqueueing、无墓碑 | `enqueued:id`（TTL 7d）；失败⇒XDEL 载体+discard row/墓碑+release+配额回滚；**claiming 直入被拒**（r60/#288，强制先 reservation） |
+  | `enqueueing:id` | `mark_enqueued(token)` | map、token、owner==enqueueing、无墓碑 | `enqueued:id`（TTL 7d）；**claiming 直入被拒**（r60/#288，强制先 reservation） |
+  | `enqueueing`（mark 失败） | `recover_after_mark_failure` | map==id、无墓碑 | guard→reserve→mark 原地恢复（#289）；仍失败且 map 仍属本 id/no 墓碑 ⇒ **park**：保留载体/占位行/映射，同 key 409 in-progress；只有映射换主/墓碑才 XDEL+discard+release |
+  | 载体命中已终态 | worker 消费点防线 | dedup 映射指向的执行 completed/error/cancelled | 具名 WARNING + `discarded=True`，ack 不执行（#289 第二道防线） |
   | `claiming/enqueueing` | `release(token)` | token、owner 未 enqueued | 失败清理：DEL map/owner/token（row 由调用方清） |
   | 无/`claiming`（无 token） | `release(no token,row_absent)` | map==id、无 token、owner 缺失/claiming、row 不存在 | 墓碑在位直接清；否则仅孤儿可清（#286 的 stale release 在此失败） |
   | 有 row、无 token/owner | `adopt_for_recovery` | map==id、无墓碑、row 存在、owner 缺失/claiming | 新 token + `enqueueing`，补 carrier 后 `mark_enqueued`；失败保持 reservation 等 TTL |
@@ -542,13 +544,14 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   迁移来源**；滚动升级必须**先排空旧 console 实例再升新实例**（旧实例读不到
   新键，混跑会双 id）。旧 `claiming` 在新代码下是 live claim，不会被当孤儿；
   旧 `enqueued` 只返回既有 id、不重复补 carrier。
-- **schedule/cron 同源预认领（r59 ③ / r60 #288）**：`fire_schedule` 在配额
-  admission **之前**先 claim 同一 dedup_key；写占位行后、XADD 之前必须
+- **schedule/cron 同源预认领（r59 ③ / r60 #288 / r61 #289）**：`fire_schedule`
+  在配额 admission **之前**先 claim 同一 dedup_key；写占位行后、XADD 之前必须
   `reserve_enqueue`（慢写跨 TTL 先 guard 同 token 续期）；同一 due 重触发命中
   映射 ⇒ 不再铸新 id/入队/占配额，直接收敛到既有 execution_id。配额失败/
-  reservation 失败/入队失败/mark 失败都 discard 占位行（墓碑）+ release claim
-  + 回滚配额（+ XDEL 载体）；孤儿映射（旧版残留）会清理后同调用重试新 id，
-  不再静默留 7 天。cron 重试不会耗尽配额或留下无载体 queued 行。
+  reservation 失败/入队失败仍逐级 discard+release+回滚配额；**mark 失败先原地
+  恢复，map 仍属本 id 且无墓碑时 park（保留载体/行/映射，不回滚配额），同 due
+  再触发收敛原 id**；孤儿 row 在且无墓碑时用 `adopt_for_recovery` 同 id 恢复，
+  只有 row 缺失/墓碑才清理后重试新 id。cron 重试不会双执行或留下无载体 queued 行。
 - **409 与传输层退避（r59 ④ / r60 A106-02）**：in-progress/superseded 409 带
   `Retry-After: 1`；console 前端 `startExecution` 为每次提交生成（或复用调用方
   传入的）`dedup_key`，对 `execution_start_in_progress` **和**

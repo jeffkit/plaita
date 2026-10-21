@@ -28,6 +28,7 @@ from plaita.server.services import schedule_service
 from plaita.server.tenant_quota import (
     publish_tenant_quota,
     tenant_running_count,
+    try_admit_tenant_start,
 )
 
 TENANT = "acme"
@@ -143,23 +144,27 @@ def test_schedule_orphan_same_due_cleans_and_retries():
         sd.execution_row_key(TENANT, old),
         json.dumps({"execution_id": old, "status": "queued"}),
     )
+    assert try_admit_tenant_start(redis, TENANT, old)
 
     msg_id = _fire(redis)
-    assert msg_id is not None, "孤儿应清理后重试，而不是静默吞掉"
+    assert msg_id is not None, "孤儿应恢复 reservation 后同 id 重试"
     st = _state(redis)
-    assert st["map"] and st["map"] != old
-    assert st["queue"] == [st["map"]]
+    assert st["map"] == old, "行在、无墓碑时必须收敛原 id（#289）"
+    assert st["queue"] == [old]
+    assert st["owner"].state == sd.STATE_ENQUEUED
     assert st["quota"] == 1
-    assert redis.get(sd.execution_row_key(TENANT, old)) is None
-    assert redis.exists(sd.tombstone_key(old))
+    assert redis.get(sd.execution_row_key(TENANT, old)) is not None
+    assert not redis.exists(sd.tombstone_key(old))
 
 
-def test_schedule_mark_failure_discards_row_and_map(monkeypatch):
+def test_schedule_mark_failure_parks_instead_of_discard(monkeypatch):
     redis = _redis()
     monkeypatch.setattr(sd, "mark_enqueued", lambda *a, **k: False)
+    monkeypatch.setattr(sd, "recover_after_mark_failure", lambda *a, **k: False)
     assert _fire(redis) is None
     st = _state(redis)
-    assert st["queue"] == [], "失去认领的 carrier 必须 XDEL"
-    assert st["map"] is None and st["token"] is None
-    assert st["quota"] == 0
-    assert _rows(redis) == [], "mark 失败必须 discard queued 行"
+    assert st["queue"] == [st["map"]], "park：载体保留（可能已被消费/待消费）"
+    assert st["map"] is not None, "park 必须保留 map，供同 due 重试收敛"
+    assert st["quota"] == 1, "mark 失败不得回滚已占配额（执行可能已开始）"
+    assert _rows(redis), "park 不得 discard queued 行"
+    assert not redis.exists(sd.tombstone_key(st["map"]))

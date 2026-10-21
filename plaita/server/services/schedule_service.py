@@ -333,13 +333,93 @@ def fire_schedule(
                 enqueue_ok=None,
             )
             return None
-        # 孤儿（row 可能残留）：discard 占位行（写墓碑）+ 条件释放映射，然后
-        # 用新 id 重试一次本 due——不把孤儿 map/queued 行留 7 天静默吞掉。
+        # 孤儿（map 指向的行可能已落、owner/token 过期）：先尝试用同 id
+        # 恢复（A1 r107：carrier 可能已被消费/执行，discard+新 id 会双执行）。
+        # 只有 row 缺失或墓碑（执行已死）才清理映射后重试新 id。
         if mapped:
             try:
-                if redis_client.exists(
-                    _dedup.execution_row_key(tenant_id, mapped)
+                row_exists = bool(
+                    redis_client.exists(_dedup.execution_row_key(tenant_id, mapped))
+                )
+                tombstoned = bool(
+                    redis_client.exists(_dedup.tombstone_key(mapped))
+                )
+            except Exception as exc:  # noqa: BLE001 — 状态不可判 ⇒ park
+                logger.warning(
+                    "调度 %s 孤儿状态读取失败 execution=%s（park）: %s",
+                    schedule_id, mapped, _scrub_url_text(exc),
+                )
+                return None
+            if row_exists and not tombstoned:
+                recovery_token = _dedup.adopt_for_recovery(
+                    redis_client, tenant_id, dedup_key, mapped
+                )
+                if recovery_token is None:
+                    logger.warning(
+                        "调度 %s 孤儿 row 在但恢复 reservation 失败 "
+                        "execution=%s（owner=%s，park，不换 id）",
+                        schedule_id, mapped, owner.state,
+                    )
+                    return None
+                recovery_message = {
+                    "type": "start",
+                    "tenant_id": schedule.get("tenant_id") or "default",
+                    "execution_id": mapped,
+                    "flow_id": schedule["flow_id"],
+                    "params": schedule.get("params") or {},
+                    "timestamp": now.isoformat(),
+                    "trigger": {
+                        "kind": trigger_kind,
+                        "schedule_id": schedule_id,
+                        "schedule_name": schedule.get("name", ""),
+                    },
+                    "dedup_key": dedup_key,
+                }
+                if schedule.get("version"):
+                    recovery_message["version"] = schedule["version"]
+                try:
+                    from plaita.runtime_config import envelope_for_stream
+                    from plaita.server.tenant_status import read_tenant_generation
+
+                    recovery_msg_id = enqueue_task(
+                        redis_client, queue_name, recovery_message,
+                        tenant_generation=read_tenant_generation(
+                            redis_client, recovery_message.get("tenant_id")
+                        ),
+                        **envelope_for_stream(queue_name, role="schedule"),
+                    )
+                except Exception as exc:  # noqa: BLE001 — reservation 保留待重试
+                    logger.error(
+                        "调度 %s 孤儿恢复入队失败 execution=%s（park）: %s",
+                        schedule_id, mapped, _scrub_url_text(exc),
+                    )
+                    return None
+                if not _dedup.mark_enqueued(
+                    redis_client, tenant_id, dedup_key, mapped, recovery_token
                 ):
+                    logger.warning(
+                        "调度 %s 孤儿恢复 mark 失败 execution=%s（park）",
+                        schedule_id, mapped,
+                    )
+                    return None
+                logger.warning(
+                    "调度 %s 孤儿已用同 id 恢复并重新入队 execution=%s",
+                    schedule_id, mapped,
+                )
+                _write_fire_record(
+                    redis_client, schedule_id,
+                    fired_at=now.isoformat(), trigger_kind=trigger_kind,
+                    flow_id=schedule["flow_id"], version=schedule.get("version") or "",
+                    dedup_key=dedup_key, enqueue="recovered", msg_id=recovery_msg_id,
+                    execution_id=mapped,
+                )
+                _advance_schedule_after_fire(
+                    redis_client, schedule_id, schedule, trigger_kind, now,
+                    enqueue_ok=True,
+                )
+                return recovery_msg_id
+            try:
+                if row_exists:
                     _discard_queued_placeholder(redis_client, tenant_id, mapped)
             except Exception as exc:  # noqa: BLE001 — 清理失败具名 WARNING
                 logger.warning(
@@ -484,22 +564,58 @@ def fire_schedule(
             if claim_token and not _dedup.mark_enqueued(
                 redis_client, tenant_id, dedup_key, execution_id, claim_token
             ):
-                # 认领在入队窗口内被接管/墓碑化：清收刚入队的载体 + 回滚。
-                try:
-                    redis_client.xdel(queue_name, msg_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "调度 %s 失去认领后清收载体失败（msg=%s）: %s",
-                        schedule_id, msg_id, _scrub_url_text(exc),
+                # #289：carrier 可能已被 worker 消费/执行；先原地恢复 mark，
+                # map 仍属本 id 且无墓碑时只 park（保留载体/占位行/映射），
+                # 同 due 再触发收敛原 id；只有映射换主/墓碑才清收。
+                if _dedup.recover_after_mark_failure(
+                    redis_client, tenant_id, dedup_key, execution_id, claim_token
+                ):
+                    pass  # mark 已恢复，载体保留
+                else:
+                    mapped = _dedup.read_mapped(
+                        redis_client, tenant_id, dedup_key
                     )
-                release_tenant_start(redis_client, tenant_id, execution_id)
-                _discard_queued_placeholder(redis_client, tenant_id, execution_id)
-                _dedup.release(
-                    redis_client, tenant_id, dedup_key, execution_id,
-                    require_row_absent=False,
-                )
-                msg_id = None
-                enqueue_ok = False
+                    try:
+                        tombstoned = bool(
+                            redis_client.exists(_dedup.tombstone_key(execution_id))
+                        )
+                    except Exception as exc:  # noqa: BLE001 — 读不到按无墓碑 park
+                        logger.warning(
+                            "调度 %s mark 失败后墓碑读取失败 execution=%s: %s",
+                            schedule_id, execution_id, _scrub_url_text(exc),
+                        )
+                        tombstoned = False
+                    if mapped == execution_id and not tombstoned:
+                        logger.warning(
+                            "调度 %s mark 失败但载体可能已被消费：park 原 id"
+                            "（不 discard/不 XDEL，同 due 重试收敛）: "
+                            "dedup=%s execution=%s",
+                            schedule_id, dedup_key, execution_id,
+                        )
+                        msg_id = None
+                        enqueue_ok = False
+                    else:
+                        # 映射已换主/墓碑：载体不会执行（dedup hit/墓碑闸），
+                        # 安全清收。
+                        try:
+                            redis_client.xdel(queue_name, msg_id)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "调度 %s 失去认领后清收载体失败（msg=%s）: %s",
+                                schedule_id, msg_id, _scrub_url_text(exc),
+                            )
+                        release_tenant_start(
+                            redis_client, tenant_id, execution_id
+                        )
+                        _discard_queued_placeholder(
+                            redis_client, tenant_id, execution_id
+                        )
+                        _dedup.release(
+                            redis_client, tenant_id, dedup_key, execution_id,
+                            require_row_absent=False,
+                        )
+                        msg_id = None
+                        enqueue_ok = False
 
     _write_fire_record(
         redis_client, schedule_id,
