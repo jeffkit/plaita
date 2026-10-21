@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
+from plaita.tenant_context import TenantWriteRejected
+from plaita.server.tenant_status import read_tenant_generation, tenant_write_allowed
 from plaita.runtime_config import (
     LEGACY_GENERATION,
     normalize_generation,
@@ -116,6 +118,9 @@ class StreamTask:
     config_generation: str = LEGACY_GENERATION
     budget_generation: str = LEGACY_GENERATION
     config_effective_at: Optional[str] = None
+    # plaita#277：读取该载体时租户的世代（worker/console 写 redis meta）。
+    # 在途执行失败后写 DLQ 时据此拒绝旧世代的迟到写；None = 旧消息/未发布。
+    tenant_generation: Optional[str] = None
 
 
 # #186：畸形消息（payload 非 JSON / JSON 非对象）在**解析点**处置，不再抛给
@@ -613,6 +618,8 @@ class RedisStreamTaskQueue:
             "config_family_mismatch": 0,
             "config_legacy": 0,
             "config_budget_stale": 0,
+            # plaita#277：旧世代/已删租户的 DLQ 迟到写拒绝计数。
+            "tenant_write_rejected": 0,
         }
         self._last_family_warning_at = 0.0
         # 启动预检只在首次 read（组已建立）后跑一次。
@@ -1220,7 +1227,20 @@ class RedisStreamTaskQueue:
             overrides["payload"] = payload
         if extra is not None:
             overrides["extra"] = extra
-        self.dead_letter(task, reason=reason, **overrides)
+        try:
+            self.dead_letter(task, reason=reason, **overrides)
+        except TenantWriteRejected as rejected:
+            # plaita#277：旧世代/已删租户的迟到死信写被拒——不 ack、不入 DLQ，
+            # 消息留 pending（安全方向）；调用方据此保持原状。
+            reject_reason = str(rejected.reason or "unknown")
+            rejected_tenant = str(rejected.tenant_id or "?")
+            logger.warning(
+                "死信写入拒绝（%s）：tenant=%s message=%s——不 ack、留 pending",
+                reject_reason,
+                rejected_tenant,
+                getattr(task, "message_id", "?"),
+            )
+            return False
         return True
 
     def dead_letter(
@@ -1235,7 +1255,29 @@ class RedisStreamTaskQueue:
 
         信封固定带 ``schema_version``（A44 b 类）：审计/重放时不依赖 payload
         猜测源消息的语义版本。
+
+        plaita#277：DLQ 是平台级键、不受 execution fencing 保护。写入前复核
+        租户状态/世代；已删租户（disabled 墓碑）或与在途执行捕获世代不一致
+        的迟到写抛 :class:`TenantWriteRejected`，绝不把旧世代 payload 写回。
         """
+        tenant_id = (
+            task.body.get("tenant_id") if isinstance(task.body, dict) else None
+        )
+        allowed, reject_reason = tenant_write_allowed(
+            self.redis, tenant_id, getattr(task, "tenant_generation", None)
+        )
+        if not allowed:
+            self._metrics["tenant_write_rejected"] = (
+                self._metrics.get("tenant_write_rejected", 0) + 1
+            )
+            logger.warning(
+                "死信写入拒绝（%s）：tenant=%s message=%s——旧世代/已删租户，"
+                "不写 DLQ、不 ack",
+                reject_reason,
+                tenant_id,
+                getattr(task, "message_id", "?"),
+            )
+            raise TenantWriteRejected(tenant_id, reject_reason or "unknown")
         envelope = {
             "reason": reason,
             "source_stream": self.stream_key,
@@ -1394,6 +1436,7 @@ class RedisStreamTaskQueue:
             config_effective_at=_config_field_from_fields(
                 fields, CONFIG_EFFECTIVE_AT_FIELD
             ),
+            tenant_generation=self._tenant_generation_for({}),
         )
         return self.dead_letter_if_allowed(
             task,
@@ -1458,6 +1501,11 @@ class RedisStreamTaskQueue:
         msg_id, fields = messages[0]
         return self._task_from_fields(_decode(msg_id), fields, delivery_count)
 
+    def _tenant_generation_for(self, body: Any) -> Optional[str]:
+        """读取载体租户的当前世代（plaita#277）；读不到 → None（缺省）。"""
+        tenant_id = body.get("tenant_id") if isinstance(body, dict) else None
+        return read_tenant_generation(self.redis, tenant_id)
+
     def _task_from_fields(
         self, message_id: str, fields: Dict[Any, Any], delivery_count: int
     ) -> StreamTask:
@@ -1483,6 +1531,7 @@ class RedisStreamTaskQueue:
             config_effective_at=_config_field_from_fields(
                 fields, CONFIG_EFFECTIVE_AT_FIELD
             ),
+            tenant_generation=self._tenant_generation_for(body),
         )
 
     def _pending_delivery_count(self, message_id: str) -> int:

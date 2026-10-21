@@ -329,6 +329,17 @@ worker 启动时计算并打印 `event=config.effective`，同时写入 registry
   `--max-deliveries` 必须与 env 一致；不一致时启动即 `ConfigError`（给两边
   值与 env 键名），否则新任务带旧 `budget_generation`，失败载体在 PEL 中
   永久 `config_budget_stale`（直到 30 天年龄闸），reclaim 无法接管。
+- **CLI identity 与 env 同源（#275）**：`--consumer-group` / `--dlq-key` /
+  `--queue-name` 在启动时先 strip 并写回实际使用的参数；与 env/default 不一致
+  即 `ConfigError`/exit 2（给出两边值）。尾随空格不会再产生独立 consumer
+  group/DLQ 键或不同 Stream；`--queue-name` 不同会直接拒绝启动，不再「看似
+  健康但无人消费」。
+- **租户世代写闸（#277）**：`delete_tenant` 写 disabled 墓碑；`create_tenant`
+  把新世代写入 `plaita:tenant_status:meta`。DLQ 与 `plaita:subscription:` 写面
+  在写入前复核租户 active + 世代（在途 worker 读取/派发时捕获）；已删租户或
+  旧世代的迟到写具名拒绝（DLQ 消息不 ack、留 pending；订阅写拒绝），同名重建
+  的新租户读不到前代 payload。`PLAITA_DISABLE_FENCING=1` 只关闭 execution 状态
+  写的 fencing，本闸独立于该开关生效（状态写回滚路径的既有风险按原样注记）。
 - **租户状态纪元**：console 每次状态写入/对账都刷新
   `plaita:tenant_status:epoch`（值来自 `PLAITA_DEPLOYMENT_EPOCH`）。worker
   发现 Redis epoch 缺失/更旧 → 非 default 租户拒绝、default 保持 #237

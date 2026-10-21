@@ -18,17 +18,21 @@ import threading
 from typing import Any, Optional
 
 from plaita.core.url_redaction import _scrub_exception_text
+from plaita.tenant_context import (
+    TENANT_STATUS_DISABLED,
+    TENANT_STATUS_KEY,
+    TENANT_STATUS_META_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
-TENANT_STATUS_KEY = "plaita:tenant_status"
 #: 部署纪元锚点（A2R31-02 / B2R31-01 §租户状态纪元）。
 #: 值来自部署配置（``PLAITA_DEPLOYMENT_EPOCH``），**不在 Redis 快照里**；
 #: Redis-only 恢复回滚了状态 HASH 时，这个键也会一起回滚——因此 worker
 #: 用「本进程 expected_epoch vs Redis 里的 epoch」判断状态是否属于当前部署。
 TENANT_STATUS_EPOCH_KEY = "plaita:tenant_status:epoch"
 STATUS_ACTIVE = "active"
-STATUS_DISABLED = "disabled"
+STATUS_DISABLED = TENANT_STATUS_DISABLED
 LEGACY_EPOCH = "legacy"
 
 # plaita#237（owner 裁决）：fail-open 语义保持不变（缺失记录 = active，兼容
@@ -143,6 +147,116 @@ def clear_tenant_status(redis_client, tenant_id: Optional[str]) -> None:
         redis_client.hdel(TENANT_STATUS_KEY, tenant_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("租户 %s 状态清理失败: %s", tenant_id, _scrub_exception_text(exc))
+
+
+def publish_tenant_generation(
+    redis_client, tenant_id: Optional[str], generation: Optional[str]
+) -> None:
+    """写入租户当前世代（plaita#277）；None 清除该租户的世代记录。
+
+    与 ``publish_tenant_status`` 同款 best-effort：Redis 失败只 WARNING，不
+    阻断 console 主流程；worker 侧读不到世代时按 fail-closed 处理（非 default
+    且调用方带 expected 世代时拒绝写）。
+    """
+    if redis_client is None or not tenant_id:
+        return
+    try:
+        if generation is None:
+            redis_client.hdel(TENANT_STATUS_META_KEY, tenant_id)
+            return
+        # 保留 meta 中其它附加字段（当前只有 tenant_generation，合并写更稳）。
+        raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
+        meta = {}
+        if raw is not None:
+            try:
+                parsed = json.loads(
+                    raw.decode() if isinstance(raw, bytes) else raw
+                )
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except (TypeError, ValueError):
+                meta = {}
+        meta["tenant_generation"] = str(generation)
+        redis_client.hset(
+            TENANT_STATUS_META_KEY,
+            key=tenant_id,
+            value=json.dumps(meta, ensure_ascii=False),
+        )
+    except Exception as exc:  # noqa: BLE001 — 同步失败只告警
+        logger.warning(
+            "租户 %s 世代同步到 Redis 失败: %s",
+            tenant_id,
+            _scrub_exception_text(exc),
+        )
+
+
+def read_tenant_generation(
+    redis_client, tenant_id: Optional[str]
+) -> Optional[str]:
+    """读租户当前世代；无客户端/记录/读失败 → None。"""
+    if redis_client is None or not tenant_id:
+        return None
+    try:
+        raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "租户 %s 世代读取失败: %s", tenant_id, _scrub_exception_text(exc)
+        )
+        return None
+    if raw is None:
+        return None
+    try:
+        meta = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    generation = meta.get("tenant_generation")
+    return str(generation) if generation else None
+
+
+def tenant_write_allowed(
+    redis_client,
+    tenant_id: Optional[str],
+    expected_generation: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """DLQ/订阅等未受 fence 保护写面的租户闸（plaita#277）。
+
+    返回 ``(allowed, reason)``。规则：
+
+    - 空/default 租户：放行（#237 单租兼容；default 的删除不在此单范围）。
+    - 无 Redis 客户端：非 default 一律拒绝（fail-closed）。
+    - 状态 ``disabled``：拒绝（删除墓碑；即使尚未重建也不得写回）。
+    - 调用方带 ``expected_generation``（在途 worker 派发时捕获的世代）：
+      当前世代缺失或不同 → 拒绝。
+    - 调用方不带世代（老消息/队列内部路径）：只有当前世代也缺失才放行；
+      一旦 console 发布了世代，无法证明归属的迟到写按 fail-closed 拒绝。
+    """
+    if not tenant_id or tenant_id == "default":
+        return True, None
+    if redis_client is None:
+        return False, "no_redis"
+    try:
+        raw_status = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
+    except Exception as exc:  # noqa: BLE001 — 状态不可确认 ⇒ 拒绝
+        logger.warning(
+            "租户 %s 写闸读状态失败（fail-closed）: %s",
+            tenant_id,
+            _scrub_exception_text(exc),
+        )
+        return False, "status_read_failed"
+    if raw_status is not None and _status_from_value(raw_status) == STATUS_DISABLED:
+        return False, "tenant_disabled"
+    current = read_tenant_generation(redis_client, tenant_id)
+    if expected_generation is None:
+        if current is None:
+            return True, None
+        return False, "generation_missing"
+    if current is None:
+        return False, "generation_missing"
+    if current != expected_generation:
+        return False, "generation_changed"
+    return True, None
 
 
 def tenant_is_active(

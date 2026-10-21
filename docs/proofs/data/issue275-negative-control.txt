@@ -1,0 +1,40 @@
+=== 负控 #275：删除 strip 写回 + queue-name 校验（恢复 pre-fix） ===
+变异（plaita/server/flow_worker.py，_cli_startup_problems）：
+  删除：
+    args.queue_name = str(args.queue_name or "").strip()
+    args.consumer_group = str(args.consumer_group or "").strip()
+    args.dlq_key = str(args.dlq_key or "").strip()
+  并将 queue-name 校验块替换为：
+    queue_name = args.queue_name
+
+命令：
+  python -m pytest tests/unit/test_issue275_cli_identity_normalization.py -q
+
+测试输出（节选）：
+    def test_group_trailing_space_written_back(self):
+        args = _args(consumer_group="plaita-workers ")
+        assert _cli_startup_problems(args) == []
+>       assert args.consumer_group == "plaita-workers"
+E       AssertionError: assert 'plaita-workers ' == 'plaita-workers'
+
+    def test_dlq_trailing_space_written_back(self):
+>       assert args.dlq_key == "plaita:flow:queue:dlq"
+E       AssertionError: assert 'plaita:flow:queue:dlq ' == 'plaita:flow:queue:dlq'
+
+    def test_queue_trailing_space_written_back(self):
+>       assert args.queue_name == "plaita:flow:queue"
+E       AssertionError: assert ' plaita:flow:queue ' == 'plaita:flow:queue'
+
+    def test_queue_difference_rejected_with_both_streams(self):
+>       assert "--queue-name" in text
+E       assert '--queue-name' in ""
+
+FAILED ...test_group_trailing_space_written_back
+FAILED ...test_dlq_trailing_space_written_back
+FAILED ...test_queue_trailing_space_written_back
+FAILED ...test_queue_difference_rejected_with_both_streams
+FAILED ...test_empty_queue_rejected
+5 failed, 3 passed in 0.70s
+
+=== 还原修复后 ===
+8 passed in 0.6s

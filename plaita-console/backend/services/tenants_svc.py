@@ -223,6 +223,8 @@ def create_tenant(store, tenant_id: str, name: str = "",
     # plaita#255：删除写下的 disabled 墓碑必须被同名重建覆盖，否则新租户
     # 在 Redis 短视图里仍是「已停用」而被 worker/调度拦截。
     _publish_status(redis_client, tenant_id, "active")
+    # plaita#277：同名重建是新世代；旧在途执行的 DLQ/订阅迟到写据此被拒。
+    _publish_generation(redis_client, tenant_id, tenant_generation(store, tenant_id))
     return result
 
 
@@ -310,6 +312,17 @@ def _publish_status(redis_client, tenant_id: str, status: str) -> None:
     )
 
 
+def _publish_generation(redis_client, tenant_id: str, generation) -> None:
+    """把租户世代同步到 Redis meta（plaita#277）；失败只 WARNING。"""
+    if redis_client is None or not tenant_id:
+        return
+    try:
+        from plaita.server.tenant_status import publish_tenant_generation
+    except ImportError:
+        return
+    publish_tenant_generation(redis_client, tenant_id, generation)
+
+
 def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
     """启动对账：以 DB 为权威对齐 Redis 租户短视图（#27 / #255 / A2R25-06）。
 
@@ -333,6 +346,7 @@ def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
     try:
         from plaita.server.tenant_status import (
             TENANT_STATUS_KEY,
+            publish_tenant_generation,
             publish_tenant_status,
             publish_tenant_status_epoch,
         )
@@ -344,6 +358,10 @@ def publish_all_tenant_status(redis_client, store) -> Dict[str, int]:
     known = {t["id"]: t["status"] for t in list_tenants(store)}
     for tenant_id, status in known.items():
         publish_tenant_status(redis_client, tenant_id, status, epoch=epoch)
+        # plaita#277：启动对账也补齐世代（Redis 被清空/旧版本升级后 meta 缺失）。
+        publish_tenant_generation(
+            redis_client, tenant_id, tenant_generation(store, tenant_id)
+        )
         summary["published"] += 1
 
     try:

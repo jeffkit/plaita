@@ -44,6 +44,12 @@ TENANT_SOURCE_EXPLICIT = "explicit"
 TENANT_SOURCE_DERIVED = "derived"
 TENANT_SOURCE_DEFAULT = "default"
 
+# plaita#277：租户状态/世代平台键（console 写、worker/event 读）。定义在
+# foundation，event 层可直接引用常量做写闸，不必向上 import server。
+TENANT_STATUS_KEY = "plaita:tenant_status"
+TENANT_STATUS_META_KEY = "plaita:tenant_status:meta"
+TENANT_STATUS_DISABLED = "disabled"
+
 _tenant_ctx: ContextVar[str] = ContextVar("plaita_tenant", default=DEFAULT_TENANT_ID)
 _tenant_source_ctx: ContextVar[str] = ContextVar(
     "plaita_tenant_source", default=TENANT_SOURCE_DEFAULT)
@@ -103,6 +109,41 @@ def mark_tenant_derived() -> None:
     """
     if _tenant_source_ctx.get() != TENANT_SOURCE_DEFAULT:
         _tenant_source_ctx.set(TENANT_SOURCE_DERIVED)
+
+
+# ---------------------------------------------------------------------------
+# 租户世代上下文（plaita#277）：DLQ/订阅等未受 execution fencing 保护的写面
+# 需要知道「这条在途执行属于哪个租户世代」。worker 派发时把当前世代写入本
+# ContextVar；引擎挂起创建订阅时随订阅落库，写面据此拒绝旧世代迟到写。
+# 纯 ContextVar，无仓内依赖。
+# ---------------------------------------------------------------------------
+_tenant_generation_ctx: ContextVar[Optional[str]] = ContextVar(
+    "plaita_tenant_generation", default=None
+)
+
+
+class TenantWriteRejected(RuntimeError):
+    """旧租户世代/已删租户的迟到写被拒绝（plaita#277，具名 fail-closed）。"""
+
+    def __init__(self, tenant_id: Optional[str], reason: str):
+        self.tenant_id = tenant_id
+        self.reason = reason
+        super().__init__(
+            f"tenant write rejected: tenant={tenant_id!r} reason={reason}; "
+            "the carrier belongs to a deleted/stale tenant generation"
+        )
+
+
+def current_tenant_generation() -> Optional[str]:
+    return _tenant_generation_ctx.get()
+
+
+def set_current_tenant_generation(generation: Optional[str]) -> Token:
+    return _tenant_generation_ctx.set(generation)
+
+
+def reset_current_tenant_generation(token: Token) -> None:
+    _tenant_generation_ctx.reset(token)
 
 
 # ---------------------------------------------------------------------------

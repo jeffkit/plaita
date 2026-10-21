@@ -166,3 +166,38 @@
   `landing_gate.py ci` rc=0（main `0c5dea5` success）。
 - 单 commit 关闭 #272；r51/r52 既有负控（b94-02 6 条、#269-271 20 条）
   零回归；未触碰他席 `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第五十四轮 · #275/#277（2026-10-21，B1 修复席）
+
+- 基线：实现基于 `origin/main` `3497a0e`；落地前并发 B3 r66 `280be04` 已合入，
+  本单 rebase 后复跑（unit 8714P/12S、console 1068P/13S）。
+- **#275（P1）CLI identity 只 strip 比较、未写回**：`_cli_startup_problems`
+  现在判定前 strip 并**写回实际使用的 args**（queue/group/DLQ）；尾随空格的
+  group/dlq/queue 规范化后与 env 一致，不再产生独立 consumer group（同消息
+  双投）/带空格 DLQ 键/错 Stream。新增 `--queue-name` 校验：空值或与
+  `resolve_queue_name("worker")` 不同 → 具名 ConfigError（给两个 Stream +
+  `PLAITA_QUEUE_NAME`）；真实 group/dlq 差异仍拒绝。ops-runbook 记 CLI
+  identity 与 env 同源。
+- **#277（P1 security）删除租户后在途 DLQ/订阅迟到写**：
+  - foundation `tenant_context` 定义平台键常量；`server/tenant_status` 增
+    `publish/read_tenant_generation` 与 `tenant_write_allowed`；
+  - `create_tenant` 发布新世代 meta，`publish_all_tenant_status` 启动对账
+    补齐；delete 的 disabled 墓碑由状态闸拒绝；
+  - `StreamTask.tenant_generation` 在 read 时从 meta 捕获；`dead_letter`
+    写前复核 active+世代，旧世代/已删/缺失（meta 存在）→ `TenantWriteRejected`，
+    `dead_letter_if_allowed` 返回 False（不 ack、不写 DLQ、WARNING +
+    `tenant_write_rejected` 计数）；
+  - `EventSubscription.tenant_generation` + worker 派发 ContextVar；
+    `store_subscription`/`mark_event_processed` 同款世代闸；event 层只引用
+    foundation 常量，layering 门绿；
+  - `PLAITA_DISABLE_FENCING=1` 下 DLQ/订阅闸仍生效；execution 状态写的
+    既有回退风险按 ops-runbook 注记。
+- 负控： #275 删除 strip 写回 + queue 校验 → **5F/3P**（尾空格三组 args 未
+  写回、queue 不同/空值无 `--queue-name`），还原 **8P**；#277 关闭 DLQ/订阅
+  闸 → unit **5F/2P**（删除/重建/缺世代 DLQ 放行、订阅未拒）、console
+  **1F**（死信复活 OLD-SECRET），还原 unit **7P** + console **1P**。
+- 验收：全量 unit `-m "not slow"` **8714P/12S/14 deselected/3498
+  subtests**；e2e+integration **287P/4S**；console **1068P/13S**；
+  plaita-ai **241P/14S/12 subtests**；layering/wheel/size 全绿；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit 关闭 #275/#277；未触碰他席未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md`。

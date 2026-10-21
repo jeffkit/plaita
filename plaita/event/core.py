@@ -82,6 +82,9 @@ class EventSubscription(BaseModel):
     # （core/strategies._subscribe_event）把 current_tenant() 写进本字段；
     # None = default/存量订阅（升级前写入，语义零回归）。
     tenant_id: Optional[str] = None
+    # plaita#277：创建订阅时在途执行所属的租户世代（worker 派发时捕获）。
+    # 订阅存储在删除/重建租户后据此拒绝旧世代的迟到写；None = 外部/存量订阅。
+    tenant_generation: Optional[str] = None
     processed_events: Set[str] = Field(default_factory=set)
 
     @field_validator("event_type", mode="before")

@@ -1,0 +1,57 @@
+=== 负控 #277：关闭 DLQ + 订阅租户写闸 ===
+变异：
+  plaita/server/task_queue.py dead_letter():
+    allowed, reject_reason = tenant_write_allowed(...)
+  →
+    allowed, reject_reason = True, None  # 负控变异
+  plaita/event/redis.py _tenant_write_allowed():
+    函数开头 return True（关闭订阅闸）
+
+命令：
+  python -m pytest tests/unit/test_issue277_tenant_sidewrites.py -q
+  cd plaita-console/backend && python -m pytest tests/console/test_issue277_tenant_sidewrites.py -q
+
+unit 输出（节选）：
+    def test_deleted_tenant_dlq_write_rejected(self):
+        ...
+>       assert queue.dead_letter_if_allowed(_task("gen-1"), reason="probe") is False
+E       AssertionError: assert True is False
+        （已删租户的迟到死信被放行）
+
+    def test_recreated_generation_rejects_old_task(self):
+>       assert queue.dead_letter_if_allowed(_task("gen-1"), reason="probe") is False
+E       AssertionError: assert True is False
+        （旧世代 task 在重建后被放行）
+
+    def test_missing_generation_fails_closed_when_meta_exists(self):
+>       assert queue.dead_letter_if_allowed(_task(None), reason="probe") is False
+E       AssertionError: assert True is False
+
+    def test_deleted_tenant_subscription_rejected(...):
+>       with pytest.raises(TenantWriteRejected):
+E       Failed: DID NOT RAISE TenantWriteRejected
+
+    def test_recreated_generation_rejects_old_subscription(...):
+>       with pytest.raises(TenantWriteRejected):
+E       Failed: DID NOT RAISE TenantWriteRejected
+
+FAILED ...TestDlqWriteGate::test_deleted_tenant_dlq_write_rejected
+FAILED ...TestDlqWriteGate::test_recreated_generation_rejects_old_task
+FAILED ...TestDlqWriteGate::test_missing_generation_fails_closed_when_meta_exists
+FAILED ...TestSubscriptionWriteGate::test_deleted_tenant_subscription_rejected
+FAILED ...TestSubscriptionWriteGate::test_recreated_generation_rejects_old_subscription
+5 failed, 2 passed in 1.95s
+
+console 输出（节选）：
+    assert tenants_svc.delete_tenant(store, TENANT, redis_client=fake) is True
+    queue = _queue(fake)
+>   assert queue.dead_letter_if_allowed(_task(old_generation), reason="inflight") is False
+E   AssertionError: assert True is False
+ERROR plaita.server.task_queue: Dead-lettered task 1-0 -> test:r54-console-dlq ...
+（OLD-SECRET payload 重新写入删除后的平台 DLQ）
+
+FAILED ...test_delete_then_inflight_dlq_write_rejected
+1 failed
+
+=== 还原修复后 ===
+unit: 7 passed；console: 1 passed

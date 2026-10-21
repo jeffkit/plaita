@@ -128,7 +128,12 @@ from plaita.server.tenant_context import (
     set_current_tenant,
     tenant_namespace,
 )
-from plaita.tenant_context import DEFAULT_TENANT_ID, TENANT_SOURCE_EXPLICIT
+from plaita.tenant_context import (
+    DEFAULT_TENANT_ID,
+    TENANT_SOURCE_EXPLICIT,
+    reset_current_tenant_generation,
+    set_current_tenant_generation,
+)
 from plaita.server.tenant_status import tenant_is_active
 # plaita#28：每租户 start 准入配额（最小公平性原语）。console 入口超限 429、
 # worker 对无名额的外部生产方消息超限延迟重投；原语细节见 tenant_quota 模块。
@@ -6744,6 +6749,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
                 self._bump_active(+1)
                 acked = False
+                # plaita#277：捕获本在执行所属租户世代。订阅存储在节点执行
+                # 期间读取该 ContextVar；在途执行跨租户删除/重建后，旧世代
+                # 的订阅写会被具名拒绝。task 在 read 时已从 Redis meta 取过
+                # 一次；StreamTask 是 frozen dataclass，这里不再回写。
+                gen_token = set_current_tenant_generation(task.tenant_generation)
                 try:
                     self._dispatch_task(
                         task.body,
@@ -6937,6 +6947,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                             _scrub_exception_text(exc),
                         )
                 finally:
+                    reset_current_tenant_generation(gen_token)
                     self._bump_active(-1)
                     if not acked:
                         logger.debug("任务 %s 留在 pending 等待回收", task.message_id)
@@ -7576,6 +7587,13 @@ def _cli_startup_problems(args) -> list:
       the env value; a matching CLI value is accepted.
     """
     problems = []
+    # #275：判定前把 CLI 值规范化并**写回实际使用的 args**。此前只 strip 比较
+    # 副本，``--consumer-group "plaita-workers "`` 会被放行而 worker 实际加入
+    # 带空格的独立 consumer group（同一消息两组各投一次）；DLQ/queue 同理。
+    # family 的 canonical_json 又会 strip，哈希相同但 Redis 键/组不同，更隐蔽。
+    args.queue_name = str(args.queue_name or "").strip()
+    args.consumer_group = str(args.consumer_group or "").strip()
+    args.dlq_key = str(args.dlq_key or "").strip()
     invalid_budget_keys = set()
     if int(args.lease_ttl_seconds) < 1:
         problems.append(
@@ -7621,7 +7639,22 @@ def _cli_startup_problems(args) -> list:
                 "of a worker-only CLI override"
             )
 
-    group = str(args.consumer_group or "").strip()
+    queue_name = args.queue_name
+    if not queue_name:
+        problems.append(
+            "--queue-name: empty value is not allowed (identity/routing)"
+        )
+    else:
+        producer_queue = resolve_queue_name("worker")
+        if queue_name != producer_queue:
+            problems.append(
+                f"--queue-name {queue_name!r} != env/default {producer_queue!r}: "
+                "console/schedule/event_filter write the env stream; set "
+                "PLAITA_QUEUE_NAME for the whole deployment instead of a "
+                "worker-only CLI override"
+            )
+
+    group = args.consumer_group
     if not group:
         problems.append(
             "--consumer-group: empty value is not allowed (identity/routing)"
@@ -7636,13 +7669,11 @@ def _cli_startup_problems(args) -> list:
                 "a worker-only CLI override"
             )
 
-    dlq = str(args.dlq_key or "").strip()
+    dlq = args.dlq_key
     if not dlq:
         problems.append("--dlq-key: empty value is not allowed (identity/routing)")
-    # --queue-name routing mismatch is a separate issue (#269 boundary); only
-    # compare the DLQ when the worker stream itself is the env/default one.
-    elif args.queue_name == resolve_queue_name("worker"):
-        producer_dlq = resolve_dlq_key(args.queue_name, empty_policy="default")
+    else:
+        producer_dlq = resolve_dlq_key(queue_name, empty_policy="default")
         if dlq != producer_dlq:
             problems.append(
                 f"--dlq-key {dlq!r} != env/default {producer_dlq!r}: "
@@ -7765,9 +7796,6 @@ def main():
         cli_problems = _cli_startup_problems(args)
         if cli_problems:
             raise ConfigError(cli_problems)
-        # 与 env resolver 同口径：CLI 值两侧空白不得进入 family/group 实际值。
-        args.consumer_group = str(args.consumer_group).strip()
-        args.dlq_key = str(args.dlq_key).strip()
         _runtime_cfg = load_runtime_config(
             "worker",
             strict=True,

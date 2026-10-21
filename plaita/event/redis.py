@@ -644,6 +644,13 @@ from .core import (
     bind_trusted_tenant,
 )
 from .exceptions import EventError, EventNotFoundError, EventStorageError, EventTimeoutError
+from plaita.tenant_context import (
+    TENANT_STATUS_DISABLED,
+    TENANT_STATUS_KEY,
+    TENANT_STATUS_META_KEY,
+    TenantWriteRejected,
+    current_tenant_generation,
+)
 from plaita.core.url_redaction import (
     _redact_env_value,
     _scrub_exception_text,
@@ -1597,10 +1604,96 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
             self.lock = asyncio.Lock()
             self._lock_loop = loop
     
+    async def _read_tenant_generation_async(
+        self, tenant_id: Optional[str]
+    ) -> Optional[str]:
+        """读租户当前世代（plaita#277，异步客户端）。"""
+        if not tenant_id:
+            return None
+        try:
+            raw = await self.redis.hget(TENANT_STATUS_META_KEY, tenant_id)
+        except Exception as exc:  # noqa: BLE001 — 读不到按 None（调用方 fail-closed）
+            logger.warning(
+                "租户 %s 世代读取失败（写闸 fail-closed）: %s",
+                tenant_id,
+                _scrub_exception_text(exc),
+            )
+            return None
+        if raw is None:
+            return None
+        try:
+            meta = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        generation = meta.get("tenant_generation")
+        return str(generation) if generation else None
+
+    async def _tenant_write_allowed(
+        self, tenant_id: Optional[str], expected_generation: Optional[str]
+    ) -> bool:
+        """订阅写面的租户状态/世代闸（plaita#277）。
+
+        DLQ/订阅不受 execution fencing 保护；删除租户后（disabled 墓碑）或
+        同名重建（世代前移）的迟到写必须 fail-closed，不能把旧世代订阅写回
+        平台键让新租户读到。
+        """
+        if not tenant_id or tenant_id == "default":
+            return True
+        try:
+            raw_status = await self.redis.hget(TENANT_STATUS_KEY, tenant_id)
+            if raw_status is not None:
+                text = (
+                    raw_status.decode(errors="replace")
+                    if isinstance(raw_status, bytes)
+                    else str(raw_status)
+                )
+                if text.strip() == TENANT_STATUS_DISABLED:
+                    return False
+        except Exception as exc:  # noqa: BLE001 — 状态不可确认 ⇒ 拒绝
+            logger.warning(
+                "租户 %s 订阅写闸读状态失败（fail-closed）: %s",
+                tenant_id,
+                _scrub_exception_text(exc),
+            )
+            return False
+        current = await self._read_tenant_generation_async(tenant_id)
+        if expected_generation is None:
+            # 调用方未提供世代（外部/存量订阅）：只有当前也无世代才放行；
+            # 一旦 console 发布了世代，无法证明归属的写按 fail-closed 拒绝。
+            return current is None
+        if current is None:
+            return False
+        return current == expected_generation
+
     async def store_subscription(self, subscription: EventSubscription) -> str:
         """存储事件订阅"""
         await self.initialize()
-        
+
+        # plaita#277：worker 派发上下文里创建的在途订阅带当时世代；外部/
+        # console 订阅没有上下文时捕获当前世代。删除/重建后旧世代写被拒。
+        expected_generation = (
+            subscription.tenant_generation or current_tenant_generation()
+        )
+        if expected_generation is None:
+            expected_generation = await self._read_tenant_generation_async(
+                subscription.tenant_id
+            )
+        if not await self._tenant_write_allowed(
+            subscription.tenant_id, expected_generation
+        ):
+            logger.warning(
+                "订阅写入拒绝（plaita#277）：tenant=%s subscription=%s "
+                "generation=%r——租户已删/世代前移，拒绝旧世代写入",
+                subscription.tenant_id,
+                subscription.subscription_id,
+                expected_generation,
+            )
+            raise TenantWriteRejected(
+                subscription.tenant_id, "subscription_generation_stale"
+            )
+        subscription.tenant_generation = expected_generation
         subscription_data = subscription.model_dump_json()
         pipe = self.redis.pipeline()
         
@@ -1920,6 +2013,21 @@ class RedisEventSubscriptionStorage(EventSubscriptionStorage):
         subscription = await self.get_subscription(subscription_id)
         if not subscription:
             return False
+
+        # plaita#277：旧世代订阅（租户已删/同名重建）不得继续更新；拒绝写入。
+        if not await self._tenant_write_allowed(
+            subscription.tenant_id, subscription.tenant_generation
+        ):
+            logger.warning(
+                "订阅处理标记拒绝（plaita#277）：tenant=%s subscription=%s "
+                "generation=%r——租户已删/世代前移",
+                subscription.tenant_id,
+                subscription_id,
+                subscription.tenant_generation,
+            )
+            raise TenantWriteRejected(
+                subscription.tenant_id, "subscription_generation_stale"
+            )
 
         dedup_key = f"{self.key_prefix}processed:{subscription_id}:{event_id}"
         is_new = await self.redis.set(dedup_key, "1", nx=True, ex=self.ttl)
