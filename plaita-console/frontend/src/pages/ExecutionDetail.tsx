@@ -17,6 +17,7 @@ import {
   Workflow,
   User,
   CalendarClock,
+  Clock,
 } from 'lucide-react'
 import {
   api,
@@ -639,6 +640,15 @@ function MetaBar({ execution, onOpenFlow }: { execution: ExecutionInfo; onOpenFl
         <Fact icon={<User size={12} />} label="调用者">
           {execution.invoker || '-'}
         </Fact>
+        {execution.trigger?.schedule_id && (
+          <Fact icon={<Clock size={12} />} label="调度触发">
+            {execution.trigger.schedule_name || execution.trigger.schedule_id}
+            <span className="ml-1.5 text-ink-faint">
+              （{execution.trigger.kind === 'manual' ? '手动' : '周期'} ·{' '}
+              <span className="font-mono">{execution.trigger.schedule_id}</span>）
+            </span>
+          </Fact>
+        )}
         <Fact icon={<CalendarClock size={12} />} label="开始">
           {fmt(execution.start_time)}
         </Fact>

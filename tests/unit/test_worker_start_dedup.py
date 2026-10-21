@@ -327,7 +327,7 @@ class TestDispatchPassthrough:
 
         def spy(flow_id, params, version=None, execution_id=None,
                 dedup_key=None, delivery_count=None, enqueued_at=None,
-                schema_version=None):
+                schema_version=None, trigger=None):
             seen["dedup_key"] = dedup_key
             seen["execution_id"] = execution_id
             seen["schema_version"] = schema_version

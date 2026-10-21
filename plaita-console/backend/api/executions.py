@@ -85,6 +85,12 @@ class ExecutionInfo(BaseModel):
     context: Optional[Dict[str, Any]] = Field(None, description="执行上下文")
     error: Optional[Dict[str, Any]] = Field(None, description="错误信息")
     invoker: Optional[str] = Field(None, description="调用者")
+    # 触发归因（A2R44-02）：调度触发的执行带 {kind, schedule_id, schedule_name}；
+    # None = 手动启动/老执行（缺省兼容）。列表经服务端投影 JSON 列透出，
+    # 详情读全量状态键。
+    trigger: Optional[Dict[str, Any]] = Field(
+        None, description="触发归因（调度触发带 {kind, schedule_id, schedule_name}；null=手动/老执行）"
+    )
     # 本地单机模式专有：节点级 trace 与最终输出（集群模式为 None）
     nodes: Optional[List[Dict[str, Any]]] = Field(None, description="节点级执行 trace（本地模式）")
     output: Optional[Any] = Field(None, description="流程输出（本地模式）")
@@ -1040,6 +1046,11 @@ for i = 1, #KEYS do
       local ujson = 'null'
       local uok, uenc = pcall(cjson.encode, obj['usage'])
       if uok and type(uenc) == 'string' then ujson = uenc end
+      -- A2R44-02：触发归因同 usage 款式——序列化字符串回传，缺失 ⇒ 'null'
+      -- （读取侧折算成 None，手动启动/老执行按缺省兼容）。
+      local tjson = 'null'
+      local tok, tenc = pcall(cjson.encode, obj['trigger'])
+      if tok and type(tenc) == 'string' then tjson = tenc end
       out[n] = {KEYS[i],
         s(obj['status']),
         s(obj['flow_id']),
@@ -1049,7 +1060,8 @@ for i = 1, #KEYS do
         s(obj['last_update_time']),
         s(obj['end_time']),
         s(obj['invoker']),
-        ujson}
+        ujson,
+        tjson}
     end
   end
 end
@@ -1114,6 +1126,8 @@ def _project_summaries(
                 # plaita#37 P2：usage 由 Lua 侧 cjson 序列化回传（'null' = 未采集）。
                 # 老脚本/老 Redis 返回的行可能只有 9 列 ⇒ 用长度守卫取。
                 "usage": _parse_projected_usage(row[9] if len(row) > 9 else None),
+                # A2R44-02：触发归因同款 JSON 列（'null' = 手动/老执行）。
+                "trigger": _parse_projected_trigger(row[10] if len(row) > 10 else None),
             }
         # cjson 解析失败被跳过的键：全量兜底
         for key in chunk:
@@ -1129,6 +1143,21 @@ def _parse_projected_usage(raw: Any) -> Optional[Dict[str, Any]]:
 
     ``'null'``/空/坏 JSON 一律 ``None``：**绝不当成 0**（列表行必须能区分
     「这个 run 没采到」与「这个 run 采到 0」）。
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value else None
+
+
+def _parse_projected_trigger(raw: Any) -> Optional[Dict[str, Any]]:
+    """Lua 投影回传的 trigger 串 → 触发归因 dict（/ ``None`` = 手动/老执行）。
+
+    ``'null'``/空/坏 JSON/非 dict 一律 ``None``（A2R44-02：缺省兼容，读取方
+    不得把缺字段当调度触发）。
     """
     if not isinstance(raw, str) or not raw:
         return None
@@ -1160,6 +1189,7 @@ def _execution_info_from_summary(
         end_time=summary.get("end_time"),
         last_update_time=summary.get("last_update_time"),
         invoker=summary.get("invoker"),
+        trigger=summary.get("trigger"),
         context=None,
         error=None,
         usage=project_usage(summary.get("usage")),

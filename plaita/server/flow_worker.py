@@ -395,6 +395,24 @@ def _copy_carrier_body(
     return copy
 
 
+#: 调度触发执行的调用者标记（A2R44-02；触发侧 queued 占位行同款值，接管后保持——
+#: 接管落行不再恒写 "worker"，否则调度归因在接管瞬间断链）。
+_SCHEDULE_TRIGGER_INVOKER = "schedule"
+
+
+def invoker_for_trigger(trigger: Any) -> str:
+    """start 消息 trigger 归因 → 接管落行的 invoker（A2R44-02）。
+
+    调度触发（cron 与 console「立即触发」manual 均带 schedule_id，形见
+    schedule_service.fire_schedule）统一落 ``invoker="schedule"``——周期/手动
+    由 ``trigger.kind`` 区分；无 trigger（手动 start / 旧生产方消息）或形状
+    不符 ⇒ ``invoker="worker"`` 存量语义零变化。
+    """
+    if isinstance(trigger, dict) and trigger.get("schedule_id"):
+        return _SCHEDULE_TRIGGER_INVOKER
+    return "worker"
+
+
 def _requeue_body_for_retry(
     body: Dict[str, Any],
     storage: Optional[ExecutionStorage],
@@ -3104,7 +3122,8 @@ class FlowWorker:
                    dedup_key: Optional[str] = None,
                    delivery_count: Optional[int] = None,
                    enqueued_at: Optional[str] = None,
-                   schema_version: Optional[int] = None) -> Dict[str, Any]:
+                   schema_version: Optional[int] = None,
+                   trigger: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         启动流程执行
 
@@ -3129,6 +3148,10 @@ class FlowWorker:
             schema_version: 触发本次 start 的消息信封版本（A44-02）。仅用于
                 start 幂等命中后重入队的 resume 副本继承源版本；直接调用方
                 缺省 ``None`` = 按当前 build 写版本。
+            trigger: 触发归因（A2R44-02，随消息体透传）。调度触发带
+                {kind, schedule_id, schedule_name}——接管落行写 invoker=
+                "schedule" 并原样随行（贯穿终态写）；None/畸形 = 手动或旧
+                消息，invoker 保持 "worker" 存量语义。
 
         Returns:
             Dict[str, Any]: 流程执行结果
@@ -3282,7 +3305,10 @@ class FlowWorker:
                 context={},
                 status="running",
                 start_time=datetime.now().isoformat(),
-                invoker="worker"
+                # 调度触发归因（A2R44-02）：带 schedule_id 的 trigger ⇒
+                # invoker=schedule + trigger 原样随行；手动/旧消息保持 worker。
+                invoker=invoker_for_trigger(trigger),
+                trigger=trigger if isinstance(trigger, dict) and trigger else None,
             )
 
             # start 入口取消检查点（与 resume 入口对称）：BFF cancel 可发生在
@@ -6557,6 +6583,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     enqueued_at=message_data.get("timestamp"),
                     # A44-02：start 幂等命中的 resume 副本继承源信封版本。
                     schema_version=schema_version,
+                    # A2R44-02：调度触发归因随消息体透传（老消息无此键 ⇒ None）。
+                    trigger=message_data.get("trigger"),
                 )
             elif message_type == "resume":
                 self.resume_flow(

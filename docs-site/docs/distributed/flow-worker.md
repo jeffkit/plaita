@@ -584,9 +584,16 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   吞掉的消息，而是收敛到首次触发的 execution_id（fire_record
   `enqueue="dedup"`）；入队前同步落 `queued` 占位状态行
   （`invoker="schedule"`，消费时被 running 行覆盖接管），入队失败逐级回滚
+  （`invoker="schedule"`，消费时被 running 行覆盖接管），入队失败逐级回滚
   （配额/占位行/token 认领）；fire_record 记 `execution_id`——worker 停机/
   积压期，调度触发的执行可经 console history 定位、GET 占位行、CANCEL 直取消
   并回收配额，与手动 start 的受理窗口完全一致。
+  触发归因（A2R44-02）：消息 `trigger` 三元组随占位行落盘、worker 接管落行时
+  透传（`invoker` 按 schedule_id 派生为 `schedule`，不再恒写 `worker`；周期/
+  手动由 `trigger.kind` 区分），列表/详情投影透出——老执行无该字段按缺省兼容。
+  拒绝留痕（B44-01）：停用租户 / start 配额满的触发同样落 fire_record
+  （`enqueue="rejected"` + `rejection_reason`，不带 execution_id），不推进
+  `next_run_at`——恢复后同一 due 正常受理，ok 与 rejected 记录并存。
 
 
 ## 职责
@@ -656,7 +663,8 @@ flowchart TD
 | `status` | `running` / `suspended` / `completed` / `error` |
 | `start_time` / `last_update_time` / `end_time` | 时间戳（ISO 字符串） |
 | `error` | 错误详情（status=error 时；节点重试耗尽的 error 附 `node_retries`） |
-| `invoker` | 发起方标识 |
+| `invoker` | 发起方标识（`worker`=手动 start 接管；`schedule`=调度触发，A2R44-02 起接管后保持；`console`/`local`=占位/本地档） |
+| `trigger` | 触发归因（可选，A2R44-02）：调度触发的执行带 `{kind, schedule_id, schedule_name}`——触发侧写入 queued 占位行、worker 接管落行时随 start 消息透传并贯穿终态写；`None` = 手动启动/老执行 |
 | `node_timings` | 节点级耗时（可选）：`node_id → {started_at, ended_at, started_ms, ended_ms, duration_ms, total_duration_ms, attempts, failed}`。由 worker 按执行挂载的 `NodeTimingCallback` 采集、在落盘收口处写入；同节点多次执行（循环/重试）时 `duration_ms` 取最后一次、`total_duration_ms` 累计、`attempts` 计数。**老状态/宿主未挂采集器时为 `None`**，读取方必须按缺省处理。 |
 
 ## 存储后端
