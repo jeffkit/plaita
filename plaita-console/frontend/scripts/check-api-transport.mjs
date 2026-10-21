@@ -17,14 +17,17 @@ import { dirname, join } from 'node:path'
 import {
   API_TIMEOUTS,
   ApiError,
+  START_RETRY_WINDOW_MS,
   buildHttpError,
   decodeSuccessBody,
   isExecutionStartInProgress,
+  isExecutionStartRetryable,
   isTerminalStatus,
   parseRetryAfterMs,
   resolveApiUrl,
   shouldRetryQuery,
   startRetryDelayMs,
+  startRetryWindowError,
 } from '../src/services/transport.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -248,11 +251,27 @@ check('startRetryDelayMs：Retry-After 优先，否则指数退避上限 1s', ()
   assert.equal(startRetryDelayMs(new Error('plain'), 1), 400)
   assert.equal(startRetryDelayMs(new Error('plain'), 5), 1000)
 })
+check('r60/A106-02：superseded 入重试集合，窗口覆盖 60s claiming TTL', () => {
+  const err = (detailError) =>
+    new ApiError('x', {
+      kind: 'http', url: '/api/executions', status: 409,
+      detail: { error: detailError },
+    })
+  assert.equal(isExecutionStartRetryable(err('execution_start_in_progress')), true)
+  assert.equal(isExecutionStartRetryable(err('execution_start_superseded')), true)
+  assert.equal(isExecutionStartRetryable(err('execution_start_legacy_collision')), false)
+  assert.ok(START_RETRY_WINDOW_MS >= 60_000, '重试窗口必须覆盖 claiming TTL 60s')
+  const exhausted = startRetryWindowError(err('execution_start_in_progress'))
+  assert.equal(exhausted.status, 409)
+  assert.match(exhausted.message, /刷新执行列表|不要直接重复提交/)
+})
 check('startExecution 生成/复用 dedup_key 且 409 重试同 body', () => {
   assert.match(apiSrc, /dedup_key:\s*dedupKey/)
-  assert.match(apiSrc, /isExecutionStartInProgress\(error\)/)
+  assert.match(apiSrc, /isExecutionStartRetryable\(error\)/)
+  assert.match(apiSrc, /START_RETRY_WINDOW_MS/)
+  assert.match(apiSrc, /startRetryWindowError\(error\)/)
   assert.match(apiSrc, /startRetryDelayMs\(error, attempt\)/)
-  assert.match(apiSrc, /attempt >= 3/)
+  assert.doesNotMatch(apiSrc, /attempt >= 3/)
 })
 check('request 解析 Retry-After 并透传 buildHttpError', () => {
   assert.match(apiSrc, /parseRetryAfterMs\(response\.headers\.get\('retry-after'\)\)/)

@@ -1,0 +1,68 @@
+=== 负控 r60：#288 schedule XADD 前 reservation + A106-02 409 重试窗口 ===
+
+环境：隔离副本 `/tmp/r60-nc`（rsync 自本工作树，排除 .git/.venv/frontend
+node_modules）；每个变异用 /tmp/r60_mutate.py 施加，跑
+`tests/unit/test_issue288_schedule_reservation.py` 后 --restore。解释器 =
+仓库 .venv/bin/python。断言未放宽。
+
+--- 基线（修复后） ---
+  5 passed in 0.68s
+
+--- NC A：schedule 去掉 reserve_enqueue + mark 失败不清理 ---
+变异：reserved=True（XADD 前无 reservation）；mark 失败只 XDEL/回配额，
+不 discard 行、不 release map。
+输出（rc=1）：4 failed, 1 passed
+关键：
+>       assert msg_id is not None
+E       AssertionError: assert None is not None
+（慢占位行跨 TTL：XADD 后 mark 失败，queued 行/map 残留）
+
+--- NC B：mark_enqueued 重新允许 claiming→enqueued（不变量 6） ---
+变异：_MARK_ENQUEUED_LUA 的 owner 条件加回 `or claiming:A`。
+输出（rc=1）：1 failed, 4 passed
+>       assert sd.mark_enqueued(...) is False
+E       AssertionError: assert True is False
+（claiming 不 reserve 也能直接 mark ⇒ XADD 可绕过 reservation）
+
+--- NC C：同 due 孤儿分支直接 return None（不清理/不重试） ---
+变异：孤儿清理后不递归重试，直接 return None。
+输出（rc=1）：1 failed, 4 passed
+>       assert msg_id is not None, "孤儿应清理后重试，而不是静默吞掉"
+E       AssertionError: assert None is not None
+
+--- NC E：mark 失败不 discard 行/墓碑/映射 ---
+变异：mark 失败路径只 XDEL + 回配额。
+输出（rc=1）：1 failed, 4 passed
+>       assert _rows(redis) == [], "mark 失败必须 discard queued 行"
+E       AssertionError: assert ['plaita:acme:execution:...'] == []
+
+--- NC D：前端 409 重试退回 3 次窗口、superseded 不入集合 ---
+变异（api.ts）：`isExecutionStartRetryable(error)` →
+`isExecutionStartInProgress(error) || attempt >= 3`。
+命令：`node scripts/check-api-transport.mjs`
+输出（rc=1）：1/30 断言失败
+  ✗ startExecution 生成/复用 dedup_key 且 409 重试同 body:
+    input did not match /isExecutionStartRetryable\(error\)/
+（恢复后 30/30 通过）
+
+--- A1 r106 最小复现探针（ROOT=argv[1]） ---
+pre（/tmp/plaita-r106-tree，41085cc）：
+  first fire: None
+  queue ids: []
+  map/owner/token: e8d63331... / None / None
+  rows: ['plaita:execution:e8d63331...']      ← queued 行残留
+  quota: 0
+  second fire same due: None
+  map/owner/token2: e8d63331... / None / None  ← 孤儿不 adopt 不 release
+post（主工作树）：
+  first fire: 1792612433944-0
+  queue ids: ['f15bceca...']
+  map/owner/token: f15bceca... / enqueued:f15bceca... / f15bceca:265aec...
+  rows: ['plaita:execution:f15bceca...']
+  quota: 1
+  second fire same due: None（dedup 收敛，状态一致）
+
+结论：schedule 现在与 console 同一条 reservation 状态机；XADD 前必有
+reservation（mark 只接受 enqueueing），慢占位行跨 TTL 会 guard 同 token 续期；
+孤儿清理后同调用重试新 id；失败逐级 discard/墓碑/release/配额。前端重试窗口
+65s 覆盖 claiming TTL 60s，superseded 同集合，超窗具名引导不换 key。

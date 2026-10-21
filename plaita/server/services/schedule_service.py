@@ -333,12 +333,38 @@ def fire_schedule(
                 enqueue_ok=None,
             )
             return None
+        # 孤儿（row 可能残留）：discard 占位行（写墓碑）+ 条件释放映射，然后
+        # 用新 id 重试一次本 due——不把孤儿 map/queued 行留 7 天静默吞掉。
+        if mapped:
+            try:
+                if redis_client.exists(
+                    _dedup.execution_row_key(tenant_id, mapped)
+                ):
+                    _discard_queued_placeholder(redis_client, tenant_id, mapped)
+            except Exception as exc:  # noqa: BLE001 — 清理失败具名 WARNING
+                logger.warning(
+                    "调度 %s 孤儿占位行清理失败 execution=%s: %s",
+                    schedule_id, mapped, _scrub_url_text(exc),
+                )
+            _dedup.release(
+                redis_client, tenant_id, dedup_key, mapped,
+                require_row_absent=False,
+            )
+        if mapped and _dedup.read_mapped(redis_client, tenant_id, dedup_key) == mapped:
+            logger.warning(
+                "调度 %s 认领命中孤儿映射（mapped=%r owner=%r）且条件释放失败，"
+                "本轮不重复入队（等 TTL/人工处置）",
+                schedule_id, mapped, owner.state,
+            )
+            return None
         logger.warning(
-            "调度 %s 认领命中孤儿映射（mapped=%r owner=%r），本轮不重复入队，"
-            "等下一 due/人工处置",
-            schedule_id, mapped, owner.state,
+            "调度 %s 已清理孤儿映射（mapped=%r），用新 id 重试本 due",
+            schedule_id, mapped,
         )
-        return None
+        return fire_schedule(
+            redis_client, schedule, queue_name,
+            trigger_kind=trigger_kind, due_at=due_at,
+        )
 
     if claim_token is not None:
         # A43-04：入队前同步落 queued 占位行（invoker=schedule），失败逐级回滚。
@@ -352,9 +378,10 @@ def fire_schedule(
                 schedule_id, execution_id,
             )
             release_tenant_start(redis_client, tenant_id, execution_id)
+            _discard_queued_placeholder(redis_client, tenant_id, execution_id)
             _dedup.release(
                 redis_client, tenant_id, dedup_key, execution_id,
-                token=claim_token,
+                require_row_absent=False,
             )
             _write_fire_record(
                 redis_client, schedule_id,
@@ -394,6 +421,41 @@ def fire_schedule(
     if dedup_hit:
         msg_id = execution_id
     else:
+        # r59 不变量 6：XADD 前必须有 reservation。慢占位行跨过 claiming TTL
+        # 时先 guard 用同一 token 续期，再 reserve；仍失败则放弃入队并清理。
+        reserved = _dedup.reserve_enqueue(
+            redis_client, tenant_id, dedup_key, execution_id, claim_token
+        )
+        if not reserved and _dedup.guard(
+            redis_client, tenant_id, dedup_key, execution_id, claim_token
+        ):
+            reserved = _dedup.reserve_enqueue(
+                redis_client, tenant_id, dedup_key, execution_id, claim_token
+            )
+        if not reserved:
+            logger.error(
+                "调度 %s 入队前 reservation 失败 execution=%s：放弃 XADD，"
+                "回滚配额/占位行/幂等映射",
+                schedule_id, execution_id,
+            )
+            release_tenant_start(redis_client, tenant_id, execution_id)
+            _discard_queued_placeholder(redis_client, tenant_id, execution_id)
+            _dedup.release(
+                redis_client, tenant_id, dedup_key, execution_id,
+                require_row_absent=False,
+            )
+            _write_fire_record(
+                redis_client, schedule_id,
+                fired_at=now.isoformat(), trigger_kind=trigger_kind,
+                flow_id=schedule["flow_id"], version=schedule.get("version") or "",
+                dedup_key=dedup_key, enqueue="failed", msg_id="",
+                execution_id=execution_id,
+            )
+            _advance_schedule_after_fire(
+                redis_client, schedule_id, schedule, trigger_kind, now,
+                enqueue_ok=False,
+            )
+            return None
         try:
             # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
             # B2R31-01：新生产消息写当前三维代际。
@@ -414,11 +476,10 @@ def fire_schedule(
             # 入队失败逐级回滚（plaita#28 + A43-04）：名额、占位行、token 认领。
             release_tenant_start(redis_client, tenant_id, execution_id)
             _discard_queued_placeholder(redis_client, tenant_id, execution_id)
-            if claim_token:
-                _dedup.release(
-                    redis_client, tenant_id, dedup_key, execution_id,
-                    token=claim_token,
-                )
+            _dedup.release(
+                redis_client, tenant_id, dedup_key, execution_id,
+                require_row_absent=False,
+            )
         else:
             if claim_token and not _dedup.mark_enqueued(
                 redis_client, tenant_id, dedup_key, execution_id, claim_token
@@ -432,9 +493,10 @@ def fire_schedule(
                         schedule_id, msg_id, _scrub_url_text(exc),
                     )
                 release_tenant_start(redis_client, tenant_id, execution_id)
+                _discard_queued_placeholder(redis_client, tenant_id, execution_id)
                 _dedup.release(
                     redis_client, tenant_id, dedup_key, execution_id,
-                    token=claim_token,
+                    require_row_absent=False,
                 )
                 msg_id = None
                 enqueue_ok = False

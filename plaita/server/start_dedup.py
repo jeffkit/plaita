@@ -211,7 +211,9 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
 if redis.call('GET', KEYS[3]) ~= ARGV[1] .. ':' .. ARGV[2] then return 0 end
 local owner = redis.call('GET', KEYS[4])
-if owner ~= 'enqueueing:' .. ARGV[1] and owner ~= 'claiming:' .. ARGV[1] then
+-- r59 不变量 6：只允许 enqueueing → enqueued；claiming 直接入队会被拒，
+-- 强制所有 XADD 先经过 reserve_enqueue。
+if owner ~= 'enqueueing:' .. ARGV[1] then
   return 0
 end
 redis.call('SET', KEYS[4], 'enqueued:' .. ARGV[1], 'EX', ARGV[3])

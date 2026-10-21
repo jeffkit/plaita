@@ -185,6 +185,38 @@ export function startRetryDelayMs(error: unknown, attempt: number): number {
 }
 
 /**
+ * r60/A106-02：409 重试窗口必须覆盖 owner claiming TTL（60s）。窗口内
+ * in-progress/superseded 都按同一 dedup_key 重试；超窗给出具名引导，绝不
+ * 静默换 key 再提交（那会形成第二次执行）。
+ */
+export const START_RETRY_WINDOW_MS = 65_000
+
+export function isExecutionStartRetryable(error: unknown): boolean {
+  const err = error as { status?: number; detail?: unknown } | null
+  if (!err || err.status !== 409) return false
+  const detail = err.detail as { error?: unknown } | null | undefined
+  return (
+    detail?.error === 'execution_start_in_progress' ||
+    detail?.error === 'execution_start_superseded'
+  )
+}
+
+export function startRetryWindowError(error: unknown): ApiError {
+  const err = error as { detail?: unknown; retryAfterMs?: number } | null
+  return new ApiError(
+    '同 dedup_key 的启动受理仍在进行中（已超过等待窗口）。请刷新执行列表确认结果；' +
+      '不要直接重复提交——新提交会生成新的 dedup_key，可能产生第二次执行。',
+    {
+      kind: 'http',
+      url: '/api/executions',
+      status: 409,
+      detail: err?.detail,
+      retryAfterMs: err?.retryAfterMs,
+    },
+  )
+}
+
+/**
  * 成功响应解码：非 JSON / SPA 兜底 HTML 一律抛结构化错误，绝不再让
  * `response.json()` 的 `Unexpected token '<'` 冒到 UI。
  */

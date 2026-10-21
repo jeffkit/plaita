@@ -773,12 +773,15 @@ redis-cli KEYS 'plaita:execution:lease:*'
   是 `foo:owner` 的 map 键；新代码遇到该反向碰撞会先把 foo 的 owner 迁到新
   键再释放共键，无法安全迁移时返回 409 `execution_start_legacy_collision`。
 - **schedule/cron**：同一 due 的重复触发在 schedule 入口预认领处收敛（不再
-  铸新 id/入队/占配额）；配额满/入队失败会释放 claim+配额，cron 重试不会把
-  配额耗尽。人工 `manual` 触发仍走独立唯一键。
+  铸新 id/入队/占配额）；写占位行后、XADD 前必须 reservation（慢写跨 claiming
+  TTL 先同 token 续期），配额/reservation/入队/mark 失败都会 discard 占位行
+  （墓碑）+释放 claim+回滚配额；孤儿映射清理后同调用重试新 id。人工 `manual`
+  触发仍走独立唯一键。
 - **客户端语义**：`execution_start_in_progress` /
-  `execution_start_superseded` 409 带 `Retry-After: 1`；console 前端对
-  in-progress 自动用同一 `dedup_key` 退避重试并收敛到既有/终态 id。其他
-  调用方应同样重试同一 dedup_key，不要换 key。
+  `execution_start_superseded` 409 带 `Retry-After: 1`；console 前端对两者
+  自动用同一 `dedup_key` 退避重试，窗口 65s ≥ claiming TTL 60s；超窗提示刷新
+  执行列表，**不要换 key 重复提交**（会形成第二次执行）。其他调用方应同样重试
+  同一 dedup_key。
 - **force DELETE**：guard/reservation 后、`mark_enqueued` 前被删除的 start
   载体由失败路径 XDEL 清收（避免队列残留 tombstone 载体）；执行墓碑仍是
   worker 侧最终防线。

@@ -4,12 +4,14 @@
 import {
   API_TIMEOUTS,
   ApiError,
+  START_RETRY_WINDOW_MS,
   buildHttpError,
   decodeSuccessBody,
-  isExecutionStartInProgress,
+  isExecutionStartRetryable,
   parseRetryAfterMs,
   resolveApiUrl,
   startRetryDelayMs,
+  startRetryWindowError,
 } from './transport'
 
 export {
@@ -486,13 +488,18 @@ export const api = {
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
     const body = JSON.stringify({ ...params, dedup_key: dedupKey })
+    // r60/A106-02：窗口覆盖 claiming TTL（60s）；in-progress 与 superseded
+    // 都用同一 dedup_key 退避重试，超窗给具名引导而不是静默换 key。
+    const deadline = Date.now() + START_RETRY_WINDOW_MS
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await request('/executions', { method: 'POST', body })
       } catch (error) {
-        // 409 in-progress：同 dedup_key 重试收敛到既有/终态 id（r59）。
-        if (!isExecutionStartInProgress(error) || attempt >= 3) throw error
-        await new Promise((resolve) => setTimeout(resolve, startRetryDelayMs(error, attempt)))
+        if (!isExecutionStartRetryable(error)) throw error
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) throw startRetryWindowError(error)
+        const delay = Math.min(startRetryDelayMs(error, attempt), remaining)
+        await new Promise((resolve) => setTimeout(resolve, delay))
       }
     }
   },

@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十二轮，2026-10-22；任务书标称第六十一轮——台账第六十一轮已被 #286/#287 状态机轮占用，按序列顺延）：**#288 schedule 接入 reservation 状态机（基线 `41085cc`）**——`fire_schedule` 在占位行后、XADD 前调用 `reserve_enqueue`（慢写跨 claiming TTL 先 guard 同 token 续期）；`_MARK_ENQUEUED_LUA` 收紧为只允许 `enqueueing→enqueued`（不变量 6 由状态机强制）；reservation/入队/mark 失败统一 discard 占位行（墓碑）+释放 claim+回滚配额（mark 失败另 XDEL）；同 due 孤儿清理后同调用重试新 id；A106-02 前端重试窗口 65s ≥ claiming TTL、superseded 入集合、超窗具名引导不换 key；后端 409 仍带 Retry-After。测试 unit **5P** + 既有 schedule/状态机 **69P** + console dedup **15P** + 前端 node **30/30**；负控 A–E 五类实红；全量 unit **8774P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1115P/13S**；`landing_gate.py ci` rc=0（`4985022` CI + Console E2E 绿）。#288 关单回执另附。
+
 > 一行摘要（第六十一轮，2026-10-22；任务书标称第六十轮——台账第六十轮已被 DLQ replay family 轮占用，按序列顺延）：**start dedup 受理 seam 设计级收口（#286/#287，基线 `ca39bc2`）**——新增 `plaita/server/start_dedup.py` token CAS 状态机（claim/guard/reserve_enqueue/mark_enqueued/release 全 Lua，每步校验 map/owner/token/墓碑；release 原子复核 row，修 #286 stale GET→DEL）；owner 双读旧 `<map>:owner` 并 adopt 迁移、`foo:owner` 反向碰撞先迁 owner 再释放共键（#287，滚动升级硬要求 console 先排空旧实例）；schedule/cron 与 console 共用预认领，同 due 不再铸新 id/入队/占配额，配额/入队失败回滚 claim；409 带 Retry-After + 前端同 dedup_key 退避重试 + 后端 `asyncio.sleep`；force DELETE 迟到载体 XDEL。测试 unit **11P** + console **5P** + 前端 node **29/29**；负控 A–G 七项全红；全量 unit **8769P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1115P/13S**；`landing_gate.py ci` rc=0（`1f01658` CI + Console E2E 绿）。#286/#287 关单回执另附。
 
 > 一行摘要（第六十轮，2026-10-22；任务书标称第五十九轮——台账第五十九轮已被 #285 占用，按序列顺延）：**DLQ replay 目标 family 校验（r58 a/P2，基线 `dc31efa`）**——replay 在源 `config_envelope` 后、marker/入队前解析目标 stream 的生效 family（默认按目标 stream + 生效 group/DLQ；自定义 group/DLQ 显式 `target_config_family`），源/目标不一致（含源 legacy）⇒ `target_family_mismatch`：不写 marker、目标 XLEN=0、源 DLQ 保留、审计记 rejection；管理员 `allow_family_mismatch=true` 才可跨 family（WARNING+审计），显式 family 非法/无法解析 ⇒ `target_family_unknown`。测试 unit **5P** + 既有 replay 三文件 **41P** + console replay 两文件 **19P**；负控 pre-fix worktree **3F/2P** + r104 规格探针「replayed ok 但目标 pending」实红→拒绝；全量 unit **8746P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1091P/13S**；`landing_gate.py ci` rc=0（`dc31efa` CI + Console E2E 绿）。无 issue 号（duo-a 第九十六轮 a/P2）。
@@ -423,4 +425,46 @@
   6. schedule/console 共用 claim 原语；XADD 前必有 reservation；
   7. 失去认领的载体必须 XDEL，tombstone 是 worker 侧最终防线。
 - 单 commit 关闭 #286/#287；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十二轮 · #288（schedule 接入 reservation 状态机，2026-10-22，B1 修复席；任务书标称第六十一轮——已被 #286/#287 状态机轮占用，按序列顺延）
+
+- 基线：`origin/main` `41085cc`（A1 r106 对抗确认 console 全不变量守恒，唯一
+  破口是 schedule 未接 reservation）；落地门 `4985022` CI + Console E2E 绿。
+- **#288（P1）**：`fire_schedule` 原 claim→配额→占位行→直接 `enqueue_task`
+  →mark；claim 在慢占位行窗口过期后仍 XADD，mark 失败只 XDEL carrier，留下
+  queued 行+map 7 天；同 due 再触发落孤儿分支只返回 None，不 adopt 不 release。
+  修法：
+  - 占位行后、XADD 前 `reserve_enqueue(token)`；reservation 失败先 `guard`
+    同 token 续期（慢写跨 claiming TTL）再 reserve，仍失败放弃 XADD。
+  - `_MARK_ENQUEUED_LUA` 收紧为只允许 `enqueueing→enqueued`：claiming 直入
+    被拒，不变量 6 由状态机强制（不再靠调用方自觉）。
+  - reservation/入队/mark 失败统一：quota release + `_discard_queued_placeholder`
+    （discard 行+写墓碑）+ `_dedup.release(no token)`（墓碑分支清 map/owner/
+    token）；mark 失败另 XDEL carrier；fire_record/enqueue=failed、advance
+    正常。
+  - 同 due 孤儿：row 残留则 discard（墓碑）+条件 release，清理成功后同调用
+    重试新 id；清理失败具名 WARNING 返回 None，不再静默留 7 天。
+  - live owner 分支保持 r71：同 due 收敛既有 id、fire_record enqueue=dedup。
+- **A106-02 a/P2（前端）**：新增 `isExecutionStartRetryable`
+  （in_progress+superseded）、`START_RETRY_WINDOW_MS=65_000`（≥ claiming TTL
+  60s）、`startRetryWindowError`（超窗具名引导「刷新执行列表，不要换 key
+  重复提交」）；`startExecution` 按 deadline 重试同一 body，删除 `attempt>=3`。
+- 测试：新增 `tests/unit/test_issue288_schedule_reservation.py` **5P**（mark
+  必须 enqueueing、reservation 失败不 XADD/回滚干净、慢占位行跨 TTL 续期后
+  成功、孤儿清理后重试新 id、mark 失败 XDEL+discard+release）；既有 schedule/
+  状态机 **69P**、console dedup **15P**；前端 node **30/30** + tsc 干净。
+- 负控：隔离副本 A–E（去 reserve+不清理 / mark 允许 claiming / 孤儿直接
+  return None / 前端退回 3 次窗口 / mark 失败不 discard）全部实红；A1 r106
+  探针 pre `first fire None`+queue 空+map/queued 行残留、post 单 carrier/
+  单行/quota 1、第二次 dedup 一致。证据
+  `docs/proofs/data/r60-schedule-reservation-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8774P/12S/14 deselected/3501
+  subtests**（rebase 到 `4985022` 后复跑）；e2e+integration **287P/4S**；
+  console **1115P/13S**（rebase 后复跑）；前端 node 30/30 + tsc 干净；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 不变量清单更新：不变量 6 现在由 `_MARK_ENQUEUED_LUA` 强制（只有
+  enqueueing 可 mark）；schedule 孤儿自愈（清理后同调用重试）；失败路径不得
+  留无 carrier 的 queued 行/map。
+- 单 commit 关闭 #288；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

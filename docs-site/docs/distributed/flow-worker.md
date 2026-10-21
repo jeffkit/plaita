@@ -531,7 +531,7 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   | `claiming:id` | 写 queued 占位行 | 先过 guard | row 落盘；写失败⇒503+墓碑+token release |
   | `claiming:id` | `reserve_enqueue(token)` | map、token、owner==claiming、无墓碑 | `enqueueing:id`（慢写跨 TTL 且 owner/token 缺失时同 token 续期） |
   | `enqueueing:id` | XADD 载体 | reservation 已原子通过 | 记录 target message id |
-  | `enqueueing:id` | `mark_enqueued(token)` | map、token、owner∈{claiming,enqueueing}、无墓碑 | `enqueued:id`（TTL 7d）；失败⇒XDEL 载体+release+配额回滚 |
+  | `enqueueing:id` | `mark_enqueued(token)` | map、token、owner==enqueueing、无墓碑 | `enqueued:id`（TTL 7d）；失败⇒XDEL 载体+discard row/墓碑+release+配额回滚；**claiming 直入被拒**（r60/#288，强制先 reservation） |
   | `claiming/enqueueing` | `release(token)` | token、owner 未 enqueued | 失败清理：DEL map/owner/token（row 由调用方清） |
   | 无/`claiming`（无 token） | `release(no token,row_absent)` | map==id、无 token、owner 缺失/claiming、row 不存在 | 墓碑在位直接清；否则仅孤儿可清（#286 的 stale release 在此失败） |
   | 有 row、无 token/owner | `adopt_for_recovery` | map==id、无墓碑、row 存在、owner 缺失/claiming | 新 token + `enqueueing`，补 carrier 后 `mark_enqueued`；失败保持 reservation 等 TTL |
@@ -542,15 +542,20 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   迁移来源**；滚动升级必须**先排空旧 console 实例再升新实例**（旧实例读不到
   新键，混跑会双 id）。旧 `claiming` 在新代码下是 live claim，不会被当孤儿；
   旧 `enqueued` 只返回既有 id、不重复补 carrier。
-- **schedule/cron 同源预认领（r59 ③）**：`fire_schedule` 在配额 admission
-  **之前**先 claim 同一 dedup_key；同一 due 重触发命中映射 ⇒ 不再铸新 id/
-  入队/占配额，直接收敛到既有 execution_id；配额失败/入队失败/mark 失败都会
-  release claim + 回滚配额（+ XDEL 载体），cron 重试不会耗尽配额。
-- **409 与传输层退避（r59 ④）**：in-progress/superseded 409 带
+- **schedule/cron 同源预认领（r59 ③ / r60 #288）**：`fire_schedule` 在配额
+  admission **之前**先 claim 同一 dedup_key；写占位行后、XADD 之前必须
+  `reserve_enqueue`（慢写跨 TTL 先 guard 同 token 续期）；同一 due 重触发命中
+  映射 ⇒ 不再铸新 id/入队/占配额，直接收敛到既有 execution_id。配额失败/
+  reservation 失败/入队失败/mark 失败都 discard 占位行（墓碑）+ release claim
+  + 回滚配额（+ XDEL 载体）；孤儿映射（旧版残留）会清理后同调用重试新 id，
+  不再静默留 7 天。cron 重试不会耗尽配额或留下无载体 queued 行。
+- **409 与传输层退避（r59 ④ / r60 A106-02）**：in-progress/superseded 409 带
   `Retry-After: 1`；console 前端 `startExecution` 为每次提交生成（或复用调用方
-  传入的）`dedup_key`，对 `execution_start_in_progress` 按 Retry-After/指数
-  退避重试同一 body，收敛到既有/终态 id。后端 handler 的等待已改为
-  `asyncio.sleep`，不再用 `time.sleep` 阻塞事件循环。
+  传入的）`dedup_key`，对 `execution_start_in_progress` **和**
+  `execution_start_superseded` 按 Retry-After/指数退避重试同一 body，窗口
+  65s ≥ claiming TTL 60s；超窗抛具名引导（刷新执行列表，不要换 key 重复提交，
+  否则会形成第二次执行）。后端 handler 的等待已改为 `asyncio.sleep`，不再用
+  `time.sleep` 阻塞事件循环。
 - **force DELETE 的迟到载体（r59 ⑤）**：A 通过 reservation 后才被 force
   DELETE 时，`mark_enqueued` 失败路径会 XDEL 刚写入的 target message
   （`_safe_xdel_carrier`），tombstone 仍兜底 worker 拒收；队列不残留 A 载体。
