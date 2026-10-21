@@ -110,6 +110,54 @@ def effective_redis_url(
     return None
 
 
+def redis_url_source(config_url: Optional[str]) -> str:
+    """当前裁决数据面 Redis URL 的最高优先级来源（与 ``effective_redis_url`` 同序）。
+
+    返回 ``config_file``（集群配置文件 ``redis.url``——具体地址或占位都可能
+    胜出）| ``console_env``（``PLAITA_CONSOLE_REDIS_URL``）|
+    ``registry_metadata``（注册表元数据：配置文件没给 URL 且 env 未设时才
+    轮到它）。A2R40-01：写面据此判断「改元数据是否真能改变数据面」。
+    """
+    if _is_concrete_redis_url(config_url):
+        return "config_file"
+    if os.environ.get("PLAITA_CONSOLE_REDIS_URL"):
+        return "console_env"
+    if config_url:
+        return "config_file"
+    return "registry_metadata"
+
+
+def frozen_service_redis_urls(config: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """services.*.env 里被冻结成具体字面量的 ``PLAITA_REDIS_URL`` / ``REDIS_URL``。
+
+    ``_resolve_env`` 只改写 localhost 占位与 ``${redis.url}`` 引用；创建集群
+    时预写入的具体 URL 会原样透传给服务进程（A2R40-03）——配置文件/元数据
+    里的 Redis 迁走后，服务重启仍连旧实例。返回 ``{service_type: url}``，
+    供写面比对生效 URL 后显式告警。
+    """
+    if not isinstance(config, dict):
+        return {}
+    services = config.get("services")
+    if not isinstance(services, dict):
+        return {}
+    frozen: Dict[str, str] = {}
+    for service_type, service_data in services.items():
+        if not isinstance(service_data, dict):
+            continue
+        env = service_data.get("env")
+        if not isinstance(env, dict):
+            continue
+        for key, value in env.items():
+            if (isinstance(key, str)
+                    and key.upper() in ("PLAITA_REDIS_URL", "REDIS_URL")
+                    and isinstance(value, str)
+                    and "${" not in value
+                    and _is_concrete_redis_url(value)):
+                frozen[str(service_type)] = value
+                break
+    return frozen
+
+
 class ServiceConfig(BaseModel):
     """服务配置"""
     service_type: str
