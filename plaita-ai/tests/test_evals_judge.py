@@ -444,3 +444,101 @@ def test_judge_blind_blocks_promotion_when_candidate_avg_is_higher(
     assert fake.published["demo"] == "1.0.0"
     assert "judge unavailable" in outcome.get("reason", "")
     assert "not comparable" in outcome.get("reason", "")
+
+
+# -- 深嵌套回复（A2R45-02） -------------------------------------------------------
+#
+# ~10k 层嵌套的 JSON 数组只有 ~20KB，但 json.loads 在其上抛 RecursionError
+# （不是 ValueError）：解析链只捕 ValueError 时它一路穿透 judge_output →
+# assert_score → evaluate（只捕 ConsoleClientError）→ run_loop（无任何 try），
+# 一条坏回复打穿整个自改进会话——历史全丢、已存候选版本成孤儿。
+
+DEEP_ARRAY_REPLY = "[" * 10008 + "]" * 10008
+DEEP_OBJECT_REPLY = '{"a":' * 10008 + "1" + "}" * 10008
+
+
+@pytest.mark.parametrize("content", [DEEP_ARRAY_REPLY, DEEP_OBJECT_REPLY])
+def test_deeply_nested_reply_degrades_to_unavailable(monkeypatch, content):
+    monkeypatch.setattr(httpx, "post", _judge_reply(content))
+    verdict = judge_output("rubric", {}, {"a": 1}, env=FULL_ENV)
+    assert verdict is not None
+    assert verdict["unavailable"] is True
+    assert verdict["ok"] is False
+    assert verdict["score"] == 0.0
+
+
+def test_deep_reply_does_not_break_the_eval_run(tmp_path, monkeypatch):
+    """evaluate 返回完整报告：深嵌套用例降级为 unavailable，而非整报告崩。"""
+    for key, value in FULL_ENV.items():
+        monkeypatch.setenv(key, value)
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": '{"v": 1}'}, published="1.0.0")
+    fake_openai_output(fake)
+    monkeypatch.setattr(httpx, "post", _judge_reply(DEEP_ARRAY_REPLY))
+
+    report = evaluate(make_client(fake), "demo", "1.0.0", judge_dataset(tmp_path, cases=1))
+    assert report["judge_unavailable_cases"] == 1
+    assert report["avg_score"] is None
+    assert report["pass_rate"] is None
+
+
+def test_run_loop_survives_deep_nested_judge_reply(tmp_path, monkeypatch):
+    """负控主体：一条深嵌套 judge 回复不得终止自改进会话。
+
+    pre-fix：RecursionError 无 try 拦截，run_loop 直接崩、历史全丢；
+    post-fix：两个迭代都走 unavailable 降级（judge_blind → failed_iteration，
+    因候选均值不可得），失败预算暂停会话，逐迭代历史与候选版本谱系完好。
+    """
+    for key, value in FULL_ENV.items():
+        monkeypatch.setenv(key, value)
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": '{"v": 1}'}, published="1.0.0")
+    fake_openai_output(fake)
+    monkeypatch.setattr(httpx, "post", _judge_reply(DEEP_ARRAY_REPLY))
+    sup = Supervisor(
+        make_client(fake),
+        SupervisorPolicy(max_iterations=2, promote_gate="manual"),
+        StaticProposer([
+            {"definition": '{"v": 1}', "rationale": "noop"},
+            {"definition": '{"v": 1}', "rationale": "noop"},
+        ]),
+    )
+    out = sup.run_loop("demo", judge_dataset(tmp_path, cases=1))
+    assert out["final_status"] == "paused"
+    assert out["iterations_run"] == 2
+    assert [it["status"] for it in out["iterations"]] == ["failed_iteration", "failed_iteration"]
+    assert [it["candidate_version"] for it in out["iterations"]] == ["1.0.1", "1.0.2"]
+    assert all(it["judge_unavailable_cases"] == {"baseline": 1, "candidate": 1} for it in out["iterations"])
+
+
+def test_run_loop_survives_an_evaluate_crash(tmp_path, monkeypatch, caplog):
+    """兜底层：异常形状即使逃过 judge 守卫，会话也不崩。
+
+    judge 回复解析链已按不可解析降级，此处模拟任意残留异常形状
+    （judge_output 直接抛 RecursionError）从 evaluate 穿出——run_loop 必须
+    记 failed_iteration 留痕并继续，直到失败预算暂停；降级必须可观测（WARNING）。
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="plaita_ai.supervisor")
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": '{"v": 1}'}, published="1.0.0")
+    fake_openai_output(fake)
+
+    def exploding_judge(*args, **kwargs):
+        raise RecursionError("simulated shape escaping the judge guard")
+
+    monkeypatch.setattr("plaita_ai.evals.evals.judge_output", exploding_judge)
+    sup = Supervisor(
+        make_client(fake),
+        SupervisorPolicy(max_iterations=2, promote_gate="manual"),
+        StaticProposer([{"definition": '{"v": 1}', "rationale": "noop"}]),
+    )
+    out = sup.run_loop("demo", judge_dataset(tmp_path, cases=1))
+    assert out["final_status"] == "paused"
+    assert out["iterations_run"] == 2
+    for it in out["iterations"]:
+        assert it["status"] == "failed_iteration"
+        assert "RecursionError" in it["reason"]
+    assert "RecursionError" in caplog.text
+    assert "crashed" in caplog.text

@@ -13,6 +13,7 @@ being the evaluation set instead of the compiler.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ from plaita_ai.console_client import ConsoleClient, ConsoleClientError
 from plaita_ai.evals import Dataset, compare, evaluate
 from plaita_ai.flow_runner import compile_flow, get_skill_reference
 from plaita_ai.ops import latest_version, next_patch_version, published_version
+
+_log = logging.getLogger(__name__)
 
 
 # -- policy ------------------------------------------------------------------
@@ -660,7 +663,24 @@ class Supervisor:
         consecutive_failures = 0
         final_status = "budget_exhausted"
         for i in range(1, self.policy.max_iterations + 1):
-            outcome = self.iterate(flow_id, dataset)
+            # A2R45-02 兜底：迭代内任何异常形状（如 judge 回复 ~10k 层嵌套的
+            # RecursionError，解析链守卫之外残余的一切）降级为 failed_iteration
+            # 并留 WARNING——会话不崩、逐迭代历史与已存版本谱系保留，走既有
+            # 连续失败预算暂停；崩掉整个循环比一个坏迭代代价大得多。
+            try:
+                outcome = self.iterate(flow_id, dataset)
+            except Exception as exc:
+                _log.warning(
+                    "supervisor iteration %d crashed; degraded to failed_iteration: %s: %s",
+                    i,
+                    type(exc).__name__,
+                    exc,
+                )
+                outcome = {
+                    "flow_id": flow_id,
+                    "status": "failed_iteration",
+                    "reason": f"iteration unavailable: {type(exc).__name__}: {exc}"[:500],
+                }
             outcome["iteration"] = i
             iterations.append(outcome)
             status = outcome.get("status")
