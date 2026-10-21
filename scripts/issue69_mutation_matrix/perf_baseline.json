@@ -4,8 +4,8 @@
   "ratios": {
     "$F.add($INPUT.a.b.c,1)": 1.25,
     "$F.set($F.json_loads('{\"q\":0}'),'q',1)": 1.1,
-    "$F.set($PROD.v,'k','v')": 2.0,
-    "$F.set($VAR,'k','v')": 1.6
+    "$F.set($VAR,'k','v')": 1.6,
+    "$F.set($VAR.k,'q',1)": 2.0
   },
   "_doc": [
     "plaita#69 r6 —— mutator 路径的常量因子预算。",

@@ -499,50 +499,25 @@ class TestEvalVariable(TestCase):
         self.assertEqual(p.evaluate("$LIST[-1]", {"$LIST": [10, 20, 30]}), 30)
 
     def test_recursive_field_eval_uses_parent_as_context(self):
-        """_eval_variable__mutmut_25: context→None — 递归 evaluate 必须用父对象作 context。
-
-        attr 是一个 $-表达式字符串，必须用父对象（obj）作为 context 来解析。
-        若 context=None 则 context[$key] 抛出 TypeError。"""
-        p = _fresh()
-        ctx = {
-            "$INPUT": {
-                "$INPUT": {"value": 42},   # 父对象的 $INPUT 键
-                "ptr": "$INPUT.value",      # 字段值是表达式，需用父对象解析
-            }
-        }
-        result = p.evaluate("$INPUT.ptr", ctx)
-        self.assertEqual(result, 42)
-
-    def test_recursive_field_eval_uses_registry(self):
-        """_eval_variable__mutmut_26: registry→None — 递归 evaluate 必须传递 registry。
-
-        若 registry=None，自定义函数 xyzzy_fn 回退到 default registry（不存在），返回 'undefined'。"""
-        reg = _registry(xyzzy_fn=lambda s: "XYZZY:" + s)
-        p = _fresh()
-        ctx = {
-            "$INPUT": {
-                "func_result": "$F.xyzzy_fn('test')",
-            }
-        }
-        result = p.evaluate("$INPUT.func_result", ctx, reg)
-        self.assertEqual(result, "XYZZY:test")
-
-    def test_recursive_field_eval_with_missing_registry_differs(self):
-        """_eval_variable__mutmut_29: evaluate(attr, obj, ) — 丢弃 registry 与 mutmut_26 等价。
-
-        验证：registry 缺失时，xyzzy_fn 必须返回 'undefined'（自定义函数不在 default 中）。"""
+        """#268 后：运行期字符串原样返回——registry 不再影响结果。"""
         reg = _registry(xyzzy_fn=lambda s: "XYZZY:" + s)
         p = _fresh()
         ctx = {"$INPUT": {"func_result": "$F.xyzzy_fn('test')"}}
-        result_with_reg = p.evaluate("$INPUT.func_result", ctx, reg)
-        self.assertEqual(result_with_reg, "XYZZY:test")
+        self.assertEqual(p.evaluate("$INPUT.func_result", ctx, reg), "$F.xyzzy_fn('test')")
 
+    def test_recursive_field_eval_uses_registry(self):
+        """同上：scoped registry 下同样原样（不再进函数解析）。"""
+        reg = _registry(xyzzy_fn=lambda s: "XYZZY:" + s)
+        p = _fresh()
+        ctx = {"$INPUT": {"func_result": "$F.xyzzy_fn('test')"}}
+        self.assertEqual(p.evaluate("$INPUT.func_result", ctx, reg), "$F.xyzzy_fn('test')")
+
+    def test_recursive_field_eval_with_missing_registry_differs(self):
+        """registry 缺失（default）也原样——字符串是数据，NameError 不会触发。"""
         _clear_parser_cache()
         p2 = _fresh()
-        # 不传 registry → 使用 default registry，xyzzy_fn 不存在 →
-        # NameError（P0-3 新契约；'undefined' 仅属于 scoped registry）
-        with self.assertRaises(NameError):
-            p2.evaluate("$INPUT.func_result", ctx)
+        ctx = {"$INPUT": {"func_result": "$F.xyzzy_fn('test')"}}
+        self.assertEqual(p2.evaluate("$INPUT.func_result", ctx), "$F.xyzzy_fn('test')")
 
 
 # ===========================================================================

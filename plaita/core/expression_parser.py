@@ -19,16 +19,15 @@ Evaluation semantics are preserved bit-for-bit against the battle-tested
 ``plaita.io.evaluate`` (see ``tests/unit/test_expression_golden.py``):
 
 * root variable lookup raises ``KeyError`` for a missing context key
-* intermediate field accesses recurse through ``evaluate`` with the **parent
-  object** as the context (so nested expression strings resolve against the
-  parent, not the root) — but only when every context root the nested string
-  references actually exists in that parent object (#104, plan A).  Otherwise
-  the value is data text (LLM/agent output, file content, prompt echo) and is
-  returned unchanged instead of being evaluated and silently rewritten.
-* ``$NODE.raw.<node>[.<path>...]`` bypasses that re-evaluation entirely and
-  returns the stored value verbatim — strings are never evaluated at any depth
-  (#130, the explicit opt-in for data text).  ``$NODE.<node>...`` keeps the
-  semantics described above, unchanged.
+* runtime values are DATA: string attribute values that happen to look like
+  expressions (``"$F.add(2,3)"``, ``"{% ... %}"``) are returned **verbatim** —
+  the historical "nested expression string" re-evaluation (where the string
+  re-entered ``evaluate`` with its **holding container** as the context, and
+  #104 plan A narrowed it via a root scan) was removed in **#268**.  Expressions
+  live in the flow config only; a code/LLM node that wants an evaluated value
+  evaluates it itself.  ``$NODE.raw.<node>`` is kept as a compatibility
+  modifier (with the "node literally named raw" collision rule) — path reads
+  are verbatim anyway, so the modifier is accepted for compatibility only.
 * index segments (``[n]`` / ``.n``) index directly without recursion
 * field segments never resolve Python-internal names: a ``_``-prefixed
   *attribute* read (``$NODE.n1.__class__``) raises ``ValueError`` instead of
@@ -1127,7 +1126,7 @@ def _probe_container_alias(container: Any) -> Optional[Tuple[str, str, str]]:
 #     evaluation opened by ``Loop.execute`` (materialisation + ``Condition.match``)
 #     is one logical evaluation by construction.
 #   * nesting: an opener that finds the ContextVar already set for this context
-#     **shares** that scope and does not reset it — nested expression strings,
+#     **shares** that scope and does not reset it.
 #     ``parse_function``, nested container rebuilds and every ``note_fresh_*``
 #     inside them land in the same logical evaluation.
 #   * exit: the opener that created the scope resets the ContextVar to its
@@ -2847,77 +2846,12 @@ def _get_attr(obj: Any, path: str, *, path_hint: Any = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Nested-expression root scan (plaita#104, plan A)
-# ---------------------------------------------------------------------------
-# A string attribute value used to be re-evaluated unconditionally with the
-# *parent container* as context.  When the value is really data text (LLM/agent
-# output, file content, prompt echo) that contains a ``{% ... %}`` fragment, the
-# implicit recursion either raised a misleading ``KeyError`` (the referenced root
-# exists at the flow root, not in the parent container) or silently rewrote the
-# text (``"{% $F.eq(1, 1) %}"`` -> ``"True"``).
-#
-# Plan A narrows the recursion: scan the string for context roots and recurse
-# only when *all* of them exist in the parent container.  The scan is a plain
-# regex over the raw text — the grammar is not re-run (the recursion decision
-# happens before evaluation, and a full parse would cost as much as evaluating).
-
-# The documented context roots.  Anything else after the prefix — ``$F`` (the
-# function namespace), ``$FOO`` or an arbitrary storage key such as
-# ``$INPUT-x`` — is deliberately NOT treated as a root reference, so a nested
-# string never gets misjudged because of an unrelated ``$`` token.
-_ROOT_REF_NAMES: FrozenSet[str] = frozenset(
-    {"INPUT", "NODE", "PARENT", "GLOBAL", "ENV", "FLOW_ID"}
-)
-# ``$FLOW`` is the documented alias of ``$FLOW_ID`` (see _compile_variable).
-_ROOT_REF_ALIASES = {"FLOW": "FLOW_ID"}
-# Quoted string literals are data, never root references: ``'$INPUT'`` inside
-# ``$F.concat('$INPUT', $NODE.x)`` is a constant, not a context lookup.
-_QUOTED_SPAN_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
-# Same memory discipline as the compile LRUs: only short strings are memoized,
-# long data text is scanned uncached so it cannot be pinned by this cache.
-_MAX_SCAN_CACHE_LEN = 4096
-_MISSING = object()
-
-
-def _scan_root_refs_impl(prefix: str, text: str) -> FrozenSet[str]:
-    """Return the resolved context roots (``{prefix}NAME``) *text* references."""
-    if not text:
-        return frozenset()
-    # Strip quoted literals first so their content cannot be mistaken for a
-    # reference (offsets are irrelevant afterwards — only matches matter).
-    stripped = _QUOTED_SPAN_RE.sub(" ", text)
-    # ``[A-Za-z0-9_$-]*`` munches maximally, matching the grammar's
-    # ``name_token``: ``$INPUT-x`` is the root ``$INPUT-x`` (unknown -> no
-    # reference), not ``$INPUT`` followed by literal text.
-    token_re = re.compile(re.escape(prefix) + r"([A-Za-z0-9_$-]*)")
-    found = set()
-    for match in token_re.finditer(stripped):
-        name = match.group(1)
-        if not name:
-            continue            # a bare ``$`` root — nothing scannable
-        if match.start() > 0 and stripped[match.start() - 1] == ".":
-            # Field-name position (``$PARENT.$INPUT.name``): the second segment
-            # is the literal key ``$INPUT`` on the parent context, not a root.
-            continue
-        resolved = _ROOT_REF_ALIASES.get(name, name)
-        if resolved in _ROOT_REF_NAMES:
-            found.add(prefix + resolved)
-    return frozenset(found)
-
-
-@lru_cache(maxsize=256)
-def _scan_root_refs_cached(prefix: str, text: str) -> FrozenSet[str]:
-    return _scan_root_refs_impl(prefix, text)
-
-
-def _scan_root_refs(prefix: str, text: str) -> FrozenSet[str]:
-    if len(text) <= _MAX_SCAN_CACHE_LEN:
-        return _scan_root_refs_cached(prefix, text)
-    return _scan_root_refs_impl(prefix, text)
-
-
 def _container_has_root(obj: Any, root_key: str) -> bool:
     """Would ``obj[root_key]`` (the nested thunk's root lookup) succeed?
+
+    现在唯一用途：`$NODE.raw` 修饰符的碰撞检查（#130）——真有节点叫 ``raw``
+    时修饰符不生效（plaita-rs/plaita-go 同规则）。运行期字符串的嵌套求值已
+    摘除（#268），根闸判据不再是本函数的职责。
 
     plaita#163 同形残面（W22-A）：本函数外层的五处**属性/类型探针**
     （``isinstance(obj, dict)`` / ``hasattr(__contains__)`` / ``getattr("get")`` /
@@ -2927,7 +2861,7 @@ def _container_has_root(obj: Any, root_key: str) -> bool:
     具名拒绝（含 ``plaita#69``）。
 
     为什么是具名拒绝而不是"当作没有这个根键"：本函数是**嵌套字符串该不该求值**的
-    分支判据（``#104`` 方案 A）。宿主拒绝回答"这个容器里有没有该根键"时，静默答
+    分支判据（历史；#268 已摘除嵌套求值，现仅服务 raw 碰撞检查）。宿主拒绝回答"这个容器里有没有该根键"时，静默答
     "没有"会把一段合法的嵌套表达式串当成**数据文本**原样返回——一次看不见的语义
     改写；具名拒绝是 fail-closed 且用户可见的处置（与 #163 的论据一致）。
 
@@ -2982,7 +2916,7 @@ def _render_path(root_key: str, walked: List[Tuple[str, Any, str]]) -> str:
 # ---------------------------------------------------------------------------
 # ``$NODE.<node>.<field>`` keeps the historical semantics: a string value that
 # looks like an expression/template may be re-evaluated with its parent
-# container as context (#104 plan A narrows that, it does not remove it).  Data
+# runtime values (contract #268: runtime strings are data — the nested
 # text that a node produced (LLM output, document content, prompt echo) can
 # therefore still be silently rewritten — ``"{% $F.eq(1, 1) %}"`` -> ``"True"``.
 # The accessor makes "return the stored value, do not evaluate it" **explicit**:
@@ -3226,9 +3160,7 @@ class ExpressionParser:
         pre-normalized segments as ``(kind, target, raw)`` tuples — ``raw`` is
         kept solely for the missing-INPUT-key debug log, matching the
         historical log wording.  All context/registry access happens at call
-        time; nested expression strings stored as attribute values re-enter
-        the public ``evaluate`` (cache lookup applies) with the *parent
-        object* as context, exactly like the fused parse-and-eval engine.
+        time; string attribute values are DATA and returned verbatim (#268).
         """
         parser = self
         root_key = tokens[0]
@@ -3316,63 +3248,15 @@ class ExpressionParser:
                     # #133: render the full path only if the gate rejects.
                     path_hint=(root_key, effective_segments, position + 1),
                 )
-                # 仅当字符串属性值本身是表达式（$ 前缀变量 / {% %} 模板）时才递归
-                # 求值——这是"嵌套表达式字符串"的历史语义。任意普通字符串（可能含
-                # [tag]、引号、换行等元字符）不再二次解析，否则节点输出一旦被下游
-                # $NODE 路径引用就会因内容触发误解析（如 "[promo] ..." 被当列表）。
-                # ``raw`` 模式下整条路径都不递归：字符串原样返回（#130）。
-                if (not raw_mode
-                        and _probe_isinstance(attr, str, kind_name="str", path=raw)
-                        and (attr.startswith(prefix) or "{%" in attr)):
-                    # 方案 A（#104）：递归前先扫根键。嵌套串以**持有它的父容器**
-                    # 为 context 求值，所以只要它引用的任一上下文根在当前父容器里
-                    # 不存在，它就不是"嵌套表达式字符串"而是数据文本（LLM/agent
-                    # 输出原文、文件内容、prompt 回显）——原样返回，既不抛归因错误
-                    # 的 KeyError，也不静默改写（如引用了只在流程根上下文里存在的
-                    # 根键的串）。不引用任何根键的串（如 "{% $F.concat('a','b') %}"）
-                    # 保持历史语义继续递归；"无根引用且无字面量"的模板因此仍会被
-                    # 求值——要拿到原文请走显式 `$NODE.raw.<id>...`（#130）。
-                    missing_roots = [
-                        root for root in _scan_root_refs(parser.prefix, attr)
-                        if not _container_has_root(container, root)
-                    ]
-                    field_path = _render_path(root_key, effective_segments[:position + 1])
-                    if missing_roots:
-                        logger.debug(
-                            "nested expression string in %s references root(s) %s missing "
-                            "from its parent container; returned AS-IS as data text",
-                            field_path,
-                            ", ".join(sorted(missing_roots)),
-                        )
-                        obj = attr
-                    else:
-                        try:
-                            obj = parser.evaluate(attr, container, registry)
-                        except KeyError as exc:
-                            # 兜底归因：扫描没识别出的引用（如未知根 $INPUT-x、
-                            # 更深一层才失败的串）仍会抛 KeyError——必须说明错误
-                            # 发生在**嵌套求值**里、parent 容器缺键，而不是流程根
-                            # 上下文缺键（#104 ①）。
-                            # 只捕获 KeyError：表达式内部（如 $F.* 参数类型不符）
-                            # 抛出的 TypeError 是真错误，不能被改写成"父容器缺键"。
-                            # 极端的"__contains__ 为真但不可下标"容器会漏出 TypeError，
-                            # 真实容器（dict / CheckpointState）都可下标，视为不可达。
-                            preview = attr if len(attr) < 120 else attr[:117] + "..."
-                            # 用异常原文（args[0]）而不是 str(exc)：KeyError.__str__
-                            # 会对消息再 repr 一次，嵌进来会多一层引号。
-                            original = exc.args[0] if exc.args else exc
-                            # 保留 from None：原文已带上游错误，链式化会把整条递归
-                            # 求值 traceback 重复打印一遍（与顶层缺键 KeyError 一致）。
-                            raise KeyError(
-                                f"解析 {field_path} 时，字段值是一段嵌套表达式字符串 "
-                                f"{preview!r}：嵌套字符串以**持有它的父容器**为 context "
-                                f"求值（不是流程根上下文），而该父容器里缺少它引用的"
-                                f"根键。原始错误：{original}。若这个字段是数据文本"
-                                f"（LLM/agent 输出原文、文件内容、prompt 回显），"
-                                f"它不应被当作表达式求值。"
-                            ) from None
-                else:
-                    obj = attr
+                # 运行期值是数据（契约 2026-10-21，#268）：字段值即使长得像
+                # 表达式（"$F.add(2,3)"、"{% ... %}"）也原样返回，绝不再解析。
+                # 表达式只活在 flow 配置里，由节点执行时的一次求值处理；code/
+                # LLM 节点想要求值结果就在自己内部算掉。摘除的是 #104 Plan A
+                # 之前就存在的"嵌套表达式字符串"递归（loki 时代单漏斗架构的
+                # 副产品）——#104/#130 两轮护栏是往"节点输出就是数据"方向的
+                # 半程，本变更是终章。$NODE.raw 修饰符保留（剥段后原样读，含
+                # "真有节点叫 raw"碰撞规则，与 plaita-go/plaita-rs 对齐）。
+                obj = attr
                 if live_walk:
                     path_parts.append(f".{raw}")
             if live_walk:

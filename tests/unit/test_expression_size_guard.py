@@ -3407,14 +3407,6 @@ _RENDER_SITES = {
     ("plaita/core/expression_parser.py", "thunk", "log:debug",
      '"expression references missing input key %r; evaluating to None"'): (
         "excluded", None, "raw 是段名 token（已在内存），不是值内容"),
-    ("plaita/core/expression_parser.py", "thunk", "log:debug",
-     '"nested expression string in %s references root(s) %s missing "'
-     ' "from its parent container; returned AS-IS as data text"'): (
-        "excluded", None, "field_path 与固定根名列表，均在内存且受常量约束"),
-    ("plaita/core/expression_parser.py", "thunk", "method:join",
-     '", ".join(sorted(missing_roots))'): (
-        "excluded", None,
-        "错误消息：missing_roots 是固定根名（$INPUT/$NODE/...）的排序列表"),
     # --- #69 落地侧并合登记（2026-10-16 rebase union：这些点来自 main 已落地的 #69 r13 闸与诊断，
     #     语义 = 静态源/类型名/引擎信号，非结果放大面；逐条处置见行内理由）---
     ('plaita/core/expression_parser.py', '_canonical_container_fast_path', 'log:debug',
@@ -3665,15 +3657,9 @@ _FSTRING_PARAM_SITES = {
         '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
     ('plaita/core/expression_parser.py', 'thunk#local', '{close!r}'):
         '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
-    ('plaita/core/expression_parser.py', 'thunk#local', '{field_path}'):
-        '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
     ('plaita/core/expression_parser.py', 'thunk#local', '{hint}'):
         '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
-    ('plaita/core/expression_parser.py', 'thunk#local', '{original}'):
-        '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
     ('plaita/core/expression_parser.py', 'thunk#local', '{prefix}'):
-        '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
-    ('plaita/core/expression_parser.py', 'thunk#local', '{preview!r}'):
         '表达式/解析器内部字符串（长度受输入串约束）；日志侧仓库级卫生见 #151',
 
     # --- #69 落地侧并合登记（同上，f-string 面）---

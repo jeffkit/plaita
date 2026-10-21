@@ -72,10 +72,12 @@ class TestIssue69ScopeInventory(unittest.TestCase):
         kinds: dict = {}
         for info in found.values():
             kinds[info["kind"]] = kinds.get(info["kind"], 0) + 1
+        # plaita#268：摘除嵌套表达式串的递归求值 ⇒ `_compile_variable.thunk` 里
+        # `parser.evaluate` 的 explore-scope 点 15 → 14，总数 88 → 87。
         self.assertEqual(
-            {"explore-scope": 15, "state-scope": 27, "child-input": 25,
+            {"explore-scope": 14, "state-scope": 27, "child-input": 25,
              "materialise": 14, "fresh-register": 7}, kinds)
-        self.assertEqual(88, len(found))
+        self.assertEqual(87, len(found))
 
     def test_unclassified_site_would_trip_the_guard(self):
         """负控：拿掉任意一条 ⇒ missing 非空；凭空多一条 ⇒ stale 非空（判定不是恒真）。"""
@@ -95,9 +97,11 @@ class TestIssue69ScopeInventory(unittest.TestCase):
         """X1/X2 的共同根因面必须在清单里被点名（不是靠"没有这种形状"）。"""
         found = inv.discover()
         joined = "\n".join(sorted(found))
-        self.assertIn(
+        # X1 嵌套串作用域（#268 摘除嵌套求值后该点不存在，见
+        # test_four_dead_boundary_registrations_are_gone 的同型负控）
+        self.assertNotIn(
             "expression_parser.py::ExpressionParser._compile_variable.thunk::parser.evaluate",
-            joined)                                   # X1 嵌套串作用域
+            joined)
         self.assertIn("loop.py::Reduce._eval_initial::execution.evaluate", joined)  # X2 initial
         self.assertIn("loop.py::Reduce._eval_initial::_snapshot_value", joined)
         # r7：循环条件隔离副本是**唯一**保留的 fresh-register 现场（在显式作用域内）。

@@ -92,8 +92,8 @@ class TestCrossContextNoInterference(TestCase):
         self.assertEqual(self.p.evaluate(expr, {}, scoped), "scoped")
 
 
-class TestNestedRecursionOnCacheHit(TestCase):
-    """嵌套表达式字符串递归在缓存命中路径的行为。"""
+class TestRuntimeStringsOnCacheHit(TestCase):
+    """运行期字符串是数据：缓存命中路径同样原样返回（#268）。"""
 
     def setUp(self):
         self.p = _fresh()
@@ -101,39 +101,29 @@ class TestNestedRecursionOnCacheHit(TestCase):
     def tearDown(self):
         ExpressionParser._instances.clear()
 
-    def test_nested_attr_uses_parent_context_on_hit(self):
-        """属性值本身是表达式串：必须以父对象为 context 求值（第二次调用走缓存）。
-
-        语义与历史一致：嵌套串引用的根由**包含它的对象**提供
-        （参见 test_expression_parser_path_recursion.py 的 canonical 形态）。
-        """
-        reg = _registry(upper=lambda s: s.upper())
-        leaf = {"first": "ada"}
-        parent = {"$INPUT": {"name": "$NODE.first", "$NODE": leaf}}
+    def test_runtime_string_verbatim_on_cache_hit(self):
+        """属性值是表达式串：缓存命中路径也原样返回，不二次求值。"""
+        parent = {"$INPUT": {"name": "$F.upper('ada')"}}
         expr = "$INPUT.name"
         for _ in range(3):  # 第 2、3 次命中编译缓存
-            self.assertEqual(self.p.evaluate(expr, parent, reg), "ada")
+            self.assertEqual(self.p.evaluate(expr, parent), "$F.upper('ada')")
 
-    def test_nested_recursion_registry_passthrough(self):
-        """外层 registry 必须透传进嵌套求值（命中路径）。"""
+    def test_registry_does_not_affect_runtime_strings(self):
+        """运行期字符串与 registry 无关（表达式只在配置层求值）。"""
         reg = _registry(upper=lambda s: s.upper())
-        parent = {
-            "$NODE": {"a": {"greeting": "$F.upper($GLOBAL.raw)",
-                            "$GLOBAL": {"raw": "nested"}}}
-        }
+        parent = {"$NODE": {"a": {"greeting": "$F.upper($GLOBAL.raw)",
+                                  "$GLOBAL": {"raw": "nested"}}}}
         expr = "$NODE.a.greeting"
         for _ in range(2):
-            self.assertEqual(self.p.evaluate(expr, parent, reg), "NESTED")
+            self.assertEqual(self.p.evaluate(expr, parent, reg), "$F.upper($GLOBAL.raw)")
 
-    def test_nested_recursion_tracks_changing_parent(self):
-        """父对象的嵌套串变化后，命中路径上取的是新值。"""
-        leaf = {"first": "v1"}
-        parent = {"$INPUT": {"name": "$NODE.first", "$NODE": leaf}}
-        expr = "$INPUT.name"
+    def test_changing_runtime_string_is_read_verbatim(self):
+        """父对象的字符串变化后，命中路径上取的是新串（仍是数据）。"""
+        parent = {"$NODE": {"a": {"out": "v1"}}}
+        expr = "$NODE.a.out"
         self.assertEqual(self.p.evaluate(expr, parent), "v1")
-        leaf["first"] = "v2"
-        self.assertEqual(self.p.evaluate(expr, parent), "v2")
-
+        parent["$NODE"]["a"]["out"] = "$F.add(2,3)"
+        self.assertEqual(self.p.evaluate(expr, parent), "$F.add(2,3)")
 
 class TestConcurrentCacheHits(TestCase):
     """多线程并发命中同一 thunk（parallel 分支场景）。"""

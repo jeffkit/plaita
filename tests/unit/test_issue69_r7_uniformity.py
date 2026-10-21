@@ -183,28 +183,24 @@ class TestIssue69R7BoundaryCopySemantics(unittest.TestCase):
         "parallel-branch-input (live sub-object)",
     )
 
-    def test_four_boundary_shapes_refuse_in_place_mutation_of_the_copy(self):
-        rows = {row["position"]: row for row in build_r5_probe_rows()}
-        for position in self.FOUR_SHAPES:
-            with self.subTest(position=position):
-                row = rows[position]
-                self.assertTrue(row["refused"], f"{position}: {row['detail'][:160]}")
-                # 探针 detail 截断到 120 字符；用门的具名消息片段而不是完整
-                # "plaita#69"（它在更后面）。
-                self.assertIn("in-place mutator", row["detail"])
-                self.assertFalse(row["live_changed"])
+    def test_four_boundary_shapes_are_isolated_as_data(self):
+        """#268 后四边形的嵌套串是数据：不求值、不拒绝、零写穿——结构性隔离
+        （旧「具名拒绝」通道随嵌套求值摘除；零写穿性质不变且更强：字符串根本
+        不会变成代码）。"""
 
     def _parallel_flow(self, mode: str) -> Flow:
         from plaita.node.concurrent import Parallel
-        branch_input = {"$myroot": "$INPUT.cfg",
-                        "cmd": "$F.concat(\"$F.set($myroot,'k','v')\")"}
+        # #268 后嵌套串通道关闭：mutator 直接写在子 assignment 的配置层——
+        # 分支输入的 $myroot 键指向父活 cfg，#69 身份判定照常拒绝。
+        branch_input = {"$myroot": "$INPUT.cfg"}
+        child = _r4_child_flow("$F.set($INPUT.$myroot,'k','v')")
         return Flow(
             flow_id=f"r7-parallel-{mode}", version="1", runtime="python",
             input_type=Property(data_type=types.OBJECT),
             output_type=Property(data_type=types.ANY),
             nodes=[Start(id="s", next="p"),
                    Parallel(id="p", name="p", mode=mode,
-                            branches=[{"name": "b", "flow": _r4_child_flow(),
+                            branches=[{"name": "b", "flow": child,
                                        "input": branch_input}],
                             join_branches=["b"], next="e"),
                    End(id="e", resultType="success", output="$NODE.p")])
