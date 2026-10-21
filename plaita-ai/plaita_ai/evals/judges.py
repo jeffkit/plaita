@@ -25,6 +25,9 @@ from typing import Any, Dict, Optional
 import httpx
 
 _TIMEOUT_S = 60.0
+#: verdict 是一个小 JSON 对象（reason 还会被截到 300 字符）——上限只防病态
+#: 长回复，不给冗长留空间。
+_MAX_TOKENS = 1024
 
 _log = logging.getLogger(__name__)
 
@@ -119,6 +122,7 @@ def judge_output(
                 "model": model,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "temperature": 0,
+                "max_tokens": _MAX_TOKENS,
             },
             timeout=_TIMEOUT_S,
         )
@@ -133,9 +137,13 @@ def judge_output(
         _log.warning("judge reply had no text content; case degrades to unavailable")
         return _unavailable_reply("judge reply had no text content")
 
+    # 解析链整体按「不可解析」降级：JSONDecodeError 是 ValueError，但一个
+    # ~10k 层嵌套的回复只有 ~20KB 就能让 json.loads 抛 RecursionError
+    # （RuntimeError 族，A2R45-02）——任何在这里抛出的形状都是坏回复，
+    # 不是 verdict，必须在源头拦下而非穿透 evaluate。
     try:
         verdict = json.loads(content)
-    except ValueError:
+    except Exception:
         # Tolerate fenced or trailing-prose replies: grab the first {...}.
         start, end = content.find("{"), content.rfind("}")
         if start < 0 or end <= start:
@@ -143,7 +151,7 @@ def judge_output(
             return _unavailable_reply("judge reply was not JSON")
         try:
             verdict = json.loads(content[start : end + 1])
-        except ValueError:
+        except Exception:
             _log.warning("judge reply was not JSON; case degrades to unavailable: %.200s", content)
             return _unavailable_reply("judge reply was not JSON")
 
