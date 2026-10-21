@@ -19,13 +19,16 @@
    标记过期/被 force 覆盖，同一死信也只会收敛到一条执行；
 3. ``schema_version`` 按源信封继承（缺失 = ``LEGACY_TASK_SCHEMA_VERSION``），
    超过本 build 理解范围时**入队前**具名拒绝（``schema_too_new``）；
-4. 每次回灌（含拒绝）写 ``plaita:dlq:replay:audit``；DLQ 原条目**不删除**
-   ——证据保留，真正的清理由保留策略/显式 drain 负责。
+4. 每次回灌（含拒绝）写 ``plaita:dlq:replay:audit``（有界 FIFO，上限
+   ``PLAITA_REPLAY_AUDIT_MAX_LEN``，写入后 XTRIM 精确裁剪；键**无 TTL**
+   ——整键过期会一次性抹掉全部历史，「持久但有界」是明确口径）；DLQ 原
+   条目**不删除**——证据保留，真正的清理由保留策略/显式 drain 负责。
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -39,7 +42,7 @@ from .task_queue import (
     enqueue_task,
     timestamp_from_stream_id,
 )
-from ..core.url_redaction import _scrub_url_text
+from ..core.url_redaction import _redact_env_value, _scrub_url_text
 
 try:
     from ..storage.redis import EXECUTION_TOMBSTONE_PREFIX
@@ -54,8 +57,69 @@ REPLAY_MARKER_PREFIX = "plaita:dlq:replay"
 REPLAY_AUDIT_STREAM = "plaita:dlq:replay:audit"
 #: 与 ``FlowWorker.START_DEDUP_TTL_SECONDS`` 同量级（7 天）。
 REPLAY_MARKER_TTL_SECONDS = 7 * 86400
+#: replay 审计流保留条数上限：审计流只增不裁会随管理员操作无限增长（与 DLQ
+#: 的 ``PLAITA_DLQ_MAX_LEN`` 同口径的有损 FIFO），写入后 XTRIM 精确裁剪。
+DEFAULT_REPLAY_AUDIT_MAX_LEN = 1000
+#: 裁剪 WARNING 限频：稳态触顶后每次写入都会裁 1 条，逐条告警是噪音
+#: （与 ``task_queue.DLQ_TRIM_WARN_INTERVAL_SECONDS`` 同口径）。
+_AUDIT_TRIM_WARN_INTERVAL_SECONDS = 60.0
+_last_audit_trim_warning_at = 0.0
 
 _REPLAYABLE_TYPES = ("start", "resume")
+
+
+def replay_audit_max_len() -> int:
+    """审计流保留上限（env 可调；非法/≤0 回退默认——审计流必须有界）。"""
+    raw = (os.environ.get("PLAITA_REPLAY_AUDIT_MAX_LEN") or "").strip()
+    if not raw:
+        return DEFAULT_REPLAY_AUDIT_MAX_LEN
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "PLAITA_REPLAY_AUDIT_MAX_LEN=%s 非法，回退默认 %d",
+            _redact_env_value(raw),
+            DEFAULT_REPLAY_AUDIT_MAX_LEN,
+        )
+        return DEFAULT_REPLAY_AUDIT_MAX_LEN
+    if value < 1:
+        logger.warning(
+            "PLAITA_REPLAY_AUDIT_MAX_LEN=%s ≤0，回退默认 %d（审计流必须有界，"
+            "不接受无界配置）",
+            _redact_env_value(raw),
+            DEFAULT_REPLAY_AUDIT_MAX_LEN,
+        )
+        return DEFAULT_REPLAY_AUDIT_MAX_LEN
+    return value
+
+
+def _trim_replay_audit(redis) -> None:
+    """审计流有界化（写入后 XTRIM 精确裁剪；裁剪丢证据/失败都 WARNING）。"""
+    global _last_audit_trim_warning_at
+    max_len = replay_audit_max_len()
+    try:
+        trimmed = int(
+            redis.xtrim(REPLAY_AUDIT_STREAM, maxlen=max_len, approximate=False)
+            or 0
+        )
+    except Exception as exc:  # noqa: BLE001 — 裁剪失败降级：WARNING 可观测
+        logger.warning(
+            "xtrim(%s, maxlen=%s) failed（replay 审计流无界增长）: %s",
+            REPLAY_AUDIT_STREAM,
+            max_len,
+            _scrub_url_text(exc),
+        )
+        return
+    if trimmed:
+        now = time.time()
+        if now - _last_audit_trim_warning_at >= _AUDIT_TRIM_WARN_INTERVAL_SECONDS:
+            _last_audit_trim_warning_at = now
+            logger.warning(
+                "DLQ replay 审计流裁剪：移除最旧 %d 条（max_len=%d）——审计证据"
+                "已丢；长期留存请外送归档（有界 FIFO，键无 TTL）",
+                trimmed,
+                max_len,
+            )
 
 
 @dataclass(frozen=True)
@@ -178,6 +242,8 @@ def _audit(
             result.reason,
             _scrub_url_text(exc),
         )
+        return
+    _trim_replay_audit(redis)
 
 
 def _reject(

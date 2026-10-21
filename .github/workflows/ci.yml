@@ -43,10 +43,12 @@ jobs:
           node-version: "22.18"
       # #266：源码/README 不得再出现浏览器管理密钥通道
       # S17：传输层行为（超时/非 JSON/SPA 兜底/retry/终态）+ 出货接线
+      # A2R40-01/#276：数据面 Redis 读面契约（前端采 data_plane_*/warnings）
       - name: Admin key + transport contracts
         run: |
           node plaita-console/frontend/scripts/check-admin-key.mjs
           node plaita-console/frontend/scripts/check-api-transport.mjs
+          node plaita-console/frontend/scripts/check-cluster-dataplane.mjs
 
   console-backend:
     name: Console backend regression (#260-#265)

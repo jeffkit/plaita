@@ -12,6 +12,7 @@
     "check:admin-key": "node scripts/check-admin-key.mjs",
     "check:admin-key:bundle": "node scripts/check-admin-key.mjs --dist dist",
     "check:api-transport": "node scripts/check-api-transport.mjs",
+    "check:cluster-dataplane": "node scripts/check-cluster-dataplane.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

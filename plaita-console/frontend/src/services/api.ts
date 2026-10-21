@@ -1352,6 +1352,12 @@ export interface ClusterInfo {
   redis_url: string
   created_at: string
   is_active: boolean
+  /** 数据面生效 Redis URL（响应序列化层已脱敏；A2R40-01） */
+  data_plane_redis_url?: string | null
+  /** 数据面裁决来源：config_file | console_env | registry_metadata */
+  data_plane_redis_source?: string | null
+  /** 数据面错位告警（services env 冻结/派生 URL 与生效 URL 不一致，#276） */
+  warnings?: string[]
 }
 
 export interface ClustersListResponse {

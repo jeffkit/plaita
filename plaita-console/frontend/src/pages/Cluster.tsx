@@ -28,6 +28,7 @@ import {
   UserCheck
 } from 'lucide-react'
 import { Button, ConfirmDialog } from '../components/ui'
+import DataPlaneNotice from '../components/DataPlaneNotice'
 
 // 状态图标
 const StatusIcon = ({ status }: { status: string }) => {
@@ -1977,6 +1978,9 @@ function ConfigEditor({ clusterId }: { clusterId: string }) {
       queryClient.invalidateQueries({ queryKey: ['clusterConfig', clusterId] })
       queryClient.invalidateQueries({ queryKey: ['serviceTypes'] })
       queryClient.invalidateQueries({ queryKey: ['infrastructure'] })
+      // 保存可能改绑数据面（redis.url 变更后后端重连）：警示条数据源一并刷新，
+      // 否则页面继续展示旧生效 URL/来源（A2R40-01 读面不得滞留旧真相）
+      queryClient.invalidateQueries({ queryKey: ['activeCluster'] })
       setHasChanges(false)
       setSaveSuccess(true)
       setTimeout(() => setSaveSuccess(false), 3000)
@@ -2503,6 +2507,10 @@ export default function Cluster() {
           )}
         </div>
       </div>
+
+      {/* 数据面 Redis 错位警示（A2R40-01/#276：元数据≠生效时显式警示条，
+          读 /clusters/active 响应的 data_plane_* 与 warnings，不报元数据假象） */}
+      {activeCluster && <DataPlaneNotice cluster={activeCluster} />}
 
       {bootstrapMsg && (
         <div className="px-3 py-2 bg-plaita-500/10 text-plaita-400 text-caption rounded-md">
