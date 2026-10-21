@@ -27,7 +27,7 @@
 |--------|------|------------------|
 | `$INPUT` / `$INPUT.name` | 整个输入对象 / 其 `name` 字段 | `None`（DEBUG 日志留痕） |
 | `$NODE.assign` / `$NODE.assign.field` | 节点 `assign` 的输出 / 其字段 | `None` |
-| `$NODE.raw.<节点>[.<路径>…]` | 节点结果 / 字段的**原文**——字符串不重新求值（见下文） | `None` |
+| `$NODE.raw.<节点>[.<路径>…]` | 兼容修饰符——#268 起与不加 `raw` **同值**（运行期字符串本就原样返回，见下文） | `None` |
 | `$GLOBAL.key` | 全局上下文变量（含 `flow_id`） | `None` |
 | `$FLOW_ID` | 当前流程的 `flow_id` | — |
 | `$FLOW` | `$FLOW_ID` 的别名（0.5.x 起，历史写法 `$FLOW` 会 KeyError 崩） | — |
@@ -187,39 +187,43 @@ expression path '$NODE.h.os' traverses a non-data object of type 'module': attri
 expression path '$NODE.h.env' read a non-data mapping container of type '_Environ': only plain dict (including subclasses, read through dict's C slots) and the engine's CheckpointState may be traversed as a mapping (plaita#203). Host mapping-like objects such as os.environ / ChainMap / UserDict / custom Mapping are refused by name before any key or value is read; convert the data to a plain dict first.
 ```
 
-### 取数据原文：`$NODE.raw.<节点>…`
+### 运行期字符串是数据：`$NODE.<节点>…` 原样返回（plaita#268）与兼容修饰符 `$NODE.raw`
 
-`$NODE.<节点>.<字段>` 对**看起来像表达式/模板**的字符串字段值会按历史语义重新求值
-（引用了父容器缺失根键的数据文本除外，见 [迁移指南](../reference/migration-guide.md)）。
-当字段其实是**数据**——LLM 输出、文档正文、prompt 回显——这种静默改写是不可接受的，
-所以在前面加 `raw` 修饰符：
+表达式只活在 flow **配置**里（节点字段、`input` 映射、条件、`{% … %}` 模板），在节点
+执行时求值一次。**运行期产出的值是数据**：节点结果、子流程输入、循环 item、`$PARENT`
+快照里的字符串，即使长得像表达式/模板（以 `$` 开头或含 `{% … %}`），经路径读取时也
+**原样返回，不再二次求值**。LLM 输出、文档正文、prompt 回显因此不会被静默改写，也不会
+因为含一段 `{% … %}` 而让流程带着误导的 `KeyError` 死掉。
 
 ```json
-{ "$NODE": { "llm": { "text": "{% $F.eq(1,1) %}" } } }
+{ "$NODE": { "llm": { "text": "{% $F.eq(1,1) %}" }, "calc": { "v": "$F.add(2,3)" } } }
 ```
 
 | 表达式 | 结果 |
 |--------|------|
-| `$NODE.llm.text` | `"True"`（历史语义：模板被求值） |
-| `$NODE.raw.llm.text` | `"{% $F.eq(1,1) %}"`（**原文**，不求值） |
-| `$NODE.raw.llm` | 整个节点结果原样返回（其中的字符串都不求值） |
+| `$NODE.llm.text` | `"{% $F.eq(1,1) %}"`（**原文**） |
+| `$NODE.raw.llm.text` | `"{% $F.eq(1,1) %}"`（原文，与上一行**同值**） |
+| `$NODE.calc.v` / `$F.get($NODE.calc,'v')` | `"$F.add(2,3)"`（路径读与函数读同值） |
+| `$NODE.raw.llm` | 整个节点结果原样返回 |
 
-规则：
+要拿到求值结果，在**产出侧**算掉（code 节点内直接计算），或把表达式写在**消费它的
+配置字段**里（`"output": "$F.add(2,3)"` → `5`、`"{% $F.eq(1,1) %}"` → `"True"`）。
+存量流程若依赖「节点结果里的表达式串被下游 `$NODE` 引用时自动求值」，升级检查单见
+仓库根目录 [`MIGRATION.md`](https://github.com/jeffkit/plaita/blob/main/MIGRATION.md)
+的 plaita#268 段。
 
-* `raw` 贯通整条路径：每一段的字符串都不求值（中间段也不会）；非字符串值
-  （int/float/bool/None/list/dict）与不加 `raw` 时完全一致。默认路径只在**走到的
-  字符串段**上求值，不会深度遍历容器里的字符串——所以整节点是容器时两者都原样
-  返回，差别出现在字符串叶子与中间字符串段上；`raw` 保证的是"整条路径都不求值"；
-* 只有 `$NODE` 有 `raw` 修饰符——`$INPUT` / `$GLOBAL` / `$PARENT` / `$ENV` 没有，
-  `$INPUT.raw.x` 就是输入对象里名为 `raw` 的键；
+`$NODE.raw.<节点>…` 是 #130 引入的显式"取原文"访问器；#268 后非 raw 路径也是原文，
+它退化为**兼容 no-op**——存量写法保留即可，新代码不必再写。它仍然携带的两条规则：
+
 * **命名冲突**：`$NODE` 后第一段是修饰符，**仅当** `$NODE` 里没有同名节点、且其后
   紧跟一个字段段（节点 id 位）。流程里若有 id 恰为 `raw` 的节点，`$NODE.raw.<路径>`
-  仍指那个节点（存量语义优先），并打出一次 WARNING 说明该冲突——此时请给节点改名
-  才能使用本访问器；`$NODE.raw.0` / `$NODE.raw[0]` 也仍按节点 `raw` 解析。
+  仍指那个节点（存量语义优先），并打出一次 WARNING 说明该冲突；`$NODE.raw.0` /
+  `$NODE.raw[0]` 也仍按节点 `raw` 解析。只有 `$NODE` 有这个修饰符——`$INPUT.raw.x`
+  就是输入对象里名为 `raw` 的键。
 * **运行期窗口**：判定看的是**当次**的 `$NODE`，所以"声明了 id 为 `raw` 的节点、但该
-  节点还没产出"时，`$NODE.raw.<其他节点>…` 会先按**访问器**解析（取原文、无 WARNING），
-  节点产出后同一表达式才切成节点语义（并多一条冲突 WARNING）。这是规则的必然结果，
-  且不会改变既有流程的结果（旧版本两态都得到 `None`）。
+  节点还没产出"时，`$NODE.raw.<其他节点>…` 会先按**修饰符**解析（无 WARNING），
+  节点产出后同一表达式才切成节点语义（并多一条冲突 WARNING）。两态下读到的值在 #268
+  后都是原文，差别只剩那条 WARNING。
 
 ## 字符串插值
 
@@ -294,8 +298,8 @@ plaita 内置 60+ 函数，按类别分布在 `ExpressionRegistry` 中：
 
     **"fresh" 的确切含义（r6）**：freshness 存在一个随**最外层求值入口**
     （`ExpressionParser.evaluate` / `ExecutionContext.evaluate`）建立、
-    `finally` 里丢弃的 `ContextVar` 作用域里；嵌套求值（嵌套表达式串、`parse_function`、
-    容器重建）共享同一作用域。所以 **A 次求值里造出的对象，在 B 次求值里一定不是 fresh**
+    `finally` 里丢弃的 `ContextVar` 作用域里；嵌套求值（`parse_function`、容器重建；
+    #268 前还有嵌套表达式串）共享同一作用域。所以 **A 次求值里造出的对象，在 B 次求值里一定不是 fresh**
     ——包括"引擎物化后写进 `$NODE`/checkpoint，下一次求值再就地写它"这种形状（r5 的实现
     是模块级、进程内的登记，曾经放行这条路径；verifier 的 C2 反例）。合法的就地改写因此
     必须把**物化与改写放进同一次求值**，例如
