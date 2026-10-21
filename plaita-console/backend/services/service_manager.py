@@ -18,7 +18,7 @@ import weakref
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -33,6 +33,11 @@ try:
     from .atomic_io import atomic_write_text
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from atomic_io import atomic_write_text  # type: ignore
+
+try:
+    from ..error_contract import redact_url_userinfo
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from error_contract import redact_url_userinfo  # type: ignore
 
 # B59-01：基础设施 docker.env 里的 ${VAR} 引用在启动时从 console 进程环境
 # 展开；模板/仓库不再内置固定口令。缺失变量时 start_infrastructure 返回
@@ -156,6 +161,64 @@ def frozen_service_redis_urls(config: Optional[Dict[str, Any]]) -> Dict[str, str
                 frozen[str(service_type)] = value
                 break
     return frozen
+
+
+#: worker 端 Redis URL 读取序（plaita.server.flow_worker 统一 resolver 同序：
+#: PLAITA_REDIS_URL > REDIS_URL > 默认）。
+WORKER_REDIS_ENV_KEYS = ("PLAITA_REDIS_URL", "REDIS_URL")
+#: worker 端无任何 Redis URL 来源时的兜底默认（plaita.runtime_config 同值）。
+WORKER_DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
+
+def service_restart_redis_urls(
+    config: Optional[Dict[str, Any]],
+    effective_url: Optional[str],
+    environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """services.*.env（重）启动时实际生效的 Redis URL——#276 派生面。
+
+    与 ``ServiceManager._resolve_env`` 同一解析语义，覆盖三个派生面：
+    - ``${redis.url}`` 引用 → 数据面生效 URL（无生效信息时 worker 默认兜底）；
+    - localhost 占位字面量 → 同样被 ``_resolve_env`` 改写为生效 URL；
+    - 无显式 Redis env → 继承 console 进程 ``PLAITA_REDIS_URL``/``REDIS_URL``
+      （worker 端读取序），两者都缺则是 worker 端默认 localhost。
+
+    冻结具体字面量原样透传（A2R40-03 面，:func:`frozen_service_redis_urls`
+    承载），本函数原样返回，供读面 warnings 与启动门统一比对。
+    """
+    env_map = os.environ if environ is None else environ
+    placeholder_url = effective_url or WORKER_DEFAULT_REDIS_URL
+    services = config.get("services") if isinstance(config, dict) else None
+    if not isinstance(services, dict):
+        return {}
+    resolved_urls: Dict[str, str] = {}
+    for service_type, service_data in services.items():
+        if not isinstance(service_data, dict):
+            continue
+        env = service_data.get("env")
+        if not isinstance(env, dict):
+            env = {}
+        resolved: Optional[str] = None
+        for key, value in env.items():
+            if not (isinstance(key, str)
+                    and key.upper() in WORKER_REDIS_ENV_KEYS
+                    and isinstance(value, str)):
+                continue
+            if "${redis.url}" in value:
+                resolved = value.replace("${redis.url}", placeholder_url)
+            elif "localhost" in value:
+                resolved = placeholder_url
+            else:
+                resolved = value
+            break
+        if resolved is None:
+            inherited = next(
+                (env_map[k] for k in WORKER_REDIS_ENV_KEYS if env_map.get(k)),
+                None,
+            )
+            resolved = inherited or WORKER_DEFAULT_REDIS_URL
+        resolved_urls[str(service_type)] = resolved
+    return resolved_urls
 
 
 class ServiceConfig(BaseModel):
@@ -719,12 +782,40 @@ class ServiceManager:
             return self._docker_launcher
         return self._process_launcher
     
+    def _registry_redis_url(self) -> Optional[str]:
+        """活跃集群的注册表元数据 Redis URL（plaita#65 优先级序末位）。
+
+        注册表不可用时具名 WARNING 后返回 None（降级可观测）——派生解析
+        退回配置文件链，不得把故障伪装成「没有元数据」。
+        """
+        try:
+            from .cluster_registry import get_cluster_registry
+        except ImportError:  # 平铺布局（cwd=backend）运行时
+            from cluster_registry import get_cluster_registry  # type: ignore
+        try:
+            active = get_cluster_registry().get_active_cluster()
+        except Exception as e:
+            _log.warning(
+                "集群注册表不可用，${redis.url} 派生退回配置文件链: %s", e,
+                exc_info=True,
+            )
+            return None
+        return active.redis_url if active else None
+
+    def _data_plane_redis_url(self) -> str:
+        """worker env 解析用的数据面生效 URL——与读面 ``_redis_plane_view``
+        同一条 plaita#65 链（#276）：配置文件 redis.url > console env >
+        注册表元数据；全缺时 worker 默认 localhost 兜底（旧行为）。"""
+        config_url = self.config.redis.get("url") if self.config else None
+        effective = effective_redis_url(config_url, self._registry_redis_url())
+        return effective or WORKER_DEFAULT_REDIS_URL
+
     def _resolve_env(self, env: Dict[str, str]) -> Dict[str, str]:
         """解析环境变量中的引用，并确保 Redis URL 与实际配置一致"""
         if not self.config:
             return env
-        
-        actual_redis_url = self.config.redis.get("url", "redis://localhost:6379/0")
+
+        actual_redis_url = self._data_plane_redis_url()
         resolved = {}
         for key, value in env.items():
             if "${redis.url}" in value:
@@ -733,6 +824,25 @@ class ServiceManager:
                 value = actual_redis_url
             resolved[key] = value
         return resolved
+
+    def _warn_redis_divergence(self, service_type: str, service_env: Dict[str, str]) -> None:
+        """启动门可观测（#276）：服务（重）启实际下发的 Redis URL 与数据面
+        生效 URL 不一致时显式 WARNING——冻结字面量、进程继承、worker 默认
+        三个派生面一律覆盖，不再静默连错实例。"""
+        effective = self._data_plane_redis_url()
+        resolved = service_restart_redis_urls(
+            {"services": {service_type: {"env": service_env}}}, effective)
+        url = resolved.get(service_type)
+        if url and url != effective:
+            _log.warning(
+                "服务 %s 重启后实际将连 %s，与数据面生效 URL %s 不一致；"
+                "请同步 services.%s.env 的 PLAITA_REDIS_URL"
+                "（可用 ${redis.url} 引用生效 URL）",
+                service_type,
+                redact_url_userinfo(url),
+                redact_url_userinfo(effective),
+                service_type,
+            )
     
     # ---- 启动门的原子预留（plaita#211）----
     # 「计数 → 启动」之间原有 await（launcher.start）：两个并发请求都会在
@@ -809,6 +919,8 @@ class ServiceManager:
         try:
             # 解析环境变量
             env = self._resolve_env(service_config.env)
+            # 启动门可观测（#276）：实发 Redis URL 与数据面生效不一致即显式 WARNING
+            self._warn_redis_divergence(service_type, service_config.env)
 
             # 启动服务
             launcher = self.get_launcher()

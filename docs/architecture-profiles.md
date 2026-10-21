@@ -98,7 +98,16 @@ quickstart 三件套最小集 / dev 全功能六服务 / prod 全家桶 + 上限
 
 Redis 地址的权威来源是活动集群配置文件的 `redis.url`；`redis://localhost:6379/0`
 与 `127.0.0.1` 视为模板占位，让位给 console 的 `PLAITA_CONSOLE_REDIS_URL`
-（Docker 部署里 redis 在另一个容器）。重启后 console 仍按注册表的活动集群连接。
+（Docker 部署里 redis 在另一个容器）。配置文件没给 `redis.url` 且 env 未设时，
+注册表元数据兜底（plaita#65 优先级序末位）。重启后 console 仍按注册表的活动集群连接。
+
+服务 env 里的 `${redis.url}` 引用按同一条链在**启动时**解析（plaita#276）：
+config_file > console_env > 注册表元数据，与集群读面的
+`data_plane_redis_url` 始终同源——metadata 档下派生 worker 不再静默连
+localhost。服务未显式设置 Redis env 时按 worker 端读取序继承进程的
+`PLAITA_REDIS_URL`/`REDIS_URL`，都缺则落 worker 默认 localhost；解析结果与
+生效 URL 错位时集群读/写响应 `warnings` 点名服务与两端（脱敏）URL，启动门
+另留服务端 WARNING，不再无告警连错实例。
 
 ## 与配置的对应关系
 
