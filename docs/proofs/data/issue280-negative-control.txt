@@ -1,0 +1,50 @@
+=== 负控 #280：预认领竞窗 + CANCEL 原子性 ===
+
+--- NC A：去掉 owner 原子标记 + Lua ZREM + post-CAS release ---
+变异（plaita-console/backend/api/executions.py）：
+  * _claim_start_dedup_at_post 改回裸 SET NX（不写 owner）
+  * _CANCEL_QUEUED_ROW_LUA 删除 redis.call('ZREM', KEYS[2], ARGV[3])
+  * queued CANCEL 的 if cas == 1: release_tenant_start(...) 删除
+  * 终态短路 cancelled 分支的补释放删除
+
+命令：
+  cd plaita-console/backend && python -m pytest \
+    tests/console/test_issue280_dedup_race_cancel.py -q
+
+输出（节选）：
+>   assert id_a == id_b, f"同 dedup_key 并发 POST 返回两个 id: {id_a} / {id_b}"
+E   AssertionError: 同 dedup_key 并发 POST 返回两个 id:
+    548c147c4efd41c99758dba64f98d83b / 5baff8d432924c1680b0d727d208072c
+
+>   assert tenant_running_count(env, TENANT) == 0, "CAS 置 cancelled 必须同脚本释放配额"
+E   AssertionError: CAS 置 cancelled 必须同脚本释放配额
+E   assert 1 == 0
+
+>   assert tenant_running_count(env, TENANT) == 0   （re-CANCEL 补释放）
+E   AssertionError: assert 1 == 0
+
+FAILED ...test_concurrent_same_key_returns_one_id_and_one_carrier
+FAILED ...test_cancel_queued_releases_quota_atomically
+FAILED ...test_recancel_cancelled_row_releases_legacy_quota
+3 failed, 2 passed
+
+--- NC B：queued 行无 owner 时不补入队 ---
+变异：queued 行的恢复分支改为 `elif False:`
+命令：同上（仅 test_queued_row_without_carrier_is_requeued_with_same_id）
+输出：
+>   assert _queued_ids(env) == [old_id], "崩溃窗口应补入队同一 id，而不是永久 queued"
+E   AssertionError: 崩溃窗口应补入队同一 id，而不是永久 queued
+E   assert [] == ['bbbbbbbbbbb...bbbbbbbbbbbb']
+1 failed
+
+--- NC C：删除 worker step-persist 取消复核 ---
+变异：plaita/server/flow_worker.py step-persist 前的 _cancel_requested 复核块删除
+命令：python -m pytest tests/unit/test_issue280_cancel_step_persist.py -q
+输出：
+>   assert "step_persist" not in phases, f"cancel 已置位后仍写 running step_persist: {phases}"
+E   AssertionError: cancel 已置位后仍写 running step_persist:
+    ['step_persist', 'cancelled']
+1 failed
+
+=== 还原修复后 ===
+console: 5 passed；unit: 1 passed

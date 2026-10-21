@@ -201,3 +201,34 @@
   plaita-ai **241P/14S/12 subtests**；layering/wheel/size 全绿；
   `landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit 关闭 #275/#277；未触碰他席未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第五十五轮 · #280（2026-10-21，B1 修复席；含 A1 r101 a/P2×3）
+
+- 基线：`origin/main` `4379a76`（含 #273/#274/r66）；gate rc=0（CI + Console
+  E2E 绿）。
+- **#280（P1）dedup 预认领与占位行非原子**：`_claim_start_dedup_at_post` 改
+  为 Lua 同时 `SET NX` + `owner=claiming:<id>`（60s）。并发 B 命中 live
+  claiming owner 时不再删除/重认领，短暂轮询占位行后返回同一 mapped id；
+  owner 过期/force-delete 墓碑才允许孤儿释放重认领。queued 行无 owner
+  （崩溃在落行→入队之间）→ 用同一 id 补一条 start 载体；成功入队后 owner=
+  `enqueued:<id>`（7d）。429/占位行失败/入队失败均释放映射+owner。
+- **P2×3（CANCEL 原子性族）**：
+  1. `_CANCEL_QUEUED_ROW_LUA` 增加 KEYS[2]=配额 ZSET，置 cancelled 同脚本
+     ZREM；再 CANCEL 命中 cancelled 终态时补一次幂等 release（旧 leak 补偿）。
+  2. worker step-persist 写 running 前复核 `_cancel_requested`，命中即写
+     cancelled 并 break，防 running 覆盖已 CAS 的 cancelled。
+  3. queued 占位行写后/入队前崩溃 → 同 key 重试补入队同 id（见上），不再
+     永久 queued；认领失败路径清映射+owner。
+- 测试：console `test_issue280_dedup_race_cancel.py` **5P**（并发屏障同 key
+  → 同 id/一条载体/配额 1；owner 过期孤儿换新 id；queued 无 owner 补入队；
+  CANCEL 配额同脚本释放；re-CANCEL 补释放）；unit
+  `test_issue280_cancel_step_persist.py` **1P**（persist 序列无 step_persist）。
+- 负控：NC A（去 owner/ZREM/post-CAS release）→ **3F/2P**（两个不同 id、
+  CANCEL 后配额 1、re-CANCEL 配额 1）；NC B（不补入队）→ **1F**（载体 []）；
+  NC C（删取消复核）→ **1F**（`['step_persist','cancelled']`）；还原 console
+  5P + unit 1P。日志 `docs/proofs/data/issue280-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8745P/12S/14 deselected/3498
+  subtests**；e2e+integration **287P/4S**；console **1073P/13S**；
+  plaita-ai **241P/14S/12 subtests**；layering/wheel/size 全绿；
+  `landing_gate.py ci` rc=0（4379a76 CI success + Console E2E 绿）。
+- 单 commit 关闭 #280；未触碰他席未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md`。

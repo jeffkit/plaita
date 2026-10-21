@@ -4221,6 +4221,23 @@ class FlowWorker:
                         and steps_since_persist >= self.PERSIST_EVERY_N_STEPS
                     ):
                         self._raise_if_lease_lost(lease_execution_id)
+                        # plaita#280 顺带 P2：取消可能落在本步顶部的取消检查
+                        # 之后、running 落盘之前。此时若直接写 running，会把
+                        # console 已 CAS 的 cancelled 覆盖回去（配额也已释放）。
+                        # 落盘前再复核一次取消标志，命中即终态化。
+                        if self._cancel_requested(execution_id):
+                            state.status = "cancelled"
+                            state.context = context
+                            state.end_time = datetime.now().isoformat()
+                            self._persist_state_or_raise(
+                                execution_id, state, "cancelled_before_step_persist"
+                            )
+                            self._finalize_observers()
+                            logger.info(
+                                "执行 %s 取消落在步界检查与 running 落盘之间，"
+                                "复核命中，终态化 cancelled", execution_id,
+                            )
+                            break
                         state.context = context
                         state.last_update_time = datetime.now().isoformat()
                         self._persist_state_or_raise(execution_id, state, "step_persist")
