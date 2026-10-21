@@ -218,6 +218,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 |---|---|---|---|---|
 | `PLAITA_CONSOLE_HOST` | `127.0.0.1` | `startup`（`run_server`） | 监听地址 | 非回环打 WARNING（#208）；**官方容器 CMD 硬编码 `--host 0.0.0.0`，此 env 不生效且无告警**（A58-01） |
 | `PLAITA_CONSOLE_PORT` | `8080` | `startup`（`run_server`/容器 CMD） | 监听端口 | 非整数 → `get_settings()` `ValueError`（import app 时） |
+| `PLAITA_CONSOLE_LOOPBACK_URL` | 未设 | `request`（supervisor iterate） | supervisor 回环目标覆盖（#291）：默认由 `HOST`/`PORT` 推导（通配监听取回环地址） | 非法（非 `http(s)://host[:port]`）→ 503 具名拒绝；指向非本机地址照用但 **WARNING**（平台 admin key 将发往该地址）。uvicorn CLI 绕过 `PORT` 起服时需显式设置，否则回环连接失败 → iterate 502 |
 | `PLAITA_CONSOLE_REDIS_URL` | `redis://localhost:6379/0` | `startup`（lifespan） | Redis 连接；不可达 → 本地单机模式 | 降级是**永久**的；运行中恢复 Redis 需重启 |
 | `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | `startup`（`init_engine` 一次） | 流程/版本/执行历史 SQLAlchemy URL | 凭据文件/密钥目录由它推导；**相对 URL 按各进程 cwd 解析**，PG/未设置/内存库回退 cwd 并打 WARNING（A67-04）；官方 compose 默认无持久卷 |
 | `PLAITA_CONSOLE_ENV` | `dev` | `request` / 每次发布 | 环境标识；仅精确 `prod` 时删除需 admin | 其他值（test/staging）无额外语义 |

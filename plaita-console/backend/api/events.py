@@ -458,13 +458,18 @@ def _load_subscription_record(redis: Redis, subscription_id: str) -> Dict[str, A
     return info if isinstance(info, dict) else {}
 
 
-def _require_owned_subscription(info: Dict[str, Any], subscription_id: str, request: Request) -> None:
+def _require_owned_subscription(info: Dict[str, Any], subscription_id: str, request: Request,
+                                *, required: bool = False) -> None:
     """单条订阅归属校验（plaita#192）：跨租户按 404，不暴露存在性。
 
     与 ``schedules._get_schedule`` 同口径：先是 404（不存在）还是 404
     （无权看）对外不可区分。
+
+    ``required=True`` 供写路径（DELETE）使用：``tenant_scope(required=True)``
+    让会话型平台管理员全量视角在归属判断之前 403（A2R17-01 全量视角只读；
+    A1 r110 a/P2）——否则 None 直接放行，平台管理员可按 id 盲删他租户订阅。
     """
-    tenant = tenant_scope(request)
+    tenant = tenant_scope(request, required=required)
     if tenant is None:
         return
     if _record_tenant(info) != tenant:
@@ -500,8 +505,11 @@ async def delete_subscription(
     body: Optional[EmptyRequestModel] = None,
 ):
     """删除事件订阅（含引擎侧的类型/关联/流程索引）。跨租户按 404 且不删除。"""
+    # 写路径先解析租户（A2R17-01 全量视角只读；A1 r110 a/P2）：403 发生在读
+    # 记录之前，全量视角对「存在 / 不存在」的订阅得到同一响应（无存在性 oracle）。
+    tenant_scope(request, required=True)
     info = _load_subscription_record(redis, subscription_id)
-    _require_owned_subscription(info, subscription_id, request)
+    _require_owned_subscription(info, subscription_id, request, required=True)
     key = f"{_SUBSCRIPTION_KEY_PREFIX}{subscription_id}"
     pipe = redis.pipeline()
     pipe.delete(key)

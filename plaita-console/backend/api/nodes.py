@@ -118,7 +118,9 @@ def register_node(req: RegisterNodeRequest, request: Request = None):
 def delete_node(node_type: str, request: Request = None,
                 body: Optional[EmptyRequestModel] = None):
     """删除本租户自定义节点描述。内置节点不可删（400）。不存在返回 404。"""
-    tenant: Optional[str] = tenant_scope(request) if request is not None else None
+    # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）：None 会让
+    # delete_node_descriptor 不过滤租户，平台管理员全量视角可按名盲删他租户节点。
+    tenant: Optional[str] = tenant_scope(request, required=True) if request is not None else None
     try:
         node_registry_svc.delete_custom(_store(), node_type, tenant_id=tenant)
     except ValueError as e:

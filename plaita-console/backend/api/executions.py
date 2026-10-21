@@ -1735,14 +1735,19 @@ def _heal_terminal_ttl(redis: Redis, key: str, info: Dict[str, Any]) -> None:
 
 
 def _find_execution(
-    request: Request, redis: Redis, execution_id: str
+    request: Request, redis: Redis, execution_id: str, *, required: bool = False
 ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
     """按租户上下文定位执行状态。
 
     租户视角只查本租户 namespace；平台视角（tenant=None）先查 default
     （历史前缀），再 SCAN 各租户前缀。返回 (tenant_id, data)。
+
+    ``required=True`` 供**写路径**（cancel / delete / resume）使用：按
+    ``tenant_scope(required=True)`` 取租户——会话型平台管理员全量视角在任何
+    查找之前 403（A2R17-01 全量视角只读；A1 r110 a/P2），无状态平台凭证落
+    default；全量 SCAN 只服务读面。
     """
-    tenant = tenant_scope(request)
+    tenant = tenant_scope(request, required=required)
     if tenant:
         key = _exec_key(tenant, execution_id)
         raw = redis.get(key)
@@ -2306,8 +2311,9 @@ async def cancel_execution(
     - **execution_id**: 执行 ID
     """
     # 本地单机模式：标记状态（尽力而为，不中断线程）
+    # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）。
     if (local := get_local_executor(request)) is not None:
-        tenant = tenant_scope(request)
+        tenant = tenant_scope(request, required=True)
         if not local.cancel_local_execution(execution_id, tenant_id=tenant):
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(request, "execution.cancel", execution_id, tenant_id=tenant)
@@ -2318,7 +2324,7 @@ async def cancel_execution(
             "message": "执行已取消（本地模式）",
         }
 
-    tenant, info = _find_execution(request, redis, execution_id)
+    tenant, info = _find_execution(request, redis, execution_id, required=True)
     if not info:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
@@ -2476,8 +2482,9 @@ async def delete_execution(
     # 本地单机模式：先停执行（取消标志/线程汇合），再持久删除记录与日志。
     # 线程汇合最长 LOCAL_DELETE_JOIN_TIMEOUT_SECONDS 秒——放线程池执行，
     # 不阻塞 console 事件循环（与 logs SSE 非阻塞修复同一红线）。
+    # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）。
     if (local := get_local_executor(request)) is not None:
-        tenant = tenant_scope(request)
+        tenant = tenant_scope(request, required=True)
         try:
             deleted = await asyncio.to_thread(
                 local.delete_local_execution,
@@ -2499,7 +2506,7 @@ async def delete_execution(
             "message": "执行记录已删除",
         }
 
-    _tenant, _data = _find_execution(request, redis, execution_id)
+    _tenant, _data = _find_execution(request, redis, execution_id, required=True)
     if not _data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
     _status = str(_data.get("status") or "")
@@ -2570,11 +2577,13 @@ async def resume_execution(
       绑定值一律以盘上 checkpoint 为准。
     """
     # 本地单机模式：从 SQLite checkpoint 继续（分布式策略）
+    # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）。
     if (local := get_local_executor(http_request)) is not None:
+        tenant = tenant_scope(http_request, required=True)
         try:
             ok = local.resume_local_execution(
                 flow_store.get_flow_store(), execution_id, request.resume_type,
-                request.data, tenant_id=tenant_scope(http_request),
+                request.data, tenant_id=tenant,
             )
         except ValueError as e:
             raise HTTPException(
@@ -2585,7 +2594,7 @@ async def resume_execution(
             raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
         _audit(http_request, "execution.resume", execution_id,
                {"resume_type": request.resume_type, "mode": "local"},
-               tenant_id=tenant_scope(http_request))
+               tenant_id=tenant)
         return {
             "status": "resuming",
             "execution_id": execution_id,
@@ -2594,7 +2603,7 @@ async def resume_execution(
         }
 
     # 验证执行存在（按租户上下文定位）
-    resume_tenant, data = _find_execution(http_request, redis, execution_id)
+    resume_tenant, data = _find_execution(http_request, redis, execution_id, required=True)
     if not data:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
 
