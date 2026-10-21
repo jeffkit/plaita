@@ -55,6 +55,15 @@ console 后端 /api/schedules ──CRUD──▶ plaita:schedules（与调度�
 触发历史：`plaita:schedule:fires:{id}` list（LPUSH+LTRIM 保留 50 条）：
 `{"fired_at","trigger_kind","flow_id","version","enqueue":"ok|failed","msg_id"}`
 
+本地单机档（`local_schedule_fires` 表）对外返回**同一字段集**：`fired_at`
+（表 `created_at`）、`flow_id`/`version`（取调度定义）、`enqueue`
+（`fired→ok`、`failed→failed`）、`msg_id=null`，并额外带本地专有的
+`execution_id/status/error`（集群档为 `null`）。两档的
+`GET /api/schedules/{id}/history` 都返回
+`{schedule_id,records,total,returned,truncated,next_offset}`：`total` 是历史
+总条数（不是本页条数），`offset`（0..10000）翻页、`next_offset` 直接回传；
+`limit` 1..50，越界 422（不再静默夹紧）。
+
 ## 4. 端点（console 后端，Admin API Key）
 
 | 方法 | 路径 | 说明 |

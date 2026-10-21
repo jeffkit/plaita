@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 try:
     from plaita.server.services.schedule_service import next_run_after, validate_cron
@@ -262,21 +262,44 @@ def trigger_now(store, schedule: Dict[str, Any]) -> Optional[str]:
     return fire(store, schedule, trigger_kind="manual")
 
 
-def fire_history(store, schedule_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+def fire_history_total(store, schedule_id: str) -> int:
+    """触发历史总条数（A2R24-05：``total`` 必须是匹配总数，不是本页条数）。"""
+    with store._session_local() as session:
+        return int(session.scalar(
+            select(func.count())
+            .select_from(LocalScheduleFire)
+            .where(LocalScheduleFire.schedule_id == schedule_id)
+        ) or 0)
+
+
+def fire_history(store, schedule_id: str, limit: int = 10, offset: int = 0,
+                 flow_id: str = "", version: str = "") -> List[Dict[str, Any]]:
+    """最近触发记录（A2R24 契约族余项：与集群档/前端统一字段形状）。
+
+    历史：本地档返回 ``{triggered_at, status, error, execution_id}``，而集群档
+    与前端 ``ScheduleFireRecord`` 用 ``{fired_at, flow_id, version, enqueue,
+    msg_id}``——本地档对话框的时间列恒空、状态恒显示「入队失败」。这里以集群
+    形状为准映射，并保留本地专有的 ``execution_id/status/error``。
+    """
     with store._session_local() as session:
         rows = session.scalars(
             select(LocalScheduleFire)
             .where(LocalScheduleFire.schedule_id == schedule_id)
             .order_by(LocalScheduleFire.created_at.desc())
+            .offset(max(0, offset))
             .limit(max(1, min(50, limit)))
         ).all()
         return [
             {
+                "fired_at": r.created_at.isoformat() if r.created_at else "",
                 "trigger_kind": r.trigger_kind,
-                "execution_id": r.execution_id,
+                "flow_id": flow_id,
+                "version": version,
+                "enqueue": "ok" if r.status == "fired" else "failed",
+                "msg_id": None,
+                "execution_id": r.execution_id or None,
                 "status": r.status,
-                "error": r.error,
-                "triggered_at": r.created_at.isoformat() if r.created_at else "",
+                "error": r.error or None,
             }
             for r in rows
         ]

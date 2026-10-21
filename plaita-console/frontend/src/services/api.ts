@@ -1093,9 +1093,12 @@ export const api = {
 
   async getScheduleHistory(
     scheduleId: string,
-    limit = 10
-  ): Promise<{ schedule_id: string; records: ScheduleFireRecord[]; total: number }> {
-    return request(`/schedules/${scheduleId}/history?limit=${limit}`)
+    limit = 10,
+    offset = 0
+  ): Promise<ScheduleHistoryResponse> {
+    return request(
+      `/schedules/${scheduleId}/history?limit=${limit}&offset=${offset}`
+    )
   },
 
   async previewCron(cron: string, count = 5): Promise<{ cron: string; next: string[] }> {
@@ -1408,7 +1411,20 @@ export interface ScheduleFireRecord {
   flow_id: string
   version?: string
   enqueue: string
-  msg_id?: string
+  msg_id?: string | null
+  // 本地单机档专有的诊断字段（集群档为 null）
+  execution_id?: string | null
+  status?: string | null
+  error?: string | null
+}
+
+export interface ScheduleHistoryResponse {
+  schedule_id: string
+  records: ScheduleFireRecord[]
+  total: number
+  returned: number
+  truncated: boolean
+  next_offset: number | null
 }
 
 

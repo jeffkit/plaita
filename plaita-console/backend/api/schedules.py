@@ -25,7 +25,7 @@ import json
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 try:
@@ -80,6 +80,11 @@ except ImportError:
 
 router = APIRouter()
 
+#: A2R24-05：触发历史 offset 上限（与 executions page≤10000 同量级）。
+#: 历史记录本身由 schedule_service 的 ``LTRIM`` 限制在最近 N 条，这里只防
+#: 调用方把 OFFSET 推到无界值。
+_FIRE_HISTORY_MAX_OFFSET = 10000
+
 
 # ============ 请求/响应模型 ============
 
@@ -121,6 +126,44 @@ class TriggerScheduleResponse(BaseModel):
     mode: Literal["local", "cluster"]
     execution_id: Optional[str] = None
     msg_id: Optional[str] = None
+
+
+class ScheduleFireRecord(BaseModel):
+    """触发历史记录（A2R24 契约族余项）。
+
+    集群档历史上写 ``{fired_at, trigger_kind, flow_id, version, enqueue, msg_id}``
+    （``schedule_service.fire_schedule``），本地档写 ``{triggered_at, execution_id,
+    status, error}``；前端 ``ScheduleFireRecord`` 只声明了前者，本地档的
+    ``fired_at``/``enqueue`` 恒为 undefined（时间显示空白、状态恒为「入队失败」）。
+    这里把两档收敛到同一字段集：集群键原样保留，本地档补齐映射；本地专有的
+    ``execution_id/status/error`` 作为可选诊断字段保留，集群侧为 null。
+    """
+
+    fired_at: str = ""
+    trigger_kind: str = ""
+    flow_id: str = ""
+    version: str = ""
+    enqueue: str = ""
+    msg_id: Optional[str] = None
+    execution_id: Optional[str] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ScheduleHistoryResponse(BaseModel):
+    """A2R24-05：``total`` 是匹配总数，``returned`` 是本页条数。
+
+    ``truncated`` 表示后面还有记录；``next_offset`` 直接回传给 ``?offset=``
+    （集群档 ``LRANGE`` / 本地档 SQL ``OFFSET`` 同语义）。历史实现两档都返回
+    ``total=len(records)``（本页条数），limit 以上的记录没有任何可达路径。
+    """
+
+    schedule_id: str
+    records: List[ScheduleFireRecord]
+    total: int
+    returned: int
+    truncated: bool = False
+    next_offset: Optional[int] = None
 
 
 # ============ 内部工具 ============
@@ -512,9 +555,21 @@ def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_r
     )
 
 
-@router.get("/schedules/{schedule_id}/history")
-def history(schedule_id: str, request: Request, limit: int = 10,
-            redis: Redis = Depends(get_redis_or_none)):
+@router.get(
+    "/schedules/{schedule_id}/history", response_model=ScheduleHistoryResponse
+)
+def history(
+    schedule_id: str,
+    request: Request,
+    limit: int = Query(default=10, ge=1, le=50),
+    offset: int = Query(default=0, ge=0, le=_FIRE_HISTORY_MAX_OFFSET),
+    redis: Redis = Depends(get_redis_or_none),
+):
+    """最近触发记录（A2R24-05：``total``=匹配总数 + ``offset`` 可达全部历史）。
+
+    - **limit**: 本页条数（1..50；超出 422，不再静默夹紧）
+    - **offset**: 跳过条数（0..10000；``next_offset`` 直接回传）
+    """
     if (local := _get_local(request)) is not None:
         # A48-03：与集群分支同口径先做归属校验（#63/#192）。fire_history 只按
         # schedule_id 取数，不先确认调度属于当前租户就会跨租户泄漏执行 ID/错误。
@@ -523,17 +578,32 @@ def history(schedule_id: str, request: Request, limit: int = 10,
                                       tenant_id=tenant_scope(request))
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
-        records = local.fire_history(store, schedule_id, limit)
-        return {"schedule_id": schedule_id, "records": records, "total": len(records)}
-    _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
-    limit = max(1, min(50, limit))
-    raw = redis.lrange(SCHEDULE_FIRES_KEY.format(schedule_id=schedule_id), 0, limit - 1)
-    records = []
-    for item in raw:
-        if isinstance(item, bytes):
-            item = item.decode()
-        try:
-            records.append(json.loads(item))
-        except json.JSONDecodeError:
-            continue
-    return {"schedule_id": schedule_id, "records": records, "total": len(records)}
+        total = local.fire_history_total(store, schedule_id)
+        records = local.fire_history(
+            store, schedule_id, limit, offset=offset,
+            flow_id=schedule.get("flow_id") or "",
+            version=schedule.get("version") or "",
+        )
+    else:
+        _get_schedule(redis, schedule_id, tenant_id=tenant_scope(request))
+        fires_key = SCHEDULE_FIRES_KEY.format(schedule_id=schedule_id)
+        total = int(redis.llen(fires_key) or 0)
+        raw = redis.lrange(fires_key, offset, offset + limit - 1)
+        records = []
+        for item in raw:
+            if isinstance(item, bytes):
+                item = item.decode()
+            try:
+                records.append(json.loads(item))
+            except json.JSONDecodeError:
+                continue
+
+    truncated = offset + len(records) < total
+    return ScheduleHistoryResponse(
+        schedule_id=schedule_id,
+        records=records,
+        total=total,
+        returned=len(records),
+        truncated=truncated,
+        next_offset=(offset + limit) if truncated else None,
+    )
