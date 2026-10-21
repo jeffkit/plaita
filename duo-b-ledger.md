@@ -99,9 +99,41 @@
   回退 7d，不再进入 `SET EX`；合法值（含上限）不变，惰性 ZREM 自愈保留。
   负控 3F（3 个超界参数化全红，返回 315360001 等原值），还原 9P。
 - 验收：全量 unit `-m "not slow"` **8600P/12S/14 deselected/3498
-  subtests**；e2e+integration **287P/4S**；console **1039P/13S**（本地
+  subtests**；e2e+integration **287P/4S**；console **1045P/14S**（本地
   stale `frontend/dist` 用当前源码重建后全绿，产物不入库）；plaita-ai
   **241P/14S/12 subtests**；layering/wheel/size 全绿；`landing_gate.py ci`
   rc=0（main `1032874` success）。
 - 本单为单 commit（见本轮 commit message）；未触碰他席未跟踪的
+  `duo-a-ledger.md` / `duo-a2-ledger.md`。
+
+## 第五十二轮 · #269/#270/#271（2026-10-21，B1 修复席）
+
+- 基线：实现基于 `02b67b8`；落地前并发 B2 r61 `58364b1` 已并入 origin，
+  本单 rebase 到 `58364b1` 后复跑（unit 8687P/12S、console 1045P/14S）。
+- **#269（P1）CLI group/DLQ 覆盖与生产者 family 分叉**：`main()` 先解析
+  CLI，再跑 `_cli_startup_problems`——`--consumer-group` / `--dlq-key` 与
+  env-resolved 生产者值不一致即 `ConfigError` + exit 2（给两边值，要求
+  全部署用 env）；匹配值照常。`--queue-name` 路由错位按 issue 边界不处理。
+  CLI 值（strip 后）作为 overrides 进入 `load_runtime_config`，family/
+  config.effective 与实际 worker 同源。
+- **#270（P1）CLI 0/负值绕过预检**：`--lease-ttl-seconds` /
+  `--max-deliveries` `<1` 具名拒绝、exit 2，worker 不构造；不再静默钳 1。
+  库内构造的钳制保留为嵌入式兜底；lease=1 合法但极端（`_watchdog_interval`
+  1.0s，测试钉住相对关系）。env-only preflight 仍先于 argparse（parser
+  default 自身读 env，非法环境不能炸 traceback）。
+- **#271（P1）TASK_MAX_AGE=0 语义分叉**：`core.retention.task_max_age_seconds`
+  增加可选 environ；`envelope_for_stream` 改用它——0/负数→0（关闭年龄闸，
+  与 worker 一致），非法→30d+WARNING。生产者/worker budget 一致；age=0
+  的失败载体可被 reclaim（不再永久 `config_budget_stale`/PEL），负控实测
+  reclaim 返回 None + budget_stale 告警。
+- 负控： #269/#270 把 `_cli_startup_problems` 直接 `return []` →
+  **9F/7P**（group/dlq 覆盖、lease/max 0/-1、main 三项；group main 覆盖
+  `DID NOT RAISE SystemExit`；4 条 family 对齐测试仍绿），还原 **16P**；#271 改回 `_safe_int(minimum=1)`
+  → **3F/1P**（age=0 budget 分叉、负数语义、reclaim None + budget_stale），
+  还原 **4P**。
+- 验收：全量 unit `-m "not slow"` **8687P/12S/14 deselected/3498
+  subtests**；e2e+integration **287P/4S**；console **1045P/14S**；
+  plaita-ai **241P/14S/12 subtests**；layering/wheel/size 全绿；
+  `landing_gate.py ci` rc=0（main `4eec873` success）。
+- 单 commit 关闭 #269/#270/#271；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md` / `duo-a2-ledger.md`。

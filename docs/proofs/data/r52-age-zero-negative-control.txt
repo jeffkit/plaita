@@ -1,0 +1,45 @@
+=== 负控 #271：envelope_for_stream 改回 _safe_int(minimum=1) ===
+变异（plaita/runtime_config.py）：
+    task_max_age = _task_max_age_seconds(env)
+  →
+    task_max_age = _safe_int(
+        env.get("PLAITA_TASK_MAX_AGE_SECONDS"), DEFAULT_TASK_MAX_AGE_SECONDS
+    )
+
+命令：
+  python -m pytest tests/unit/test_r52_age_zero_alignment.py -q
+
+测试输出（节选）：
+    def test_age_zero_budget_matches_worker():
+        ...
+>       assert envelope["budget_generation"] == _budget(0)
+E       AssertionError: assert 'bg1-6a07ef4af763' == 'bg1-3aa045b1fc18'
+
+    def test_age_negative_keeps_same_zero_semantics():
+        ...
+>       assert envelope_for_stream(... )["budget_generation"] == _budget(0)
+E       AssertionError: assert 'bg1-6a07ef4af763' == 'bg1-3aa045b1fc18'
+
+    def test_age_zero_reclaim_not_budget_stale():
+        ...
+>       assert reclaimed is not None, (
+            "age=0 carrier must be reclaimable; pre-fix producer used 30d while "
+            "worker used 0 -> budget mismatch -> permanent pending"
+        )
+E       AssertionError: age=0 carrier must be reclaimable; pre-fix producer
+        used 30d while worker used 0 -> budget mismatch -> permanent pending
+E       assert None is not None
+
+Captured log:
+WARNING ... event=config.budget_stale queue=test:r95-age-zero
+        local_budget_generation=bg1-3aa045b1fc18 stale=1 legacy=0 scanned=1
+WARNING ... event=config.budget_stale ... source_budget_generation=bg1-6a07ef4af763
+        local_budget_generation=bg1-3aa045b1fc18 ... 消息留 pending
+
+FAILED ...::test_age_zero_budget_matches_worker
+FAILED ...::test_age_negative_keeps_same_zero_semantics
+FAILED ...::test_age_zero_reclaim_not_budget_stale
+3 failed, 1 passed in 0.19s
+
+=== 还原修复后 ===
+4 passed in 0.55s

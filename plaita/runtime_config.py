@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+from plaita.core.retention import task_max_age_seconds as _task_max_age_seconds
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1359,9 +1361,11 @@ def envelope_for_stream(
     # process env keeps console/schedule/worker on the same defaults.
     max_deliveries = _safe_int(env.get("PLAITA_MAX_DELIVERIES"), DEFAULT_MAX_DELIVERIES)
     lease_ttl = _safe_int(env.get("PLAITA_LEASE_TTL_SECONDS"), DEFAULT_LEASE_TTL_SECONDS)
-    task_max_age = _safe_int(
-        env.get("PLAITA_TASK_MAX_AGE_SECONDS"), DEFAULT_TASK_MAX_AGE_SECONDS
-    )
+    # plaita#271：0 是文档定义的「关闭年龄闸」合法值。生产者必须与 worker
+    # 共用 core.retention.task_max_age_seconds（非法→30d+WARNING，<=0→0），
+    # 否则 age=0 时生产者按 30d 算 budget、worker 按 0 算，reclaim 永远
+    # budget_stale，且 age=0 又关闭了年龄闸 → 失败载体永久留 PEL。
+    task_max_age = _task_max_age_seconds(env)
     dlq_max_len = _safe_int(env.get("PLAITA_DLQ_MAX_LEN"), DEFAULT_DLQ_MAX_LEN)
     namespace = (
         env.get("PLAITA_TENANT_NAMESPACE_VERSION", DEFAULT_TENANT_NAMESPACE_VERSION)

@@ -7543,28 +7543,72 @@ def _request_graceful_stop(worker: "RedisFlowWorker", signum: int) -> None:
 from plaita.server.factory import create_storage_component, create_event_bus  # noqa: F401
 
 
+def _cli_startup_problems(args) -> list:
+    """#269/#270: reject CLI values that bypass startup fail-fast (B1 r52).
+
+    - ``--lease-ttl-seconds`` / ``--max-deliveries`` below 1: the env knobs
+      already fail fast; a CLI 0/negative must not be silently clamped to 1.
+    - ``--consumer-group`` / ``--dlq-key``: producers (console/schedule/
+      event_filter) derive ``config_family`` from env only. A worker-only CLI
+      override makes the family gate reject every foreign task (no ack/DLX,
+      pending until the 30-day age gate). Require the whole deployment to use
+      the env value; a matching CLI value is accepted.
+    """
+    problems = []
+    if int(args.lease_ttl_seconds) < 1:
+        problems.append(
+            f"--lease-ttl-seconds: {args.lease_ttl_seconds} < minimum 1 "
+            "(resume lease TTL; 0/negative makes acquire/renew invalid, and a "
+            "silent clamp to 1 leaves no renewal headroom)"
+        )
+    if int(args.max_deliveries) < 1:
+        problems.append(
+            f"--max-deliveries: {args.max_deliveries} < minimum 1 "
+            "(a silent clamp to 1 dead-letters on the first failure)"
+        )
+
+    group = str(args.consumer_group or "").strip()
+    if not group:
+        problems.append(
+            "--consumer-group: empty value is not allowed (identity/routing)"
+        )
+    else:
+        producer_group = resolve_consumer_group()
+        if group != producer_group:
+            problems.append(
+                f"--consumer-group {group!r} != env/default {producer_group!r}: "
+                "console/schedule/event_filter derive config_family from env; "
+                "set PLAITA_CONSUMER_GROUP for the whole deployment instead of "
+                "a worker-only CLI override"
+            )
+
+    dlq = str(args.dlq_key or "").strip()
+    if not dlq:
+        problems.append("--dlq-key: empty value is not allowed (identity/routing)")
+    # --queue-name routing mismatch is a separate issue (#269 boundary); only
+    # compare the DLQ when the worker stream itself is the env/default one.
+    elif args.queue_name == resolve_queue_name("worker"):
+        producer_dlq = resolve_dlq_key(args.queue_name, empty_policy="default")
+        if dlq != producer_dlq:
+            problems.append(
+                f"--dlq-key {dlq!r} != env/default {producer_dlq!r}: "
+                "producers derive config_family from env; set PLAITA_DLQ_KEY "
+                "for the whole deployment instead of a worker-only CLI override"
+            )
+    return problems
+
+
 def main():
     """命令行入口程序"""
-    # B2R31-03：身份/安全/资源类非法值在启动期一次聚合、fail-fast；可选调优
-    # 类降级为 WARNING + 安全默认（不阻断，但绝不静默）。
-    preflight_warnings = []
+    # env-only preflight 必须在 argparse 之前：parser 的 default 自己会读 env
+    # （int(...)/identity resolver），非法环境不能等到 parse 后才炸成 traceback。
+    # CLI 覆盖面的校验在 parse_args() 之后（#269/#270）。
     try:
         preflight_warnings = preflight_security_and_limits()
-        _runtime_cfg = load_runtime_config("worker", strict=True)
+        load_runtime_config("worker", strict=True)
     except ConfigError as exc:
         print(f"配置预检失败，worker 拒绝启动：{exc}", file=sys.stderr)
         raise SystemExit(2)
-    # CLI 默认给控制台日志：库内 logger 无 handler，原样跑运维看到的是
-    # 零输出（2026-09 分布式评审 P2-6）。--quiet / PLAITA_LOG_LEVEL 可调。
-    logging.basicConfig(
-        level=os.environ.get("PLAITA_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    log_config_effective(logger, _runtime_cfg)
-    # preflight 的 WARNING 发生在 logging.basicConfig 之前（NullHandler），
-    # 这里补打一次，确保可选调优降级在启动日志可见（B2R31-03）。
-    for warning in preflight_warnings:
-        logger.warning("配置预检：%s", warning)
     parser = argparse.ArgumentParser(description="Plaita流程工作器")
     
     # Redis参数（统一 resolver：PLAITA_REDIS_URL > REDIS_URL > 默认）
@@ -7659,6 +7703,45 @@ def main():
                              "也可用环境变量 PLAITA_WORKER_LANGFUSE=1 开启")
 
     args = parser.parse_args()
+
+    # B2R31-03 / #269 / #270：身份/安全/资源类非法值在启动期一次聚合、
+    # fail-fast。必须先 parse_args，CLI 的 0/负值不能绕过预检；family/代际
+    # 相关覆盖也必须纳入同一配置视图（与 worker 构造时的 overrides 同源）。
+    try:
+        cli_problems = _cli_startup_problems(args)
+        if cli_problems:
+            raise ConfigError(cli_problems)
+        # 与 env resolver 同口径：CLI 值两侧空白不得进入 family/group 实际值。
+        args.consumer_group = str(args.consumer_group).strip()
+        args.dlq_key = str(args.dlq_key).strip()
+        _runtime_cfg = load_runtime_config(
+            "worker",
+            strict=True,
+            overrides={
+                "queue_name": args.queue_name,
+                "redis_url": args.redis_url,
+                "consumer_group": args.consumer_group,
+                "dlq_key": args.dlq_key,
+                "max_deliveries": args.max_deliveries,
+                "lease_ttl_seconds": args.lease_ttl_seconds,
+                "task_max_age_seconds": task_max_age_seconds(),
+                "dlq_max_len": _dlq_max_len_from_env(),
+            },
+        )
+    except ConfigError as exc:
+        print(f"配置预检失败，worker 拒绝启动：{exc}", file=sys.stderr)
+        raise SystemExit(2)
+    # CLI 默认给控制台日志：库内 logger 无 handler，原样跑运维看到的是
+    # 零输出（2026-09 分布式评审 P2-6）。--quiet / PLAITA_LOG_LEVEL 可调。
+    logging.basicConfig(
+        level=os.environ.get("PLAITA_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    log_config_effective(logger, _runtime_cfg)
+    # preflight 的 WARNING 发生在 logging.basicConfig 之前（NullHandler），
+    # 这里补打一次，确保可选调优降级在启动日志可见（B2R31-03）。
+    for warning in preflight_warnings:
+        logger.warning("配置预检：%s", warning)
     if args.quiet:
         logging.getLogger().setLevel(logging.WARNING)
 

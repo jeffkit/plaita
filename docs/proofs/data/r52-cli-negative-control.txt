@@ -1,0 +1,35 @@
+=== 负控 #269/#270：_cli_startup_problems 直接 return []（恢复 pre-fix 无 CLI 预检） ===
+变异（plaita/server/flow_worker.py）：
+    problems = []
+    return problems  # 负控变异：pre-fix 不做任何 CLI 预检
+    if int(args.lease_ttl_seconds) < 1: ...
+
+命令：
+  python -m pytest tests/unit/test_r52_cli_startup_guards.py -q
+
+测试输出（节选）：
+    def test_group_override_rejected_with_both_values(self):
+>       assert "--consumer-group" in text
+E       assert '--consumer-group' in ''
+
+    def test_lease_below_one_rejected[0]:
+>       assert "--lease-ttl-seconds" in text
+E       assert '--lease-ttl-seconds' in ''
+
+    def test_main_rejects_group_override_before_worker(...):
+>       with pytest.raises(SystemExit) as excinfo:
+E       Failed: DID NOT RAISE SystemExit
+
+FAILED ...test_group_override_rejected_with_both_values
+FAILED ...test_dlq_override_rejected_with_both_values
+FAILED ...test_lease_below_one_rejected[0]
+FAILED ...test_lease_below_one_rejected[-1]
+FAILED ...test_max_deliveries_below_one_rejected[0]
+FAILED ...test_max_deliveries_below_one_rejected[-1]
+FAILED ...test_main_rejects_lease_zero_before_worker
+FAILED ...test_main_rejects_max_deliveries_zero_before_worker
+FAILED ...test_main_rejects_group_override_before_worker
+9 failed, 7 passed in 0.67s
+
+=== 还原修复后 ===
+16 passed in 0.56s

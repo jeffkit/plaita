@@ -22,9 +22,14 @@ from plaita.logger import logger
 DEFAULT_TASK_MAX_AGE_SECONDS = 30 * 86400
 
 
-def task_max_age_seconds() -> int:
-    """消息最大年龄（秒）；未配置/非法回退 30 天，``<=0`` 关闭。"""
-    raw = (os.environ.get("PLAITA_TASK_MAX_AGE_SECONDS") or "").strip()
+def task_max_age_seconds(environ=None) -> int:
+    """消息最大年龄（秒）；未配置/非法回退 30 天，``<=0`` 关闭。
+
+    ``environ``（plaita#271）：生产者 ``envelope_for_stream`` 与 worker 必须
+    用同一个解析器；显式传入映射供测试/嵌入方，缺省读 ``os.environ``。
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get("PLAITA_TASK_MAX_AGE_SECONDS") or "").strip()
     if not raw:
         return DEFAULT_TASK_MAX_AGE_SECONDS
     try:
