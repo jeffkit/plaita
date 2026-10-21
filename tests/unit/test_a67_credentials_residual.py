@@ -3,8 +3,8 @@
 A67-04（P2）：未显式配置 ``PLAITA_CONSOLE_DB_URL``/``PLAITA_CREDENTIALS_FILE``
 时，引擎按 cwd 解析凭据文件且**无任何告警**。升级后 worker 忘记注入 DB env
 会继续解出旧 cwd 文件里的已吊销/已轮换值，运维却看不到分叉。修复契约：
-回退/相对路径/非 SQLite/内存库都必须留下 WARNING（不阻断运行），同类告警
-按原因去重。
+回退/相对 SQLite URL/**显式相对 FILE/KEY_FILE**/非 SQLite/内存库都必须留下
+WARNING（不阻断运行），同类告警按原因去重。
 
 A67-05（P3）：密钥文件历史实现先 ``write_bytes``（umask 下 0644）再 chmod，
 窗口内可读 44B Fernet key；已存在的 0644 key 读取/对账都不收紧。修复契约：
@@ -141,6 +141,38 @@ def test_explicit_file_env_suppresses_fallback_warning(tmp_path, monkeypatch, ca
 
     assert credentials_base_file() == explicit
     assert _messages(caplog) == []
+
+
+def test_explicit_relative_file_env_warns_once(tmp_path, monkeypatch, caplog):
+    """显式相对路径同样按进程 cwd 解析：值相同不代表同一文件（A67-04 残面）。"""
+    _clean_env(monkeypatch)
+    monkeypatch.setenv("PLAITA_CREDENTIALS_FILE", "rel/creds.json")
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.WARNING, logger="plaita.credentials")
+
+    assert credentials_base_file() == Path("rel/creds.json")
+    messages = _messages(caplog)
+    assert len(messages) == 1, messages
+    assert "PLAITA_CREDENTIALS_FILE='rel/creds.json' 是相对路径" in messages[0]
+    assert str(tmp_path / "rel" / "creds.json") in messages[0]
+
+    credentials_base_file()
+    assert len(_messages(caplog)) == 1
+
+
+def test_explicit_relative_key_file_env_warns_once(tmp_path, monkeypatch, caplog):
+    _clean_env(monkeypatch)
+    monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", "rel/creds.key")
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.WARNING, logger="plaita.credentials")
+
+    assert credentials_key_file() == Path("rel/creds.key")
+    messages = _messages(caplog)
+    assert len(messages) == 1, messages
+    assert "PLAITA_CREDENTIALS_KEY_FILE='rel/creds.key' 是相对路径" in messages[0]
+
+    credentials_key_file()
+    assert len(_messages(caplog)) == 1
 
 
 def test_worker_without_db_env_warns_but_still_reads_old_cwd_file(tmp_path):

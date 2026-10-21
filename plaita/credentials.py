@@ -6,7 +6,8 @@
 ``.plaita-credentials.json``（同一 DB 的多个副本因此读写同一份导出文件），
 否则回退当前工作目录并打一次性 WARNING（A67-04）——回退只保证单进程可用，
 多副本/PG 部署必须显式给出绝对路径的 ``PLAITA_CREDENTIALS_FILE`` /
-``PLAITA_CREDENTIALS_KEY_FILE``，否则各进程按各自 cwd 读写不同文件。
+``PLAITA_CREDENTIALS_KEY_FILE``，否则各进程按各自 cwd 读写不同文件；显式值
+是**相对路径**时同样按各进程 cwd 解析，并打一次性 WARNING（A67-04）。
 ``PLAITA_CREDENTIALS_KEY`` 为 Fernet 密钥（未设时尝试同级
 ``.plaita-credentials.key`` 文件）。加密/解密依赖 ``cryptography``
 （``pip install plaita[credentials]``）。
@@ -111,6 +112,40 @@ def _warn_cwd_fallback(component: str, reason: str, detail: str) -> Path:
     return cwd
 
 
+def _warn_relative_explicit_path(env_name: str, component: str, path: Path) -> None:
+    """显式配置了**相对路径**：各进程按各自 cwd 解析，必须告警（A67-04）。
+
+    显式 env 不等于「同一个文件」——console 与独立 worker 的 cwd 通常不同，
+    相对路径会让它们静默读写各自的副本。去重键包含 env 名/组件/相对值，
+    重复解析不会刷日志。
+    """
+    resolved = (Path.cwd() / path).resolve()
+    _warn_path_once(
+        (f"explicit_relative:{env_name}", component, str(resolved)),
+        "%s=%r 是相对路径：凭据%s按各进程当前工作目录解析（本进程为 %s）。"
+        "值相同不代表同一文件；多副本部署请改用绝对路径（A67-04）",
+        env_name,
+        str(path),
+        component,
+        resolved,
+    )
+
+
+def _warn_relative_sqlite_url(db_url: str, path: Path, component: str) -> None:
+    """相对 SQLite URL：同一字符串在不同 cwd 会解析到不同 DB（A67-04）。"""
+    resolved = path.resolve()
+    _warn_path_once(
+        ("relative_sqlite", component, str(resolved)),
+        "PLAITA_CONSOLE_DB_URL=%r 是相对路径：凭据%s按当前工作目录"
+        "解析到 %s（父目录 %s）。值相同不代表同一数据库；多副本"
+        "部署请改用绝对路径（A67-04）",
+        db_url,
+        component,
+        resolved,
+        resolved.parent,
+    )
+
+
 def _default_credentials_dir(component: str = "文件") -> Path:
     """默认凭据文件/密钥目录：SQLite 时与 DB 同目录，否则 cwd + WARNING。
 
@@ -133,16 +168,7 @@ def _default_credentials_dir(component: str = "文件") -> Path:
             directory = path.resolve().parent
             if not path.is_absolute():
                 # 相对 URL 的值即使两端相同，也会按各自进程 cwd 解析到不同 DB。
-                _warn_path_once(
-                    ("relative_sqlite", component, str(path.resolve())),
-                    "PLAITA_CONSOLE_DB_URL=%r 是相对路径：凭据%s按当前工作目录"
-                    "解析到 %s（父目录 %s）。值相同不代表同一数据库；多副本"
-                    "部署请改用绝对路径（A67-04）",
-                    db_url,
-                    component,
-                    path.resolve(),
-                    directory,
-                )
+                _warn_relative_sqlite_url(db_url, path, component)
             return directory
         return _warn_cwd_fallback(
             component,
@@ -163,11 +189,15 @@ def credentials_base_file() -> Path:
     """未按租户展开的基础凭据文件路径。
 
     ``PLAITA_CREDENTIALS_FILE`` 显式设置时直接使用；否则与 console 导出一致，
-    落在 DB 同目录（SQLite）或 cwd。空字符串按未设置处理。
+    落在 DB 同目录（SQLite）或 cwd。空字符串按未设置处理。显式值若是相对
+    路径，仍按各进程 cwd 解析——不静默放行，打一次性 WARNING（A67-04）。
     """
     explicit = os.environ.get("PLAITA_CREDENTIALS_FILE", "").strip()
     if explicit:
-        return Path(explicit)
+        path = Path(explicit)
+        if not path.is_absolute():
+            _warn_relative_explicit_path("PLAITA_CREDENTIALS_FILE", "文件", path)
+        return path
     return _default_credentials_dir("文件") / DEFAULT_FILE
 
 
@@ -198,10 +228,16 @@ def credentials_key_file() -> Path:
 
     只返回**路径**；``PLAITA_CREDENTIALS_KEY`` 的内联密钥不在此暴露——跨进程
     调用方应显式传路径，不要把密钥材料复制进子进程环境（plaita#256）。
+    显式值若是相对路径，按各进程 cwd 解析并打一次性 WARNING（A67-04）。
     """
     explicit = os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", "").strip()
     if explicit:
-        return Path(explicit)
+        path = Path(explicit)
+        if not path.is_absolute():
+            _warn_relative_explicit_path(
+                "PLAITA_CREDENTIALS_KEY_FILE", "密钥文件", path
+            )
+        return path
     return _default_credentials_dir("密钥文件") / DEFAULT_KEY_FILE
 
 

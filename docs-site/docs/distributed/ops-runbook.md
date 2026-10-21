@@ -229,9 +229,9 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSOLE_NODE_MODULES` | 未设；逗号分隔 | `startup`（import） | 加载业务节点并注册 CodeNode | 失败 WARNING（console 不退出），流程运行期才报未知节点 |
 | `PLAITA_CONSOLE_NODE_PATH` | 未设；`os.pathsep` | `startup`（import） | 逐项插 `sys.path` | 不校验目录存在 |
 | `PLAITA_CONSOLE_LANGFUSE` | `auto` | `call`（每次执行） | `false` 强制关；`true` 强制开；`auto` 配了 `LANGFUSE_PUBLIC_KEY` 才开 | strict enum：未知值（如 `bogus`）→ **false + WARNING**（B2R31-03 起不再 fail-open）；启动预检拒绝非法值 |
-| `PLAITA_CREDENTIALS_FILE` | SQLite：DB 同目录；非 SQLite/无 DB env：cwd（WARNING） | `call`（每次读/写） | 引擎/console 凭据文件；console 按租户写旁文件 | 未显式设置且无法推断共享目录 → 回退 cwd + WARNING（A67-04）；**多副本必须绝对路径**；空文件 → `CredentialStoreCorruptError`，不是空 store |
+| `PLAITA_CREDENTIALS_FILE` | SQLite：DB 同目录；非 SQLite/无 DB env：cwd（WARNING） | `call`（每次读/写） | 引擎/console 凭据文件；console 按租户写旁文件 | 未显式设置且无法推断共享目录 → 回退 cwd + WARNING；**显式相对路径**同样按各进程 cwd 解析 + WARNING（A67-04）；**多副本必须绝对路径**；空文件 → `CredentialStoreCorruptError`，不是空 store |
 | `PLAITA_CREDENTIALS_KEY` | 未设 | `call`（每次加解密） | 内联 Fernet key，优先于文件；**同时是 DB 字段加密主密钥**（`local_executions.input_json/context_json`、`tenants.contract_secret_key` 经 HKDF 派生用途子密钥） | 非法 key → `CredentialError`/`FieldCryptoError`；不要传给子进程；**丢失/轮换会让历史 checkpoint 与既有租户契约密钥不可恢复** |
-| `PLAITA_CREDENTIALS_KEY_FILE` | console：DB 同目录；引擎：cwd（WARNING） | `call`（每次加解密） | 密钥文件路径（凭据与 DB 字段加密共用） | console 首次用 `O_EXCL` 直接以 0600 创建；存量 0644 在启动对账/读取时收紧 + WARNING（A67-05）；引擎缺文件 fail-closed；**DB 备份须与密钥文件同等级保护且分开放置** |
+| `PLAITA_CREDENTIALS_KEY_FILE` | console：DB 同目录；引擎：cwd（WARNING） | `call`（每次加解密） | 密钥文件路径（凭据与 DB 字段加密共用） | console 首次用 `O_EXCL` 直接以 0600 创建；**显式相对路径**按各进程 cwd 解析 + WARNING（A67-04）；存量 0644 在启动对账/读取时收紧、O_EXCL 落败者复用前也收紧 + WARNING（A67-05）；引擎缺文件 fail-closed；**DB 备份须与密钥文件同等级保护且分开放置** |
 | `PLAITA_PROJECT_ROOT` | 未设 | `startup`（writefile jail 应用） | jail 默认根的第一候选（`PLAITA_NODES_WORKSPACE_ROOT` 优先） | 落在引擎 checkout 内会上溯到父目录；`/` 不构成边界 |
 | `PLAITA_PYTHON` | 未设 | `launch`（每次拉起服务进程） | 覆盖 `service_manager` 的 `cmd[0]`（业务 venv 解释器） | 从 `process_env` 读（全局 env 或 `services.*.env`）；不校验存在性 |
 
