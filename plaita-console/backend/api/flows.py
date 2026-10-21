@@ -20,9 +20,9 @@ from redis import Redis
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from ..services import flow_store
@@ -319,7 +319,9 @@ def get_flow(flow_id: str, request: Request = None):
 
 
 @router.delete("/flows/{flow_id}")
-def delete_flow(flow_id: str, request: Request = None, redis: Redis = Depends(get_redis_dep)):
+def delete_flow(flow_id: str, request: Request = None,
+                redis: Redis = Depends(get_redis_dep),
+                body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
     try:
         _store().delete_flow(flow_id, tenant_id=tenant)
@@ -450,7 +452,8 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
 
 @router.delete("/flows/{flow_id}/versions/{version}")
 def delete_version(flow_id: str, version: str, request: Request = None,
-                   redis: Redis = Depends(get_redis_dep)):
+                   redis: Redis = Depends(get_redis_dep),
+                   body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
     prior = _store().get_version(flow_id, version, tenant_id=tenant)
     try:

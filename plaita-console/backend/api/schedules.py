@@ -29,9 +29,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 from redis import Redis
 
 try:
@@ -446,7 +446,9 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
 
 
 @router.delete("/schedules/{schedule_id}")
-def remove(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
+def remove(schedule_id: str, request: Request,
+           redis: Redis = Depends(get_redis_or_none),
+           body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
@@ -466,7 +468,9 @@ def remove(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_
 
 
 @router.post("/schedules/{schedule_id}/enable")
-def enable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
+def enable(schedule_id: str, request: Request,
+           redis: Redis = Depends(get_redis_or_none),
+           body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
@@ -490,7 +494,9 @@ def enable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_
 
 
 @router.post("/schedules/{schedule_id}/disable")
-def disable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
+def disable(schedule_id: str, request: Request,
+            redis: Redis = Depends(get_redis_or_none),
+            body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
@@ -515,7 +521,9 @@ def disable(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
 @router.post(
     "/schedules/{schedule_id}/trigger", response_model=TriggerScheduleResponse
 )
-def trigger_now(schedule_id: str, request: Request, redis: Redis = Depends(get_redis_or_none)):
+def trigger_now(schedule_id: str, request: Request,
+                redis: Redis = Depends(get_redis_or_none),
+                body: Optional[EmptyRequestModel] = None):
     """立即触发一次：本地档直接进程内执行；集群档写任务队列 Stream。
 
     A2R24-08：两模式返回同一字段集（``mode`` 区分标识语义）。

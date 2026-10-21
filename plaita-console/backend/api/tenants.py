@@ -4,7 +4,7 @@
 - 成员管理：平台管理员，或**本租户**的 admin（#260；跨租户一律 403）
 - 租户 admin 不得添加/修改/移除 ``platform_admin=True`` 的账号
 """
-from typing import Dict
+from typing import Dict, Optional
 
 import logging
 
@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from ..auth import require_auth
@@ -171,7 +171,9 @@ def set_status(tenant_id: str, req: TenantStatusRequest, request: Request,
 
 
 @router.post("/tenants/{tenant_id}/rotate-secret")
-def rotate_secret(tenant_id: str, request: Request, identity: Dict = Depends(require_auth)):
+def rotate_secret(tenant_id: str, request: Request,
+                  identity: Dict = Depends(require_auth),
+                  body: Optional[EmptyRequestModel] = None):
     _platform_admin(request, identity, action="tenant.rotate_secret",
                     target=tenant_id)
     try:
@@ -184,7 +186,9 @@ def rotate_secret(tenant_id: str, request: Request, identity: Dict = Depends(req
 
 
 @router.delete("/tenants/{tenant_id}")
-def delete_tenant(tenant_id: str, request: Request, identity: Dict = Depends(require_auth)):
+def delete_tenant(tenant_id: str, request: Request,
+                  identity: Dict = Depends(require_auth),
+                  body: Optional[EmptyRequestModel] = None):
     _platform_admin(request, identity, action="tenant.delete", target=tenant_id)
     try:
         deleted = tenants_svc.delete_tenant(
@@ -247,7 +251,8 @@ def set_member_role(tenant_id: str, username: str, req: MemberRequest,
 
 @router.delete("/tenants/{tenant_id}/members/{username}")
 def remove_member(tenant_id: str, username: str, request: Request,
-                  identity: Dict = Depends(require_auth)):
+                  identity: Dict = Depends(require_auth),
+                  body: Optional[EmptyRequestModel] = None):
     _tenant_member_admin(request, identity, tenant_id, action="tenant.remove_member",
                          target=f"{tenant_id}/{username}")
     _guard_platform_target(request, identity, tenant_id, username,

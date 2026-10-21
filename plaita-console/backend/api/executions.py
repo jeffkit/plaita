@@ -17,9 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 from redis import Redis
 from sse_starlette.sse import EventSourceResponse
 from starlette.routing import Route
@@ -1568,6 +1568,7 @@ async def cancel_execution(
     execution_id: str,
     request: Request,
     redis: Optional[Redis] = Depends(get_redis_or_none),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     取消/终止执行（发送取消命令到队列）
@@ -1666,6 +1667,7 @@ async def delete_execution(
         ),
     ),
     redis: Optional[Redis] = Depends(get_redis_or_none),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     删除执行记录（集群档：状态 + 索引 + 取消标志 + 事件频道 + fence/lease）
@@ -1891,6 +1893,7 @@ async def create_stream_ticket(
     execution_id: str,
     request: Request,
     redis: Redis = Depends(get_redis),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     签发 SSE 一次性连接票据（60 秒、单次使用、绑定 execution 与租户上下文）。

@@ -19,9 +19,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from ..auth import (
@@ -197,7 +197,8 @@ def switch_tenant(req: SwitchTenantRequest, request: Request,
 
 
 @router.post("/auth/logout")
-def logout(request: Request, identity: Dict = Depends(require_auth)):
+def logout(request: Request, identity: Dict = Depends(require_auth),
+           body: Optional[EmptyRequestModel] = None):
     auth_header = request.headers.get("Authorization") or ""
     token = auth_header.strip().split(None, 1)[-1]
     users_svc.logout(get_flow_store(), token)
@@ -277,7 +278,8 @@ def set_password(username: str, req: PasswordRequest, request: Request,
 
 @router.delete("/users/{username}")
 def delete_user(username: str, request: Request,
-                identity: Dict = Depends(require_auth)):
+                identity: Dict = Depends(require_auth),
+                body: Optional[EmptyRequestModel] = None):
     ensure_platform_admin(
         request, identity, action="user.delete", resource="user", target=username
     )

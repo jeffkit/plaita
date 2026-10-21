@@ -23,9 +23,9 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, model_serializer
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from plaita.core.url_redaction import (
@@ -699,6 +699,7 @@ async def get_cluster_config(
 async def reconcile_tenant_status(
     http_request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """显式触发租户状态对账（A2R31-02 恢复流程入口）。
 
@@ -771,6 +772,7 @@ async def switch_mode(
 async def refresh_instances(
     http_request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     刷新所有实例状态
@@ -876,6 +878,7 @@ async def check_infrastructure_health(
     name: str,
     http_request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     检查指定基础设施服务的健康状态
@@ -909,6 +912,7 @@ async def start_infrastructure(
     name: str,
     request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """容器化拉起基础设施（docker run/start + 健康等待）"""
     ensure_platform_admin(
@@ -926,6 +930,7 @@ async def stop_infrastructure(
     name: str,
     request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """停止基础设施容器（保留容器）"""
     ensure_platform_admin(
@@ -1059,6 +1064,7 @@ async def delete_infrastructure(
     name: str,
     request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     删除基础设施配置
@@ -1780,6 +1786,7 @@ async def remove_instance(
     instance_id: str,
     http_request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     移除一个已停止或出错的实例记录
@@ -1812,6 +1819,7 @@ async def remove_instance(
 async def clear_failed_instances(
     http_request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     清除所有失败/已停止的实例记录
@@ -2074,6 +2082,7 @@ async def delete_cluster(
     cluster_id: str,
     request: Request,
     identity: Dict = Depends(require_auth),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """
     删除集群

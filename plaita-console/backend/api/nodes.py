@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from ..services import flow_store, node_registry_svc
@@ -115,7 +115,8 @@ def register_node(req: RegisterNodeRequest, request: Request = None):
 
 
 @router.delete("/nodes/{node_type}")
-def delete_node(node_type: str, request: Request = None):
+def delete_node(node_type: str, request: Request = None,
+                body: Optional[EmptyRequestModel] = None):
     """删除本租户自定义节点描述。内置节点不可删（400）。不存在返回 404。"""
     tenant: Optional[str] = tenant_scope(request) if request is not None else None
     try:

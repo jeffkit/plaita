@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from ..services import credentials_svc
@@ -160,7 +160,8 @@ def save_credential(req: CredentialSaveRequest, request: Request = None):
 
 
 @router.delete("/credentials/{name}")
-def delete_credential(name: str, request: Request = None):
+def delete_credential(name: str, request: Request = None,
+                      body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request) if request is not None else None
     if not credentials_svc.delete_credential(name, tenant_id=tenant):
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")

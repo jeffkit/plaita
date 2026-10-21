@@ -19,9 +19,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 from redis import Redis
 
 try:
@@ -479,6 +479,7 @@ async def delete_subscription(
     subscription_id: str,
     request: Request,
     redis: Redis = Depends(get_redis),
+    body: Optional[EmptyRequestModel] = None,
 ):
     """删除事件订阅（含引擎侧的类型/关联/流程索引）。跨租户按 404 且不删除。"""
     info = _load_subscription_record(redis, subscription_id)

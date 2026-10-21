@@ -15,9 +15,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 try:
-    from ..request_models import StrictRequestModel
+    from ..request_models import EmptyRequestModel, StrictRequestModel
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
-    from request_models import StrictRequestModel  # type: ignore
+    from request_models import EmptyRequestModel, StrictRequestModel  # type: ignore
 
 try:
     from ..services import flow_store, node_registry_svc
@@ -111,7 +111,8 @@ def upsert_property_type(req: UpsertPropertyTypeRequest, request: Request = None
 
 
 @router.delete("/property-types/{name}")
-def delete_property_type(name: str, request: Request = None):
+def delete_property_type(name: str, request: Request = None,
+                         body: Optional[EmptyRequestModel] = None):
     tenant: Optional[str] = tenant_scope(request) if request is not None else None
     try:
         node_registry_svc.delete_property_type(_store(), name, tenant_id=tenant)

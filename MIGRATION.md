@@ -27,6 +27,22 @@
 - **不受影响**：`/api/executions` 的 `total`（本来就是真匹配数）；响应里的
   既有字段与排序方向。
 
+### console 无参数写端点拒绝请求体字段（A2R24-10）
+
+**口径（contract）**：没有 body 参数的写端点（`POST /api/executions/{id}/cancel`、
+`POST /api/schedules/{id}/trigger`、`POST /api/auth/logout`、
+`POST /api/tenants/{id}/rotate-secret`、各 DELETE 等）此前会静默丢弃请求体；
+现在任何字段返回 **422 `extra_forbidden`**。空体、`{}`、`null` 保持原行为。
+有字段的请求模型继续走 `extra="forbid"`；`POST /api/dispatch/one` 的
+`shadow`/`dry_run` 仍按 #262 忽略；`POST /api/copilot`（AG-UI 透传）与
+`POST /api/flowVersion/semver/detail`（form 契约）不在此口径内。
+
+- **受影响**：向上述端点发送 `{"reason": ...}`、`{"params": ...}`、
+  `{"force": true}` 等字段的脚本/客户端（这些字段本来就不生效）。
+- **迁移**：需要 `force` 的删除改用查询参数（如
+  `DELETE /api/executions/{id}?force=true`）；其余字段从请求体删除。
+- **不受影响**：无 body、`{}`、`null` 的既有调用；所有带模型端点的合法字段。
+
 ### code 节点 `subprocess` 后端拒绝非 default 租户（A42-06）
 
 **口径（contract）**：`sandbox_backend="subprocess"` 在调用方租户不是
