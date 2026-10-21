@@ -562,6 +562,12 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
 - **force DELETE 的迟到载体（r59 ⑤）**：A 通过 reservation 后才被 force
   DELETE 时，`mark_enqueued` 失败路径会 XDEL 刚写入的 target message
   （`_safe_xdel_carrier`），tombstone 仍兜底 worker 拒收；队列不残留 A 载体。
+- **park 清扫与放弃审计（r62 B108-01/02）**：park 标记
+  `{ns}:start-dedup-park:{key}` 由 console `ParkSweeper` 周期扫描（默认 30s/
+  60s 超时/100 预算；env 见 ops-runbook）；queued/缺失行超时 ⇒ 墓碑+删行+
+  清 map/token+回配额+WARNING，running/终态只删标记。worker 终态命中放弃
+  载体时递增 `worker_dedup_discarded_total` 并写
+  `plaita:execution:dedup-discard:{id}`（console 详情 `dedup_discarded`）。
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。

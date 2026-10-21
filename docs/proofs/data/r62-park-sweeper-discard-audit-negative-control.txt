@@ -1,0 +1,51 @@
+=== 负控 r62：B108-01 park sweeper + B108-02 dedup discarded 指标/审计 ===
+
+环境：隔离副本 `/tmp/r62-nc`；/tmp/r62_mutate.py 施加变异，跑指定用例后
+--restore。解释器 = 仓库 .venv/bin/python。
+
+--- 基线（修复后） ---
+  tests/unit/test_start_dedup_park_sweeper.py: 4 passed
+  console test_issue289_mark_race.py: 3 passed（含指标/审计/详情断言）
+
+--- NC A：sweeper 永不清理（超时 park 不处理） ---
+变异：`if status not in (None,"","queued")` → `if True`（总是 skip）。
+命令：pytest tests/unit/test_start_dedup_park_sweeper.py
+输出（rc=1）：2 failed, 2 passed
+（expired queued / row missing 两例未清收、配额未回笼）
+
+--- NC B：worker 终态放弃不递增 counter ---
+变异：`self._dedup_discarded_total = ... + 1` → pass。
+命令：pytest console::test_worker_terminal_hit_discards_carrier
+输出（rc=1）：1 failed
+>       assert worker._dedup_discarded_total == 1
+E       AssertionError: assert 0 == 1
+
+--- NC C：worker 终态放弃不写审计记录 ---
+变异：删除 `redis.set("plaita:execution:dedup-discard:...")` 块。
+命令：pytest console::test_worker_terminal_hit_discards_carrier
+输出（rc=1）：1 failed
+（audit key 不存在 / 执行详情无 dedup_discarded）
+
+--- NC D：sweeper 忽略超时（fresh park 被清） ---
+变异：`current - parked_at < timeout` 条件删除（只剩 not execution_id）。
+命令：pytest tests/unit/test_start_dedup_park_sweeper.py
+输出（rc=1）：1 failed
+>       assert counts["skipped"] == 1 and counts["cleaned"] == 0
+E       AssertionError: assert (0 == 1)
+
+--- 覆盖断言 ---
+B108-01：
+  - expired queued park → 写墓碑、删行、清 map/token、配额 0、标记删除、
+    metrics cleaned=1；
+  - fresh park → 不动（map/row/quota 保留）；
+  - running/completed park → 只删标记，映射/行/配额不动；
+  - row missing park → 清认领+配额+写墓碑。
+B108-02：
+  - worker._dedup_discarded_total == 1；
+  - metrics_text 含 plaita_worker_dedup_discarded_total ... 1；
+  - `plaita:execution:dedup-discard:{id}` 含 execution/carrier/dedup_key/
+    status/discarded_at；
+  - GET /api/executions/{id} 返回 dedup_discarded（reason=already_terminal）。
+
+结论：sweeper 的超时/清理/只删标记三分支与 metric/audit 均有独立负控；
+修复前分别表现为「永不清理」「计数 0」「无审计记录」「fresh 被清」。

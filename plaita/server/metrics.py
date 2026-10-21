@@ -153,6 +153,7 @@ def collect_worker_metrics(
     heartbeat_timestamp: Optional[float] = None,
     instance: Optional[str] = None,
     registered: bool = False,
+    dedup_discarded_total: int = 0,
 ) -> List[Metric]:
     """worker 自身运行态 → 指标列表。``instance`` 作为标签区分多副本。"""
     labels: Dict[str, str] = {}
@@ -168,6 +169,13 @@ def collect_worker_metrics(
             dict(labels),
             "gauge",
             "是否已注册到服务注册表（1/0）",
+        ),
+        Metric(
+            "worker_dedup_discarded_total",
+            dedup_discarded_total,
+            dict(labels),
+            "counter",
+            "start 载体命中已终态被具名放弃（ack 不执行）的累计数 B108-02",
         ),
     ]
     if heartbeat_timestamp is not None:

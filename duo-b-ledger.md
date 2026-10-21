@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十四轮，2026-10-22；任务书标称第六十三轮——台账第六十三轮已被 #289 park-retry 轮占用，按序列顺延）：**B108-01/02 收尾（基线 `c24ce3e`）**——① **park 周期清扫**：新增 `plaita/server/start_dedup_sweeper.py`，park 时写 `{ns}:start-dedup-park:{key}`（id+parked_at），console cluster lifespan 启动 `ParkSweeper`（默认 30s/超时 60s=claiming TTL/预算 100，env 可调/可关）；超时后 queued/缺失行 ⇒ 墓碑+删行+清 map/token+回配额+WARNING，running/终态只删标记；`mark_enqueued` 成功清除标记。② **discarded 独立审计**：worker 终态放弃载体递增 `_dedup_discarded_total`，`/metrics` 新 counter `worker_dedup_discarded_total`，写 `plaita:execution:dedup-discard:{id}`（7d），console 执行详情返回 `dedup_discarded`。测试 unit **4P** sweeper + console 既有 3P 追加指标/审计/详情断言；负控 A–D（永不清理/忽略超时/无 counter/无审计）实红；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1121P/13S**；`landing_gate.py ci` rc=0（`eee7b37` CI + Console E2E 绿）。
+
 > 一行摘要（第六十三轮，2026-10-22；任务书标称第六十二轮——台账第六十二轮已被 #288 reservation 轮占用，按序列顺延）：**#289 mark 失败 park-retry（基线 `39c875a`）**——`mark_enqueued` 失败不再 discard/墓碑/XDEL（carrier 可能已被 worker 消费执行）：新增 `recover_after_mark_failure`（guard→reserve→mark 原地恢复）；map 仍属本 id 且无墓碑时 **park**（保留载体/占位行/映射/配额），同 key/同 due 重试收敛原 id（console 409 in-progress + Retry-After）；只有映射换主/墓碑才清收。schedule 孤儿 row 在且无墓碑时用 `adopt_for_recovery` 同 id 恢复，不再清理换新 id。worker 消费点终态防线：载体命中的执行已 completed/error/cancelled 时具名 WARNING + `discarded=True`，ack 不执行。测试 unit **2P** + console **3P** + 既有 #288/schedule/状态机/console dedup 全绿；负控 A–C（console/schedule 回退 discard、worker 去 discarded）实红；全量 unit **8776P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1118P/13S**；`landing_gate.py ci` rc=0（`39c875a` CI + Console E2E 绿）。#289 关单回执另附。
 
 > 一行摘要（第六十二轮，2026-10-22；任务书标称第六十一轮——台账第六十一轮已被 #286/#287 状态机轮占用，按序列顺延）：**#288 schedule 接入 reservation 状态机（基线 `41085cc`）**——`fire_schedule` 在占位行后、XADD 前调用 `reserve_enqueue`（慢写跨 claiming TTL 先 guard 同 token 续期）；`_MARK_ENQUEUED_LUA` 收紧为只允许 `enqueueing→enqueued`（不变量 6 由状态机强制）；reservation/入队/mark 失败统一 discard 占位行（墓碑）+释放 claim+回滚配额（mark 失败另 XDEL）；同 due 孤儿清理后同调用重试新 id；A106-02 前端重试窗口 65s ≥ claiming TTL、superseded 入集合、超窗具名引导不换 key；后端 409 仍带 Retry-After。测试 unit **5P** + 既有 schedule/状态机 **69P** + console dedup **15P** + 前端 node **30/30**；负控 A–E 五类实红；全量 unit **8774P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1115P/13S**；`landing_gate.py ci` rc=0（`4985022` CI + Console E2E 绿）。#288 关单回执另附。
@@ -505,4 +507,37 @@
   discard/换 id；worker 终态命中必须 ack 不执行。正常/迁移/reservation
   路径不回退。
 - 单 commit 关闭 #289；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十四轮 · B108-01/02（park 周期清扫 + discarded 独立审计，2026-10-22，B1 修复席；任务书标称第六十三轮——已被 #289 轮占用，按序列顺延）
+
+- 基线：`origin/main` `c24ce3e`；落地门 `eee7b37` CI + Console E2E 绿。
+- **B108-01 park 无独立 sweeper**：park 的 queued 行/map/token/配额依赖同
+  key/同 due 重试或 worker 终态自然收敛，无人重试时无最终清收。
+  - 新增 `plaita/server/start_dedup_sweeper.py`：park 写
+    `{ns}:start-dedup-park:{key}`（id+parked_at，TTL 1h）；`mark_enqueued`
+    成功/恢复清除标记。
+  - `sweep_parks` 只扫标记，超时默认 60s（claiming TTL），预算 100/tick；
+    running/终态/映射换主只删标记；queued/缺失 ⇒ 墓碑+删行+清
+    map/owner/token+`release_tenant_start` 回配额+WARNING 审计+指标。
+  - console cluster lifespan 启动 `ParkSweeper` 线程（默认 30s），关闭时先停
+    线程；env `PLAITA_START_DEDUP_PARK_SWEEP_INTERVAL` / `..._BUDGET`；
+    `PLAITA_DISABLE_START_DEDUP_PARK_SWEEP=1` 启动 WARNING。
+- **B108-02 discarded 无独立审计**：worker 终态放弃只有 WARNING。
+  - `RedisFlowWorker._dedup_discarded_total` + `collect_worker_metrics` 新
+    counter `worker_dedup_discarded_total`（/metrics）。
+  - 写 `plaita:execution:dedup-discard:{id}`（execution/carrier/dedup_key/
+    status/reason/discarded_at，7d）；console 详情返回 `dedup_discarded`；
+    ops-runbook/flow-worker 注记。
+- 测试：`test_start_dedup_park_sweeper.py` **4P**（超时 queued 清收/墓碑/配额/
+  指标；fresh 不动；running/completed 只删标记；row missing 清认领+配额）；
+  console `test_issue289_mark_race.py` 既有 3P 追加 counter/metrics/audit key/
+  GET 详情 `dedup_discarded` 断言。既有 #288/#289/r59/schedule/console 全绿。
+- 负控：隔离副本 A–D（sweeper 永不清理 / 忽略超时 / worker 无 counter /
+  无审计键）全部实红；修复后 4P/3P 全绿。证据
+  `docs/proofs/data/r62-park-sweeper-discard-audit-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
+  subtests**（rebase 到 `eee7b37` 后复跑）；e2e+integration **287P/4S**；
+  console **1121P/13S**；`landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

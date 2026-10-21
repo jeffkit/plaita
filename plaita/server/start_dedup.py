@@ -27,6 +27,7 @@ schedule 共用；worker 侧仍只认 ``{ns}:start-dedup:{key} = execution_id``�
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
@@ -66,6 +67,56 @@ def token_key(tenant: Optional[str], dedup_key: str) -> str:
 
 def legacy_owner_key(tenant: Optional[str], dedup_key: str) -> str:
     return f"{map_key(tenant, dedup_key)}:owner"
+
+
+def park_key(tenant: Optional[str], dedup_key: str) -> str:
+    """park 标记键（B108-01 sweeper 扫描锚点）。"""
+    return f"{tenant_namespace(tenant)}:start-dedup-park:{dedup_key}"
+
+
+#: park 标记 TTL：远大于清扫超时（默认 claiming TTL），避免标记先于清扫消失。
+PARK_MARKER_TTL_SECONDS = 3600
+
+
+def mark_parked(
+    redis,
+    tenant: Optional[str],
+    dedup_key: str,
+    execution_id: str,
+    *,
+    parked_at: Optional[float] = None,
+    ttl: int = PARK_MARKER_TTL_SECONDS,
+) -> None:
+    """记录 park 时间供 sweeper 判定超时（best-effort，失败 WARNING）。"""
+    import time as _time
+
+    try:
+        redis.set(
+            park_key(tenant, dedup_key),
+            json.dumps(
+                {
+                    "id": execution_id,
+                    "parked_at": float(parked_at if parked_at is not None else _time.time()),
+                },
+                ensure_ascii=False,
+            ),
+            ex=max(1, int(ttl)),
+        )
+    except Exception as exc:  # noqa: BLE001 — 标记失败不改变 park 语义
+        logger.warning(
+            "start-dedup park 标记写入失败: %s: %s",
+            dedup_key, _scrub_url_text(exc),
+        )
+
+
+def clear_parked(redis, tenant: Optional[str], dedup_key: str) -> None:
+    try:
+        redis.delete(park_key(tenant, dedup_key))
+    except Exception as exc:  # noqa: BLE001 — 标记清理失败等 TTL
+        logger.warning(
+            "start-dedup park 标记清理失败: %s: %s",
+            dedup_key, _scrub_url_text(exc),
+        )
 
 
 def execution_row_key(tenant: Optional[str], execution_id: str) -> str:
@@ -461,7 +512,7 @@ def mark_enqueued(
 ) -> bool:
     """enqueueing/claiming → enqueued（owner CAS，绝不被旧认领者覆盖）。"""
     try:
-        return bool(
+        ok = bool(
             redis.eval(
                 _MARK_ENQUEUED_LUA,
                 4,
@@ -477,6 +528,9 @@ def mark_enqueued(
     except Exception as exc:  # noqa: BLE001
         logger.warning("start-dedup mark_enqueued 失败: %s: %s", dedup_key, _scrub_url_text(exc))
         return False
+    if ok:
+        clear_parked(redis, tenant, dedup_key)
+    return ok
 
 
 def adopt_for_recovery(

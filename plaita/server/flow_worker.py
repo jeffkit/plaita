@@ -2936,6 +2936,31 @@ class FlowWorker:
         if status in ("completed", "error", "cancelled"):
             # #289 消费点最后防线：载体命中的映射执行已终态——本载体具名
             # 放弃（消费循环随后 ack），绝不因 mark 失败后的重试再次执行。
+            # B108-02：独立指标 + 执行详情可见的审计记录（不只一条 WARNING）。
+            self._dedup_discarded_total = (
+                getattr(self, "_dedup_discarded_total", 0) + 1
+            )
+            audit_record = {
+                "execution_id": mapped_execution_id,
+                "carrier_execution_id": carrier_execution_id,
+                "dedup_key": dedup_key,
+                "status": status,
+                "reason": "already_terminal",
+                "discarded_at": datetime.now().isoformat(),
+            }
+            redis_client = getattr(self, "redis_client", None)
+            if redis_client is not None:
+                try:
+                    redis_client.set(
+                        f"plaita:execution:dedup-discard:{mapped_execution_id}",
+                        json.dumps(audit_record, ensure_ascii=False),
+                        ex=self.START_DEDUP_TTL_SECONDS,
+                    )
+                except Exception as exc:  # noqa: BLE001 — 审计旁路，仍保留 WARNING
+                    logger.warning(
+                        "start 载体放弃审计写入失败 execution=%s: %s",
+                        mapped_execution_id, _scrub_url_text(exc),
+                    )
             logger.warning(
                 "start 载体 %s 命中已终态执行 %s (%s)：具名放弃执行并 ack"
                 "（dedup_key=%s）",
@@ -4899,6 +4924,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._registry_retry_stop = threading.Event()
         # S18-02A：生命周期状态即时落盘失败计数（/metrics 可观测量）。
         self._registry_status_flush_failures = 0
+        # B108-02：start 载体命中已终态被具名放弃的累计数（prometheus counter）。
+        self._dedup_discarded_total = 0
 
         # 租约看门狗（波次② §4.1）：登记活跃 (execution_id → 租约值串/
         # FlowExecution/租户)，每 watchdog_interval_seconds（默认 TTL/3）
@@ -7661,6 +7688,9 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             heartbeat_timestamp=heartbeat,
             instance=self._resolve_consumer_name(),
             registered=service_info is not None,
+            dedup_discarded_total=getattr(
+                self, "_dedup_discarded_total", 0
+            ),
         ))
         # S18-02A：draining/stopping 立即落盘失败必须可观测（不得静默）。
         metrics.append(Metric(

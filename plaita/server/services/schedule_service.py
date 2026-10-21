@@ -628,6 +628,9 @@ def fire_schedule(
                         )
                         tombstoned = False
                     if mapped == execution_id and not tombstoned:
+                        _dedup.mark_parked(
+                            redis_client, tenant_id, dedup_key, execution_id
+                        )
                         logger.warning(
                             "调度 %s mark 失败但载体可能已被消费：park 原 id"
                             "（不 discard/不 XDEL，同 due 重试收敛）: "

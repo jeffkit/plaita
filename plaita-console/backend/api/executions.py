@@ -110,6 +110,11 @@ class ExecutionInfo(BaseModel):
     node_usage: Optional[Dict[str, Any]] = Field(
         None, description="节点级 token/成本只读投影（null=未采集/本视图未读取）"
     )
+    # B108-02：start 载体命中已终态被具名放弃的审计记录（worker 写平台根键；
+    # null = 没有发生过 dedup discard，不是「未采集」）
+    dedup_discarded: Optional[Dict[str, Any]] = Field(
+        None, description="start 载体命中已终态被放弃的审计记录（null=未发生）"
+    )
     # Langfuse 观测深链（启用观测且配了 LANGFUSE_PROJECT_ID 时非空）
     langfuse_trace_url: Optional[str] = Field(None, description="Langfuse trace 页面 URL")
 
@@ -556,6 +561,24 @@ def _clear_start_dedup_owner(
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _read_dedup_discard(
+    redis: Redis, execution_id: str
+) -> Optional[Dict[str, Any]]:
+    """B108-02：worker 写下的「载体命中已终态被放弃」审计记录。"""
+    try:
+        raw = redis.get(f"plaita:execution:dedup-discard:{execution_id}")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    text = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _execution_tombstoned(redis: Redis, execution_id: str) -> bool:
@@ -1921,6 +1944,7 @@ async def get_execution(
     try:
         data = _redact_execution_view(dict(data))
         data["langfuse_trace_url"] = obs_link.langfuse_trace_url(execution_id)
+        data["dedup_discarded"] = _read_dedup_discard(redis, execution_id)
         # plaita#37 P2：集群档详情 —— run 级 usage 来自 worker 落盘的
         # ExecutionState.usage；节点级从 context.$NODE 只读投影（列表路径不做，
         # 见 _execution_info_from_summary）。
@@ -2233,6 +2257,9 @@ async def start_execution(
             mapped = _read_start_dedup_map(redis, tenant, request.dedup_key)
             tombstoned = _execution_tombstoned(redis, execution_id)
             if mapped == execution_id and not tombstoned:
+                _dedup.mark_parked(
+                    redis, tenant, request.dedup_key, execution_id
+                )
                 logger.warning(
                     "start mark 失败但载体可能已被消费：park 原 id（不 discard/"
                     "不 XDEL，同 key 重试收敛）: dedup_key=%s execution=%s",

@@ -788,6 +788,16 @@ redis-cli KEYS 'plaita:execution:lease:*'
   且无墓碑时 park，同 key/同 due 重试收敛原 id（409 in-progress 引导）。worker
   消费点另有终态防线：载体命中的执行已 completed/error/cancelled 时具名放弃并
   ack，不再执行。
+- **park 周期清扫（B108-01）**：console 集群档启动 `ParkSweeper`，默认每 30s
+  扫一次 park 标记，超时默认 60s（与 claiming TTL 同源），预算 100 标记/tick；
+  行 queued/缺失 ⇒ 写墓碑、删行、清 map/owner/token、回收配额并 WARNING 审计；
+  running/终态只删标记（执行已接管）。env：`PLAITA_START_DEDUP_PARK_SWEEP_INTERVAL`
+  / `PLAITA_START_DEDUP_PARK_SWEEP_BUDGET`；`PLAITA_DISABLE_START_DEDUP_PARK_SWEEP=1`
+  关闭时启动 WARNING（依赖同 key 重试/人工）。
+- **dedup 放弃审计（B108-02）**：worker 终态命中放弃载体时
+  `plaita_worker_dedup_discarded_total` 计数器递增，并写
+  `plaita:execution:dedup-discard:{execution_id}`（7d）；console 执行详情返回
+  `dedup_discarded` 字段（carrier/dedup_key/status/discarded_at）。
 - **force DELETE**：guard/reservation 后、`mark_enqueued` 前被删除的 start
   载体由失败路径 XDEL 清收（避免队列残留 tombstone 载体）；执行墓碑仍是
   worker 侧最终防线。

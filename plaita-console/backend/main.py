@@ -427,6 +427,26 @@ async def lifespan(app: FastAPI):
             "（在租户管理页创建/轮换），全局密钥路径不可用"
         )
 
+    # B108-01：start-dedup park 周期清扫（轻量 janitor；仅集群档有 Redis）。
+    if not local_mode and redis_client is not None:
+        try:
+            from plaita.server.start_dedup_sweeper import (
+                ParkSweeper,
+                park_sweep_disabled,
+            )
+
+            if park_sweep_disabled():
+                logger.warning(
+                    "PLAITA_DISABLE_START_DEDUP_PARK_SWEEP=1：park 超时不再自动"
+                    "清收（队列/映射/配额依赖人工或同 key 重试；B108-01）"
+                )
+            else:
+                sweeper = ParkSweeper(redis_client)
+                sweeper.start()
+                app.state.park_sweeper = sweeper
+        except Exception as exc:  # noqa: BLE001 — 清扫不阻断启动，但必须 loud
+            logger.warning("start-dedup park 清扫启动失败（不阻断启动）: %s", exc)
+
     yield
     
     # A48-01：先停本地调度线程，再断开数据面/存储——线程不得在收尾期间继续
@@ -436,6 +456,15 @@ async def lifespan(app: FastAPI):
     except ImportError:
         from services import local_scheduler  # type: ignore
     local_scheduler.stop_scheduler_loop()
+
+    # B108-01：先停 park 清扫线程，再断 Redis。
+    park_sweeper = getattr(app.state, "park_sweeper", None)
+    if park_sweeper is not None:
+        try:
+            park_sweeper.stop()
+        except Exception as exc:  # noqa: BLE001 — 收尾失败只 WARNING
+            logger.warning("start-dedup park 清扫停止失败: %s", exc)
+        app.state.park_sweeper = None
 
     # A2R31-02：先停周期对账线程，再断 Redis（线程不得在收尾期间回写）。
     stop_event = getattr(app.state, "tenant_status_reconcile_stop", None)

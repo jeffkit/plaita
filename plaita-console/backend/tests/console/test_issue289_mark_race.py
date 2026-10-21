@@ -224,7 +224,7 @@ def test_worker_terminal_hit_discards_carrier(env):
         a_id,
         ExecutionState(
             execution_id=a_id, flow_id="f1", status="completed",
-            context={"$LAST_NODE": "e"},
+            context={"$LAST_NODE": "e"}, tenant_id=DEFAULT_TENANT_ID,
         ),
     )
     worker = RedisFlowWorker(
@@ -246,3 +246,23 @@ def test_worker_terminal_hit_discards_carrier(env):
     assert out["already_terminal"] is True
     assert out["discarded"] is True
     assert out["execution_id"] == a_id
+
+    # B108-02：独立计数器 + 审计记录（执行详情可见）。
+    assert worker._dedup_discarded_total == 1
+    metrics_text = worker.metrics_text()
+    assert "plaita_worker_dedup_discarded_total" in metrics_text
+    assert "} 1" in metrics_text.split("plaita_worker_dedup_discarded_total", 1)[1]
+    audit = json.loads(
+        env.get(f"plaita:execution:dedup-discard:{a_id}")
+    )
+    assert audit["execution_id"] == a_id
+    assert audit["carrier_execution_id"] == "b" * 32
+    assert audit["dedup_key"] == "k"
+    assert audit["status"] == "completed"
+
+    got = _client(env).get(
+        f"/api/executions/{a_id}", headers={"X-Admin-API-Key": ADMIN_KEY}
+    )
+    assert got.status_code == 200, got.text
+    assert got.json()["dedup_discarded"]["reason"] == "already_terminal"
+    assert got.json()["dedup_discarded"]["carrier_execution_id"] == "b" * 32
