@@ -89,7 +89,8 @@ d = json.load(sys.stdin)
 ex = d.get('executions') or []
 sts = [e.get('status', '') for e in ex]
 bad = [s for s in sts if s != 'queued']
-print(f"{len(sts)}\x1f{'/'.join(sts) if sts else 'none'}\x1f{len(bad)}")
+joined = '/'.join(sts) if sts else 'none'
+print(str(len(sts)) + '\x1f' + joined + '\x1f' + str(len(bad)))
 " 2>/dev/null)
 N=$(echo "$WR" | cut -d$'\x1f' -f1)
 STS=$(echo "$WR" | cut -d$'\x1f' -f2)
