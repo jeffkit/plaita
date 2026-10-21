@@ -435,6 +435,32 @@ worker 的流程定义 TTLCache 有 300s 窗口、console engine_sync 可直接�
 **运维含义**：改定义前应确认没有 running/suspended 的在途执行（console 按
 flow_id 查询非终态执行）；确需强升时接受在途执行被终态化 error、由上游重提。
 
+## start 受理窗口：queued 占位状态行（plaita#273，2026-10 二十一波） {#start-queued-占位行}
+
+console 队列档 `POST /executions` 在入队**之前**同步落一条 `status=queued`
+的占位状态行（经 `RedisExecutionStorage.save_execution_state` 写：索引成员
+同 pipeline 维护、非终态不设 TTL、`invoker=console`、`context={}`）。从 POST
+返回到 worker 消费落 running 行之间——worker 停机/积压/滚动升级时可达分钟
+到小时——该 id 立即可 `GET /api/executions/{id}`（200/queued）、出现在列表
+与状态过滤里，且可取消：
+
+- **取消**（`POST .../cancel`）：先写取消标志键（覆盖「console 置终态与
+  worker 消费落 running」竞窗——标志在位时 worker 的 start 入口检查仍会
+  终态化 cancelled），再投 cancel 消息，最后以 CAS（仅当行仍是 `queued`）
+  原子换入 Python 构造的 cancelled 行并**立即释放租户 start 配额**（不等
+  条目 TTL 自愈）。CAS 输了说明 worker 恰好接管（running），走运行中执行的
+  标志+消息既有路径。CAS 行体由 Python `json.dumps` 构造，**不经 Lua cjson
+  回写**（cjson 把空表编成 `[]`，会篡改 `context:{}` 形状使 GET 侧 500）。
+- **worker 接管**：占位行 context 为空，worker 侧 `_existing_start_checkpoint`
+  对「非终态且空 checkpoint」返回 None（按首投处理）——消费时在租约内以
+  running 行覆盖接管，占位行不会把 start 载体误转成 resume。worker 在
+  start 入口命中取消标志则终态化 cancelled（既有语义），不执行首节点；
+  终态释放配额走 `_persist_state_or_raise` 既有收口（幂等，与 console 侧
+  释放互不冲突）。
+- 占位行落盘失败 → POST 5xx、不入队、配额回滚（不带病返回 200）；入队失败
+  → 配额回滚 + 占位行清理（清理失败留 ERROR 可观测）。
+- 与幂等键的协同见下一节：同 `dedup_key` 重试收敛到同一 id（含同一占位行）。
+
 ## start 幂等键 dedup_key（2026-10 二波） {#start-幂等键}
 
 start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_id 从头重跑，
@@ -453,6 +479,20 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
   G1 先行落行后该窗口已收窄到极小；命中 running 的重入队 resume 对
   context={} 的先行行同样正确（无 last_node_id → 从首节点步进）；
   重入队的 resume 若与原 start 持有者并发，由执行租约串行化（#23）；
+- **生产侧预认领（plaita#274，2026-10 二十一波）**：console `POST /executions`
+  在铸造 id 后、入队前以**同一把键**（`{ns}:start-dedup:{key}`，键形状/TTL
+  单源 `task_queue.start_dedup_map_key` / `START_DEDUP_TTL_SECONDS`）`SET NX`
+  认领；命中即直接返回**既有** execution_id（同键必同 id——响应丢失后的幂等
+  重试不再拿到幽灵 id），不入队、不占租户 start 配额；映射指向的执行行已被
+  force 删除（墓碑在位，worker 拒绝重建旧 id）→ console 释放孤儿映射后按新
+  id 全新提交。worker 消费侧对「映射值==载体 id」的**自命中**按认领成功继续
+  （预认领归属的就是这条逻辑 start；at-least-once 重投同形）——重投安全由
+  preminted 载体转换（#234）与 start 入口取消检查兜底；映射值≠载体 id 仍走
+  hit 分支绝不二次 start。键形状/TTL 漂移即「同键必同 id」失效，两侧必须
+  引用同一单源。**升级纪律（先升消费者）**：预认领映射落盘后，旧 worker
+  （无自命中分支）消费带 dedup_key 的载体会按 hit 回报现状而不启动——
+  **必须先升 worker 池、后升 console**（与 schema_version 升级同一纪律；
+  无 dedup_key 的载体与 queued 占位行对新旧 worker 均按首投处理，不受影响）；
 - **不传 `dedup_key` 则行为与存量完全一致**；键必须调用方显式提供，worker
   不做 body hash 自动键——同参数定时任务（cron 每小时跑同一 flow）会被误判
   为重复启动而永不执行。键按租户隔离，7 天过期。
