@@ -58,7 +58,16 @@ python -m plaita_console              # 或使用 plaita-console 命令
 403 + 审计），平台身份默认全量。租户 admin 只能经
 `/api/tenants/{tid}/members/*` 管理**本租户**成员，且不能操作平台管理员
 账号。任何已认证角色都可以修改**自己**的密码。租户 admin 的
-`GET /api/users` 只返回本租户成员。
+`GET /api/users` 只返回本租户成员，且每个成员的 `memberships` 只含**本租户**
+的成员关系——同时属于多租户的用户不会把他租户的 (租户, 角色) 带进来
+（A2R45-03）。
+
+`POST /api/flows/{id}/supervisor/iterate`（#290）是写路径（会落候选草稿）：
+入口先按调用方租户校验 flow 归属，跨租户 / 不存在一律 404（与
+`GET /api/flows/{id}` 同口径，不可区分）；Supervisor 的回环客户端以平台 key
+**钉在调用方租户**（每个回环请求带 `X-Tenant-ID`），基线评测、dry-run 与
+候选草稿全部落在调用方租户，不再「读全量、写 default」。平台身份跨租户
+迭代须显式带 `X-Tenant-ID`；会话型平台管理员的全量视角是只读的（403）。
 
 `POST /api/dispatch/one` 的 `shadow` / `dry_run` / `tenant_id` 是服务端
 权威字段（#262）：`shadow` 只取 `PLAITA_CONSOLE_DISPATCH_SHADOW`（请求体

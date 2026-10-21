@@ -8,18 +8,22 @@
   子目录/JSON 文件即一个评测集。
 - **promote 永远由人**：本 API 只跑迭代并返回 promotion ticket；发布复用
   既有 `POST /api/flows/{id}/publish`（前端 publishFlow），审计走既有链路。
+- **多租户边界（plaita#290）**：iterate 入口先按调用方租户解析 flow 归属——
+  跨租户 / 不存在一律 404（与 `GET /api/flows/{id}` 同口径，不暴露存在性）；
+  回环客户端以平台 key **钉在调用方租户**（`X-Tenant-ID`），基线评测、候选
+  草稿、dry-run 全部落在调用方租户，不再「读全量、写 default」。平台身份
+  跨租户须显式带 `X-Tenant-ID`；会话型平台管理员全量视角是只读的（403）。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
     from ..error_contract import error_detail, scrubbed_detail
@@ -27,6 +31,13 @@ try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
 except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
     from error_contract import error_detail, scrubbed_detail  # type: ignore
     from request_models import StrictRequestModel  # type: ignore
+
+try:  # plaita#290：flow 归属校验 + 回环租户
+    from ..auth import tenant_scope
+    from ..services import flow_store
+except ImportError:
+    from auth import tenant_scope  # type: ignore
+    from services import flow_store  # type: ignore
 
 logger = logging.getLogger("api.supervisor")
 
@@ -80,8 +91,15 @@ def _load_plaita_ai():
     return load_dataset, FlowSourceProposer, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
 
 
-def _local_client(request: Request):
-    """以 backend 自己的身份（admin key）构造 console 客户端——同进程回环。"""
+def _local_client(request: Request, tenant_id: str):
+    """以 backend 自己的身份（admin key）构造 console 客户端——同进程回环。
+
+    plaita#290：平台 key 是全量视角凭证，回环必须**钉在调用方租户**
+    （``ConsoleConfig.tenant_id`` → 每个请求带 ``X-Tenant-ID``），否则
+    Supervisor 的 get_flow / dry-run 读到别租户、save_version 落 default。
+    二选一里取「平台 key + 租户头」而非「转发调用方凭据」：对会话与 API-Key
+    两类调用方同构，且保留既有「未配 admin key 即 503」契约。
+    """
     from plaita_ai.console_client import ConsoleClient, ConsoleConfig
 
     if not os.getenv("PLAITA_CONSOLE_ADMIN_API_KEY"):
@@ -93,8 +111,27 @@ def _local_client(request: Request):
         base_url=str(request.base_url).rstrip("/"),
         api_prefix="/api",
         admin_api_key=os.getenv("PLAITA_CONSOLE_ADMIN_API_KEY", ""),
+        tenant_id=tenant_id,
     )
     return ConsoleClient(config)
+
+
+def _require_owned_flow(request: Request, flow_id: str) -> str:
+    """解析调用方租户并校验 flow 归属（plaita#290）；返回生效租户。
+
+    iterate 会落候选草稿，按**写路径**取租户（``required=True``）：会话型平台
+    管理员全量视角 403（只读，A2R17-01）；无状态平台凭证不带 ``X-Tenant-ID``
+    沿契约落 default。归属查无即 404，文案与 ``GET /api/flows/{id}`` 一致——
+    「不存在」与「他租户存在」对外不可区分（不做存在性 oracle）。
+    """
+    tenant = tenant_scope(request, required=True)
+    if flow_store.get_flow_store().get_flow_record(flow_id, tenant_id=tenant) is None:
+        logger.warning(
+            "拒绝 supervisor iterate：flow 不在调用方租户（flow=%s 租户=%s）",
+            flow_id, tenant,
+        )
+        raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
+    return tenant
 
 
 @router.get("/flows/{flow_id}/supervisor/datasets")
@@ -128,6 +165,9 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
             status_code=400,
             detail=f"未知 proposer: {req.proposer!r}（可选 flow | prompt | static）",
         )
+    # plaita#290：归属校验先于一切回环——跨租户 / 不存在的 flow 到此即止，
+    # 不加载 plaita-ai、不解析数据集、不构造回环客户端。
+    tenant = _require_owned_flow(request, flow_id)
     load_dataset, FlowSourceProposer, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy = (
         _load_plaita_ai()
     )
@@ -156,7 +196,7 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
         ) from exc
 
     supervisor = Supervisor(
-        _local_client(request),
+        _local_client(request, tenant_id=tenant),
         policy=SupervisorPolicy(promote_gate="manual", max_iterations=req.max_iterations),
         proposer=proposer,
     )
@@ -171,6 +211,7 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
             ),
         ) from exc
     # A55-S1：自迭代审计（flow_id/dataset；不记数据集内容与提案正文）。
+    # 租户记**生效租户**（plaita#290）：与回环写入候选草稿的租户同值。
     try:
         from ..services import audit as audit_svc
     except ImportError:
@@ -186,7 +227,7 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
             "max_iterations": req.max_iterations,
             "proposer": req.proposer,
         },
-        tenant_id=getattr(request.state, "tenant_id", "") or "",
+        tenant_id=tenant,
     )
     return result
 

@@ -68,6 +68,7 @@ class _RecordingSupervisor:
 @pytest.fixture()
 def client(tmp_path, monkeypatch) -> TestClient:
     from api import supervisor as supervisor_api
+    from services import flow_store
 
     ds_root = tmp_path / "datasets"
     ds_root.mkdir()
@@ -81,6 +82,12 @@ def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.delenv("PLAITA_AI_PROPOSER_BASE_URL", raising=False)
     monkeypatch.delenv("PLAITA_AI_PROPOSER_MODEL", raising=False)
     monkeypatch.delenv("PLAITA_AI_PROPOSER_API_KEY", raising=False)
+    # plaita#290：iterate 入口先校验 flow 归属——裸挂载（无 require_auth）按
+    # 单租户时代直调口径落 default，flow 须真实存在于 default 租户。
+    monkeypatch.setenv("PLAITA_CONSOLE_DB_URL", f"sqlite:///{tmp_path}/supervisor.db")
+    flow_store.init_engine(f"sqlite:///{tmp_path}/supervisor.db")
+    flow_store.ensure_tenant_bootstrap()
+    flow_store.get_flow_store().create_flow("demo-flow", tenant_id="default")
 
     app = FastAPI()
     app.include_router(supervisor_api.router, prefix="/api")

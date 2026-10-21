@@ -15,9 +15,10 @@ console 的 logs/queues 读面此前用 ``redis.keys()`` 做全库遍历。Redis
 * **可见**：触界记一条 warning（pattern 经 ``_scrub_url_text`` 清洗），不静默
   吞掉「结果不完整」这一事实。
 
-语义与 ``api/events.py`` 里的 ``_scan_keys`` 一致（游标循环直到 0，键统一
-解码为 ``str``），只是加了上限。``SCAN`` 允许重复返回同一个键，这里按首次
-出现去重（与 ``KEYS`` 的结果集一致）。
+语义与 ``api/events.py`` 此前自带的 ``_scan_keys`` 一致（游标循环直到 0，键统一
+解码为 ``str``），只是加了上限；A2R45-04 起 events 两个列表读面也改走本函数，
+console 的键枚举单源于此。``SCAN`` 允许重复返回同一个键，这里按首次出现去重
+（与 ``KEYS`` 的结果集一致）。
 """
 from __future__ import annotations
 
