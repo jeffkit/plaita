@@ -10,17 +10,18 @@
 ``_MAPPING_VIEW_PROBE_FAILED_TEMPLATE``），但先经过路径遍历就漏——本文件钉住这条
 缺口已关：
 
-1. **动态**（:class:`TestIssue163TraversalProbeIsNamed`）：``$F.keys($INPUT.d)`` 与
-   ``$INPUT.d`` 在宿主 ``__class__`` 抛异常时得到**具名** ``ValueError``
-   （消息含 ``plaita#69``），绝不漏裸 ``RuntimeError``；``_get_attr`` 那一跳
-   （``$INPUT.d.x``）同样具名。
+1. **动态**（:class:`TestIssue163TraversalProbeIsNamed`）：宿主探测仍具名——
+   ``$F.keys($INPUT.d)`` 在宿主 ``__class__`` 抛异常时经 #68 渲染守卫得到**具名**
+   ``ValueError``（消息含真实类名），绝不漏裸 ``RuntimeError``；``_get_attr``
+   那一跳（``$INPUT.d.x``）同样具名。#268 摘除嵌套求值后，``$INPUT.d`` 的
+   ``isinstance(attr, str)`` 探针随闸移除——该跳不再探测（值是数据，原样返回，
+   结构上不存在裸异常面）。
 2. **负控**（:class:`TestIssue163TraversalSemanticsUnchanged`）：普通 dict/str 的
-   路径遍历、INPUT 缺键的静默 None、嵌套表达式串的递归、``$F.keys`` 读真实存储，
-   行为逐字不变；判据本身（含 ``__class__`` 伪造的既有语义）没有被换成
-   ``type()`` 精确判据。
-3. **源码级**（:class:`TestIssue163ProbeSitesAreWrapped`）：遍历里那几处探测都走
-   :func:`plaita.core.expression_parser._probe_isinstance`；变异（还原成裸
-   ``isinstance``）由普通 ``FAILED`` 行杀死（见 RED-PROOF.md 的变异记录）。
+   路径遍历、INPUT 缺键的静默 None、运行期字符串按数据原样返回、``$F.keys`` 读
+   真实存储，行为逐字不变；判据本身（含 ``__class__`` 伪造的既有语义）没有被
+   换成 ``type()`` 精确判据。
+3. **源码级**（:class:`TestIssue163ProbeSitesAreWrapped`）：遍历里存留的探测都走
+   :func:`plaita.core.expression_parser._probe_isinstance`（防漂移）。
 """
 from __future__ import annotations
 
@@ -94,11 +95,11 @@ class TestIssue163TraversalProbeIsNamed(unittest.TestCase):
     """路径遍历的探测失败 ⇒ 具名 ``plaita#69`` 拒绝，不是裸异常。"""
 
     def test_dsl_keys_on_raising_class_host_is_named(self):
-        """``$F.keys($INPUT.d)``：宿主 ``__class__`` 抛异常 ⇒ 具名拒绝。
+        """``$F.keys($INPUT.d)``：宿主 ``__class__`` 抛异常 ⇒ 具名拒绝（#68 渲染守卫）。
 
-        pre（`87b8ad0`）实测：``RuntimeError: host refuses __class__``，
-        消息里没有 ``plaita#69``（裸异常）。断言**类型 + 前缀 + 真实类名**三件，
-        并显式排除裸 ``RuntimeError``——这正是 #163 的验收判据 2。
+        #268 摘除嵌套求值后，遍历不再对该跳探测；宿主经 ``$F.keys`` 进入函数侧，
+        由 #68 的渲染规模守卫具名拒绝——仍是 ``ValueError``、消息带真实类名、
+        不回显宿主文本、绝不漏裸 ``RuntimeError``（#163 的验收判据保持成立）。
         """
         raised, _ctx = _dsl("$F.keys($INPUT.d)")
         self.assertIsNotNone(raised, "宿主 __class__ 抛异常时必须拒绝，不得静默通过")
@@ -107,22 +108,22 @@ class TestIssue163TraversalProbeIsNamed(unittest.TestCase):
             f"漏了裸 RuntimeError（#163 的原始缺口）：{raised!r}",
         )
         self.assertIsInstance(raised, ValueError)
-        message = str(raised)
-        self.assertIn("plaita#69", message)
-        self.assertIn("RaisingClassHost", message, "归因要用真实类名（type() 读 C 槽）")
-        self.assertIn("isinstance(str)", message, "要点明是哪一跳的探测")
+        self.assertIn("RaisingClassHost", str(raised), "归因要用真实类名（type() 读 C 槽）")
         # 刻意不回显宿主异常的文本（宿主可控，可能带内部状态/凭据）
-        self.assertNotIn("host refuses __class__", message)
+        self.assertNotIn("host refuses __class__", str(raised))
 
-    def test_bare_traversal_of_raising_host_is_named(self):
-        """最短复现：``$INPUT.d`` 本身就经过 ``isinstance(attr, str)``。"""
+    def test_bare_traversal_returns_host_verbatim_without_probe(self):
+        """最短复现：``$INPUT.d`` 在 #268 后不再探测——值是数据，原样返回。
+
+        旧闸的 ``isinstance(attr, str)`` 探针已随嵌套求值移除，宿主 ``__class__``
+        抛异常的裸异常面**结构性消失**（没有探测就没有探测失败）。
+        """
         with freshness_scope():
             ctx = _alias_context()
             ctx.set_state("$INPUT", {"d": RaisingClassHost({"a": 1})})
-            with self.assertRaises(ValueError) as cm:
-                ctx.evaluate("$INPUT.d")
-        self.assertIn("plaita#69", str(cm.exception))
-        self.assertNotIsInstance(cm.exception, RuntimeError)
+            value = ctx.evaluate("$INPUT.d")
+        self.assertIsInstance(value, RaisingClassHost)
+        self.assertIs(value, ctx.get_state("$INPUT")["d"])
 
     def test_get_attr_probe_on_raising_host_is_named(self):
         """``_get_attr`` 的 ``isinstance(obj, dict)`` 那一跳同样具名。
@@ -191,10 +192,11 @@ class TestIssue163TraversalSemanticsUnchanged(unittest.TestCase):
         """``$INPUT.<缺键>`` 的静默 ``None`` 是历史语义（探测不得把它变成拒绝）。"""
         self.assertIsNone(self._evaluate({"d": {"a": 1}}, "$INPUT.nope"))
 
-    def test_nested_expression_string_still_recurses(self):
-        """字符串属性值仍会被当嵌套表达式串递归求值（#104 的既有语义）。"""
+    def test_nested_expression_string_stays_data(self):
+        """#268：字符串属性值是数据——原样返回，不再递归求值（#104 语义终结）。"""
         self.assertEqual(
-            self._evaluate({"d": {"a": "{% $F.add(1, 2) %}"}}, "$INPUT.d.a"), "3"
+            self._evaluate({"d": {"a": "{% $F.add(1, 2) %}"}}, "$INPUT.d.a"),
+            "{% $F.add(1, 2) %}",
         )
 
     def test_data_text_is_still_returned_as_is(self):
@@ -240,9 +242,6 @@ class TestIssue163TraversalSemanticsUnchanged(unittest.TestCase):
 class TestIssue163ProbeSitesAreWrapped(unittest.TestCase):
     """源码级：路径遍历里的探测都走 ``_probe_isinstance``（防漂移）。"""
 
-    #: 变异目标：把这一处还原成裸 ``isinstance`` 即复现 #163（见 RED-PROOF.md）。
-    MUTATION_OLD = '_probe_isinstance(attr, str, kind_name="str", path=raw)'
-    MUTATION_NEW = "isinstance(attr, str)"
 
     def setUp(self):
         self.source = (ROOT / "plaita" / "core" / "expression_parser.py").read_text(
@@ -252,16 +251,10 @@ class TestIssue163ProbeSitesAreWrapped(unittest.TestCase):
     def test_traversal_probe_sites_are_wrapped(self):
         for needle in (
             '_probe_isinstance(obj, dict, kind_name="dict", path=raw)',
-            '_probe_isinstance(attr, str, kind_name="str", path=raw)',
             '_probe_isinstance(obj, dict, kind_name="dict", path=path)',
         ):
             with self.subTest(needle=needle):
                 self.assertEqual(self.source.count(needle), 1, "探测点缺失或重复")
-
-    def test_mutation_target_is_unique(self):
-        """变异串在源码里**唯一**（``old`` 唯一 ⇒ 重放脚本不会打歪）。"""
-        self.assertEqual(self.source.count(self.MUTATION_OLD), 1)
-        self.assertEqual(self.source.count(self.MUTATION_NEW), 0)
 
     def test_no_bare_isinstance_on_the_traversal_probe_shapes(self):
         """遍历里不再有裸 ``isinstance(obj, dict)`` / ``isinstance(attr, str)``。"""

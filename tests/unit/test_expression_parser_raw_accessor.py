@@ -28,11 +28,12 @@ TEMPLATE = "{% $F.eq(1,1) %}"
 
 
 def test_raw_returns_stored_string_verbatim():
-    """#130 验收①：`raw` 取回原文；非 raw 路径仍是文档化的 `"True"`。"""
+    """#130 验收①（#268 后 raw 与非 raw 同语义）：两者都取回原文——运行期
+    字符串是数据，不再有「非 raw 静默求值成 True」的分裂。"""
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"llm": {"text": TEMPLATE}}}
     assert parser.evaluate("$NODE.raw.llm.text", context) == TEMPLATE
-    assert parser.evaluate("$NODE.llm.text", context) == "True"
+    assert parser.evaluate("$NODE.llm.text", context) == TEMPLATE
 
 
 def test_raw_also_holds_for_side_effect_free_templates_like_now():
@@ -40,14 +41,16 @@ def test_raw_also_holds_for_side_effect_free_templates_like_now():
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"llm": {"text": "{% $F.now() %}"}}}
     assert parser.evaluate("$NODE.raw.llm.text", context) == "{% $F.now() %}"
-    assert parser.evaluate("$NODE.llm.text", context) != "{% $F.now() %}"
+    assert parser.evaluate("$NODE.llm.text", context) == "{% $F.now() %}"
 
 
 def test_mandated_regression_still_green_and_raw_shows_the_template():
-    """#104 强制回归：`{% $F.concat('hello ', 'world') %}` 非 raw 仍求值。"""
+    """#104 强制回归（#268 后两侧同语义）：模板串原样返回，raw 与非 raw 一致。"""
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"a": {"greeting": "{% $F.concat('hello ', 'world') %}"}}}
-    assert parser.evaluate("$NODE.a.greeting", context) == "hello world"
+    assert parser.evaluate("$NODE.a.greeting", context) == (
+        "{% $F.concat('hello ', 'world') %}"
+    )
     assert parser.evaluate("$NODE.raw.a.greeting", context) == (
         "{% $F.concat('hello ', 'world') %}"
     )
@@ -64,11 +67,11 @@ def test_raw_whole_node_result_is_returned_as_stored():
 
 
 def test_raw_whole_node_result_when_node_result_is_a_string():
-    """节点结果本身就是模板字符串时，raw 与默认路径的差别最直观。"""
+    """节点结果本身就是模板字符串：#268 后 raw 与非 raw 同为原样（数据）。"""
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"llm": TEMPLATE}}
     assert parser.evaluate("$NODE.raw.llm", context) == TEMPLATE
-    assert parser.evaluate("$NODE.llm", context) == "True"
+    assert parser.evaluate("$NODE.llm", context) == TEMPLATE
 
 
 def test_raw_propagates_through_deep_path():
@@ -76,22 +79,17 @@ def test_raw_propagates_through_deep_path():
     context = {"$NODE": {"job": {"out": {"a": {"b": TEMPLATE}}}}}
     assert parser.evaluate("$NODE.raw.job.out", context) == {"a": {"b": TEMPLATE}}
     assert parser.evaluate("$NODE.raw.job.out.a.b", context) == TEMPLATE
-    assert parser.evaluate("$NODE.job.out.a.b", context) == "True"
+    assert parser.evaluate("$NODE.job.out.a.b", context) == TEMPLATE
 
 
-def test_raw_bypasses_recursion_at_intermediate_segments():
-    """中间段是"父容器兜得住"的嵌套表达式时，默认路径会递归后继续走；raw 不递归。
-
-    `$NODE.a.ref` 的父容器自带 `$INPUT`，所以方案 A 允许递归：中间段 `ref` 本身
-    就被求值成 `{"t": "deep"}`，`.t` 再作用其上。raw 模式下 `ref` 仍是原串——
-    判别力来自 `$NODE.raw.a.ref`（base 上为 `None`），而不是 `.t` 的 `None`。
-    """
+def test_intermediate_segments_no_longer_recurse():
+    """#268：中间段的嵌套表达式串（父容器带 $INPUT 的旧"可递归"形态）也原样
+    返回——读法不再改变语义，raw 与非 raw 完全一致。"""
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"a": {"ref": "$INPUT.sub", "$INPUT": {"sub": {"t": "deep"}}}}}
-    # 非 raw：中间段被求值
-    assert parser.evaluate("$NODE.a.ref", context) == {"t": "deep"}
-    assert parser.evaluate("$NODE.a.ref.t", context) == "deep"
-    # raw：中间段不求值 ⇒ 取回原串；`.t` 自然取不到
+    assert parser.evaluate("$NODE.a.ref", context) == "$INPUT.sub"
+    # 字符串是标量：后续字段段取 None（raw 与非 raw 同）
+    assert parser.evaluate("$NODE.a.ref.t", context) is None
     assert parser.evaluate("$NODE.raw.a.ref", context) == "$INPUT.sub"
     assert parser.evaluate("$NODE.raw.a.ref.t", context) is None
 
@@ -148,13 +146,11 @@ def test_missing_node_root_keeps_identical_keyerror_for_both_forms():
     assert "'$NODE' not found in expression context" in plain.value.args[0]
 
 
-def test_raw_bypasses_the_nested_attribution_keyerror():
-    """非 raw 对未知根 `$CUSTOM` 抛归因 KeyError；raw 只取原文，不抛也不新增诊断。"""
+def test_nested_attribution_keyerror_is_gone():
+    """#268：对未知根 `$CUSTOM` 的嵌套串不再抛归因 KeyError——数据文本原样。"""
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"llm": {"text": "{% $CUSTOM.thing %}"}}, "$CUSTOM": {"thing": 1}}
-    with pytest.raises(KeyError) as excinfo:
-        parser.evaluate("$NODE.llm.text", context)
-    assert "$NODE.llm.text" in excinfo.value.args[0]
+    assert parser.evaluate("$NODE.llm.text", context) == "{% $CUSTOM.thing %}"
     assert parser.evaluate("$NODE.raw.llm.text", context) == "{% $CUSTOM.thing %}"
 
 
@@ -167,13 +163,13 @@ def test_node_named_raw_wins_and_warns_once_per_string(monkeypatch, caplog):
     parser = ExpressionParser.for_prefix("$")
     context = {"$NODE": {"raw": {"x": TEMPLATE, "y": "{% $F.eq(2,2) %}"}}}
     with caplog.at_level(logging.WARNING, logger="plaita"):
-        # 同一个字符串求值两次：只告警一次
-        assert parser.evaluate("$NODE.raw.x", context) == "True"
-        assert parser.evaluate("$NODE.raw.x", context) == "True"
+        # 同一个字符串读两次：只告警一次（#268 后读到的都是数据原串）
+        assert parser.evaluate("$NODE.raw.x", context) == TEMPLATE
+        assert parser.evaluate("$NODE.raw.x", context) == TEMPLATE
         # 裸 `$NODE.raw`（无后续字段段）就是节点本身，不构成访问器冲突
         assert parser.evaluate("$NODE.raw", context) == {"x": TEMPLATE, "y": "{% $F.eq(2,2) %}"}
         # 另一个字符串：各自告警一次
-        assert parser.evaluate("$NODE.raw.y", context) == "True"
+        assert parser.evaluate("$NODE.raw.y", context) == "{% $F.eq(2,2) %}"
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
     # 全文案断言（与 #104 对其新增 DEBUG 轨迹的做法一致）：文案本身就是"冲突不可
@@ -236,7 +232,7 @@ def test_runtime_window_node_raw_declared_but_not_yet_produced(monkeypatch, capl
                 "other": {"text": TEMPLATE},
             }
         }
-        assert parser.evaluate("$NODE.raw.other.text", produced) == "True"
+        assert parser.evaluate("$NODE.raw.other.text", produced) == TEMPLATE
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].startswith("expression $NODE.raw.other.text: ")
@@ -273,7 +269,7 @@ def test_raw_is_not_a_modifier_outside_the_node_root(root):
     """`raw` 只在 `$NODE` 后有修饰符含义；其他根的同名键照旧。"""
     parser = ExpressionParser.for_prefix("$")
     context = {root: {"raw": {"text": TEMPLATE}}}
-    assert parser.evaluate(f"{root}.raw.text", context) == "True"
+    assert parser.evaluate(f"{root}.raw.text", context) == TEMPLATE
 
 
 def test_raw_accessor_follows_a_custom_prefix():
@@ -281,4 +277,4 @@ def test_raw_accessor_follows_a_custom_prefix():
     template = "{% @F.eq(1,1) %}"
     context = {"@NODE": {"llm": {"text": template}}}
     assert parser.evaluate("@NODE.raw.llm.text", context) == template
-    assert parser.evaluate("@NODE.llm.text", context) == "True"
+    assert parser.evaluate("@NODE.llm.text", context) == template

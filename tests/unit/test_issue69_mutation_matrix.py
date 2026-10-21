@@ -542,28 +542,27 @@ class TestIssue69GeneratedMatrix(unittest.TestCase):
         self.assertIsNone(PARSER.evaluate("$F.set($GLOBAL,'counter',1)", isolated))
         self.assertNotIn("counter", live.get_state("$GLOBAL"))
         # (c) 嵌套表达式串在**数据容器**上求值：
-        #     (c1) 规范根名下挂**活根** ⇒ 拒且零写入（身份判据）
+        #     (c) 规范根名下挂 `$GLOBAL` 键 + `x` 是表达式形状字符串：
+        #     #268 终裁——运行期字符串是数据，`$INPUT.x` 原样返回，不再以持有
+        #     容器为作用域二次求值；三种容器形态（活根 / 引擎物化副本 / 宿主
+        #     自造副本）一律原样、零写入。（旧三层判定 c1/c2/c3 随层摘除。）
+        #     对照锚：同一 mutator 写在**配置表达式**里，#69 判定照常生效——
         c = ExecutionContext(); c.setup_flow(_Cfg(), ({},), {})
         PARSER.evaluate("$GLOBAL", c.context)          # 登记活根身份
-        c.set_state("$INPUT", {"$GLOBAL": c.get_state("$GLOBAL"),
-                               "x": "{% $F.set($GLOBAL.cfg,'k','v') %}"})
-        with self.assertRaises(ValueError) as cm:
-            PARSER.evaluate("$INPUT.x", c.context)
-        self.assertIn("$GLOBAL.cfg", str(cm.exception))
-        #     (c2) 规范根名下挂**引擎物化的副本** ⇒ 放行、就地生效（r5：fresh 由构造证明）
-        c2 = ExecutionContext(); c2.setup_flow(_Cfg(), ({},), {})
-        fresh = c2.evaluate({"cfg": {"a": 1}})      # 引擎重建容器 ⇒ 登记 fresh
-        c2.set_state("$INPUT", {"$GLOBAL": fresh, "x": "{% $F.set($GLOBAL.cfg,'k','v') %}"})
-        self.assertEqual("None", PARSER.evaluate("$INPUT.x", c2.context))  # $F.set 返回 None
-        self.assertEqual({"a": 1, "k": "v"}, fresh["cfg"])
-        #     (c3, r5 default-deny) 规范根名下挂**宿主自造副本** ⇒ 来源不可证 fresh ⇒ 拒
-        c3 = ExecutionContext(); c3.setup_flow(_Cfg(), ({},), {})
-        host_copy = {"cfg": {"a": 1}}
-        c3.set_state("$INPUT", {"$GLOBAL": host_copy, "x": "{% $F.set($GLOBAL.cfg,'k','v') %}"})
-        with self.assertRaises(ValueError) as cm3:
-            PARSER.evaluate("$INPUT.x", c3.context)
-        self.assertIn("provenance could not be proven fresh", str(cm3.exception))
-        self.assertEqual({"a": 1}, host_copy["cfg"])            # 零写入
+        before_global = c.get_state("$GLOBAL")
+        c.set_state("$INPUT", {"$GLOBAL": c.get_state("$GLOBAL"), "cfg": {"a": 1}})
+        with self.assertRaises(ValueError) as cm_cfg:
+            PARSER.evaluate("$F.set($GLOBAL.cfg,'k','v')", c.context)   # 活根 ⇒ 拒
+        self.assertIn("$GLOBAL.cfg", str(cm_cfg.exception))
+        self.assertEqual(before_global, c.get_state("$GLOBAL"))         # 零写入
+        # 数据形态：x 原样，三种容器一律零写入
+        for extra in ({"$GLOBAL": c.get_state("$GLOBAL")},
+                      {"$GLOBAL": {"cfg": {"a": 1}}},
+                      {"$GLOBAL": {"cfg": {"a": 1}}.copy()}):
+            c_data = ExecutionContext(); c_data.setup_flow(_Cfg(), ({},), {})
+            c_data.set_state("$INPUT", {**extra, "x": "{% $F.set($GLOBAL.cfg,'k','v') %}"})
+            self.assertEqual("{% $F.set($GLOBAL.cfg,'k','v') %}",
+                             PARSER.evaluate("$INPUT.x", c_data.context))
 
     @_one_evaluation
     def test_t2_alias_through_another_context_key(self):
@@ -872,13 +871,13 @@ class TestIssue69R4ContainerKeyAxis(unittest.TestCase):
         self.assertEqual({"a": 1}, host_copy)
 
 
-def _r4_child_flow() -> Flow:
+def _r4_child_flow(mutator_expr: str = "$F.set($INPUT.b.b,'k','v')") -> Flow:
     from plaita.node import Assignment
     return Flow(flow_id="r4-child", version="1", runtime="python",
                 input_type=Property(data_type=types.OBJECT),
                 output_type=Property(data_type=types.ANY),
                 nodes=[Start(id="s", next="a"),
-                       Assignment(id="a", output="$INPUT.cmd",
+                       Assignment(id="a", output=mutator_expr,
                                   output_type=Property(data_type=types.ANY), next="e"),
                        End(id="e", resultType="success", output="$NODE.a")])
 
@@ -892,12 +891,16 @@ def _r4_parent_flow(node) -> Flow:
 
 
 def _r4_flow_node(node_kind: str, key: str, nesting: str, value_expr: str,
-                  nested_expr: str):
+                  mutator_expr: str):
+    """#268 后：mutator 直接写在子 assignment 的**配置**层（表达式只活在配置里）。
+    旧的「cmd 字段装嵌套串、子执行路径读时二次解析」通道已随契约关闭。子输入
+    容器仍按 key × nesting 构造边界形状（mutator 的寻址目标）。"""
     from plaita.node.child import InlineFlow, ReferenceFlow
     mapping = _container_with(key, value_expr, nesting)
-    mapping["cmd"] = f'$F.concat("{nested_expr}")'
+    mapping.pop("cmd", None)
     cls = InlineFlow if node_kind == "inline" else ReferenceFlow
-    return cls(id="c", input=mapping, child_flow=_r4_child_flow(), next="end")
+    child = _r4_child_flow(mutator_expr)
+    return cls(id="c", input=mapping, child_flow=child, next="end")
 
 
 #: 边界表达式：活根本体 / 活根子对象 / 物化副本（deep producer 显式派生）。
@@ -921,8 +924,10 @@ class TestIssue69R4ChildFlowBoundaryAxis(unittest.TestCase):
 
     def _run(self, node_kind, key, kind, nesting):
         expr = BOUNDARY_VALUE_EXPRS[kind]
+        # 子流程视角的寻址：mapping 是子流程的 $INPUT，键名（$ 前缀）是其下的
+        # 字面键 → 地址 = $INPUT.<container_path>
         node = _r4_flow_node(node_kind, key, nesting, expr,
-                             f"$F.set({_container_path(key, nesting)},'k','v')")
+                             f"$F.set($INPUT.{_container_path(key, nesting)},'k','v')")
         execution = FlowExecution()
         start = {"cfg": {"a": 1}}
         raised = None
@@ -1065,17 +1070,16 @@ class TestIssue69R4VerifierCounterexample(unittest.TestCase):
         raised, live, checkpoint, start = self._run()
         self.assertEqual(start, live, "parent live $INPUT written through")
         self.assertEqual(start, checkpoint, "parent checkpoint $INPUT written through")
-        self.assertIsNotNone(raised, "r6 must refuse the boundary-copy write")
-        self.assertIn("plaita#69", str(raised))
+        # #268：嵌套求值通道关闭——`$INPUT.cmd` 是数据（原串），不求值、不拒绝、
+        # 零写穿（比"具名拒绝"更强的隔离：字符串根本不会变成代码）。
+        self.assertIsNone(raised)
 
-    def test_half2_alone_raises_named_refusal(self):
-        """关掉半边 1：身份探测独立拒 —— 消息点名键名 ``['$myroot']`` 与根 ``$INPUT``。"""
+    def test_half2_alone_still_returns_data_verbatim(self):
+        """关掉半边 1：#268 后该形态走不到 mutator 门——数据原样、零写穿。
+        （身份探测机制的独立判据由规范路径的对照测试与其余存活单元钉住。）"""
         with _Half1Disabled():
             raised, live, checkpoint, start = self._run()
-        message = str(raised) if raised is not None else ""
-        self.assertIn("plaita#69", message)
-        self.assertIn("['$myroot']", message)
-        self.assertIn("$INPUT", message)
+        self.assertIsNone(raised)
         self.assertEqual(start, live)
         self.assertEqual(start, checkpoint)
 
@@ -1098,8 +1102,10 @@ class TestIssue69R4VerifierCounterexample(unittest.TestCase):
             parser_mod._probe_container_alias = saved_probe
             parser_mod._canonical_container_fast_path = saved_fast
             parser_mod._fresh_has = saved_fresh
-        self.assertNotEqual(start, live, "negative control must write through")
-        self.assertEqual({"a": 1, "k": "v"}, live["cfg"])
+        # #268：嵌套通道已关，机器全关也无法"写穿"——字符串不会变成代码。
+        # 本负控的原始判据（r3 形态写穿）随通道关闭失去对象，改为钉零写穿。
+        self.assertEqual(start, live, "nested channel closed: nothing can write through")
+        self.assertEqual(start, checkpoint)
 
 
 # ---------------------------------------------------------------------------
@@ -1320,13 +1326,14 @@ def build_r5_probe_rows() -> list:
 class TestIssue69R5Provenance(unittest.TestCase):
     """r5：default-deny on provenance —— X1/X2 与多位置活子对象探针全部零写穿。"""
 
-    def test_x1_verbatim_is_refused_and_writes_nothing(self):
+    def test_x1_nested_string_is_data_and_writes_nothing(self):
+        """#268 终裁：X1 通道（嵌套表达式串作用域 = 活子对象）已关闭——assignment
+        读到的是原串（数据），不求值、不拒绝、零写穿。活子对象零变化；
+        规范改写路径 ``$F.set($INPUT.cfg.deep,…)`` 的拒绝由对照测试钉住。"""
         payload = _r5_live_payload()
         start = {"cfg": copy.deepcopy(payload)}
         raised, live, checkpoint, pristine = _r5_run_flow(_r5_x1_flow(), start)
-        self.assertIsNotNone(raised, "X1 must not silently mutate the live state")
-        self.assertIn("plaita#69", str(raised))
-        self.assertIn("provenance could not be proven fresh", str(raised))
+        self.assertIsNone(raised, "X1 字符串现在是数据：不求值也不拒绝")
         self.assertEqual(pristine, live)
         self.assertEqual(pristine, checkpoint)
         self.assertEqual({"a": 1}, live["cfg"]["deep"])       # 活子对象零变化
@@ -1350,11 +1357,12 @@ class TestIssue69R5Provenance(unittest.TestCase):
                           child_flow=_r5_reduce_child_flow(), next="e"),
                    End(id="e", resultType="success", output="$NODE.r")])
         raised, live, checkpoint, pristine = _r5_run_flow(flow, start)
+        # #268 后：initial 物化边界依然隔离副本（零写穿不变）；子执行里不再有
+        # 嵌套求值触发的 mutator 门——字符串是数据，原样流动。
+        self.assertIsNone(raised)
         self.assertEqual(pristine, live, "Reduce.initial write-through to live $INPUT")
         self.assertEqual(pristine, checkpoint, "Reduce.initial write-through to checkpoint")
         self.assertEqual({"a": 1}, live["cfg"]["deep"])
-        # r6：物化副本在父求值里造出，子执行求值里不是 fresh ⇒ 具名拒绝（零写穿不变）。
-        self.assertIn("plaita#69", str(raised))
 
     def test_every_container_position_refuses(self):
         """活子对象作为容器作用域里可达的值：逐位置具名拒绝 + 零写入。"""
@@ -1451,7 +1459,11 @@ class TestIssue69R5Provenance(unittest.TestCase):
                 self.assertFalse(row["live_changed"],
                                  f"{row['position']} wrote through: {row['detail']}")
         by_position = {row["position"]: row for row in rows}
-        self.assertTrue(by_position["X1 verbatim (nested scope = live sub-object)"]["refused"])
+        # X1（嵌套串作用域 = 活子对象）：#268 后通道关闭——不求值、不拒绝、零写穿。
+        self.assertFalse(by_position["X1 verbatim (nested scope = live sub-object)"]
+                         ["refused"])
+        self.assertFalse(by_position["X1 verbatim (nested scope = live sub-object)"]
+                         ["live_changed"])
         self.assertTrue(by_position["Reduce.initial (live sub-object)"]["refused"] is False
                         or by_position["Reduce.initial (live sub-object)"]["refused"])
         self.assertFalse(by_position["engine-bound non-persisted key (fresh by construction)"]

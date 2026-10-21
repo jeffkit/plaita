@@ -430,8 +430,9 @@ class TestSiblingProbeSemanticsUnchanged(unittest.TestCase):
         self.assertEqual(evaluate({"d": [10, 20]}, "$INPUT.d[1]"), 20)
         self.assertIsNone(evaluate({"d": {"a": 1}}, "$INPUT.nope"))
         self.assertEqual(list(evaluate({"d": {"a": 1}}, "$F.keys($INPUT.d)")), ["a"])
-        # 嵌套表达式串照旧递归；引用缺席根的串照旧按数据文本原样返回
-        self.assertEqual(evaluate({"d": {"a": "{% $F.add(1, 2) %}"}}, "$INPUT.d.a"), "3")
+        # 运行期字符串是数据（#268）：表达式形状/引用缺席根，一律原样返回
+        self.assertEqual(evaluate({"d": {"a": "{% $F.add(1, 2) %}"}}, "$INPUT.d.a"),
+                         "{% $F.add(1, 2) %}")
         self.assertEqual(
             evaluate({"d": {"a": "{% $NODE.x %}"}}, "$INPUT.d.a"), "{% $NODE.x %}"
         )

@@ -44,12 +44,14 @@ _TOLERANCE = _BASELINE["tolerance"]
 
 #: mutator 路径（r6 起纳入守卫）：
 #: * ``_MUT_ALLOW``：目标位是 DEEP producer ⇒ 分类保证 fresh，不走 plan；
-#: * ``_MUT_PLAN_ALLOW``：目标位是**同一次求值**里由嵌套 producer 造出的对象
-#:   （嵌套表达式串共享作用域）⇒ 走 plan 且放行；
+#: * ``_MUT_PLAN_ALLOW``：目标位是**路径读取**（``$VAR.k``，plaita#69 r4 身份
+#:   探测分支）⇒ 走 plan 且放行（值是 setup 时 ctx.evaluate 物化的 fresh 容器
+#:   成员；#268 摘除嵌套求值后，同求值嵌套 producer 形态不复存在，本形态承接
+#:   plan-allow 分支的覆盖）；
 #: * ``_MUT_PLAN_REFUSE``：目标位是**上一次求值**物化的 ``$VAR`` ⇒ 走 plan 且
 #:   default-deny 拒绝（verifier 测的 23.5µs 那条）。
 _MUT_ALLOW = "$F.set($F.json_loads('{\"q\":0}'),'q',1)"
-_MUT_PLAN_ALLOW = "$F.set($PROD.v,'k','v')"
+_MUT_PLAN_ALLOW = "$F.set($VAR.k,'q',1)"
 _MUT_PLAN_REFUSE = "$F.set($VAR,'k','v')"
 
 
@@ -71,8 +73,8 @@ def _context(payload: dict) -> ExecutionContext:
     ctx.setup_flow(_Cfg(), ({},), {})
     ctx.set_state("$INPUT", payload)
     ctx.set_state("$VAR", ctx.evaluate({"a": 1}))
-    # 嵌套表达式串挂在普通键下：`$F.set($PROD.v,…)` 让 plan-allow 分支可达。
-    ctx.set_state("$PROD", {"v": "$F.json_loads('{}')"})
+    # fresh 容器挂在 $VAR 下：`$F.set($VAR.k,…)` 让 plan-allow 分支可达。
+    ctx.set_state("$VAR", {"k": {"q": 0}})
     return ctx
 
 
