@@ -78,16 +78,26 @@ curl -s -X POST "$API/api/executions" -H 'Content-Type: application/json' \
 sleep 5
 
 FAIL=0
-# ---- 断言 1：停机窗口内不丢不跑（无执行状态写入）-----------------------------
-QUEUED=$(curl -s "$API/api/executions?flow_id=e2e-chaos-wr-flow" | python3 -c "
+# ---- 断言 1：停机窗口内不丢不跑 ----------------------------------------------
+# #273 后 POST 受理即落 queued 占位状态行（受理待消费），故停机窗口允许且应当
+# 恰有一行 queued；断言收紧为「无 running/终态写入」——任务既没丢（行在）也
+# 没跑（非 queued 一律违规）。旧断言 total==0 与 #273 语义冲突，曾致 280be04
+# 起 Console E2E 三连红（B1 r54 落地被熔断拦下，2026-10-21）。
+WR=$(curl -s "$API/api/executions?flow_id=e2e-chaos-wr-flow" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-print(d.get('total', -1))
+ex = d.get('executions') or []
+sts = [e.get('status', '') for e in ex]
+bad = [s for s in sts if s != 'queued']
+print(f"{len(sts)}\x1f{'/'.join(sts) if sts else 'none'}\x1f{len(bad)}")
 " 2>/dev/null)
-if [[ "$QUEUED" == "0" ]]; then
-  echo "[chaos-wr] ✓ 停机窗口内任务只入队不执行（无状态写入）"
+N=$(echo "$WR" | cut -d$'\x1f' -f1)
+STS=$(echo "$WR" | cut -d$'\x1f' -f2)
+BADN=$(echo "$WR" | cut -d$'\x1f' -f3)
+if [[ "$BADN" == "0" ]]; then
+  echo "[chaos-wr] ✓ 停机窗口内不丢不跑（状态行: $STS；除 queued 占位外零写入）"
 else
-  echo "[chaos-wr] ✗ 停机窗口内出现执行状态（total=$QUEUED，预期 0）" >&2
+  echo "[chaos-wr] ✗ 停机窗口内出现非 queued 状态（states=$STS，预期只允许 queued）" >&2
   FAIL=1
 fi
 
