@@ -147,9 +147,12 @@ pending 等新 build。非版本拒收（如 `max_deliveries`）的恢复克隆�
   `dedup_key`：标记过期/force 重灌仍收敛到同一条执行；
 - 执行墓碑命中 → `execution_deleted`（不复活已删除执行）；缺 `tenant_id` 必须由
   平台显式指定，payload 租户与显式租户冲突 → `tenant_mismatch`；
-- DLQ 原条目**不删除**；每次尝试写 `plaita:dlq:replay:audit`。保留上限
-  `PLAITA_DLQ_MAX_LEN` 是**有损 FIFO**：裁剪会丢弃未处理证据，`dlq_trimmed` /
-  `dlq_trim_failures` 指标与 WARNING 可见。
+- DLQ 原条目**不删除**；每次尝试写 `plaita:dlq:replay:audit`（平台级审计流：
+  上限 `PLAITA_REPLAY_AUDIT_MAX_LEN`，默认 1000，写入后 XTRIM 精确裁剪——
+  **持久但有界**的有损 FIFO，键**无 TTL**：整键过期会一次性抹掉全部审计
+  历史，比 FIFO 裁剪更糟；裁剪丢证据与裁剪失败都留 WARNING，长期归档请
+  外送）。DLQ 本身的保留上限 `PLAITA_DLQ_MAX_LEN` 是**有损 FIFO**：裁剪会
+  丢弃未处理证据，`dlq_trimmed` / `dlq_trim_failures` 指标与 WARNING 可见。
 
 **版本边界对首投与回收同判**：`_reclaim_one` 在 XCLAIM 之后、返回
 消费循环之前做与 `xreadgroup(">")` 相同的 `schema_version > max_schema_version`
