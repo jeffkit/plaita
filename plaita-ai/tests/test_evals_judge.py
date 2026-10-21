@@ -108,6 +108,129 @@ def test_textless_reply_is_marked_unavailable(monkeypatch, content):
     assert verdict["ok"] is False
 
 
+# -- verdict normalization (A2R32-04) -------------------------------------------
+#
+# A judge reply is only a verdict about the output when it is a JSON object
+# with a finite-number ``score`` and a real-bool ``ok``. Everything else is a
+# broken reply envelope and must degrade to ``unavailable`` — never fold a
+# fake 0.0/1.0 into the average, never crash the eval run.
+
+
+def _judge_reply(content: str):
+    def handler(*args, **kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "http://judge.local/v1/chat/completions"),
+        )
+
+    return handler
+
+
+BROKEN_VERDICT_REPLIES = [
+    # NaN/Infinity are JSON-parsable but not finite: max(0, min(1, nan))
+    # keeps its first argument (NaN comparisons are False) → a full-score
+    # pass out of a judge that never scored.
+    '{"ok": true, "score": NaN, "reason": "bad"}',
+    '{"ok": true, "score": Infinity, "reason": "bad"}',
+    # "false" was bool()-truthy: an explicit rejection read as a pass.
+    '{"ok": "false", "score": 1.0, "reason": "bad"}',
+    '{"ok": "true", "score": 0.0, "reason": "bad"}',
+    # Legal JSON but not an object: verdict.get used to raise AttributeError
+    # straight through judge_output (outside its try / except only caught
+    # TypeError/ValueError), killing the whole eval run.
+    "[1, 2]",
+    "null",
+    "123",
+    '"polite"',
+    # Missing fields used to default (score→0.0 as a "real" 0 verdict,
+    # ok→derived from score): both are broken replies, not judgments.
+    '{"ok": true, "reason": "no score field"}',
+    '{"score": 0.8, "reason": "no ok field"}',
+    # Plain prose (no braces) used to score 0 with no unavailable stamp and
+    # pollute the average through assert_score.
+    "The output looks polite and correct to me.",
+    # Braces present but no JSON inside — same broken-envelope family.
+    "Verdict: {ok true score 1.0}",
+]
+
+
+@pytest.mark.parametrize("content", BROKEN_VERDICT_REPLIES)
+def test_broken_verdict_shapes_degrade_to_unavailable(monkeypatch, content):
+    monkeypatch.setattr(httpx, "post", _judge_reply(content))
+    verdict = judge_output("rubric", {}, {"a": 1}, env=FULL_ENV)
+    assert verdict is not None
+    assert verdict["unavailable"] is True
+    assert verdict["ok"] is False
+    assert verdict["score"] == 0.0
+
+
+def test_nan_reply_keeps_content_score_out_of_average(monkeypatch):
+    """Through assert_score: NaN must not fold in as a full-score pass."""
+    for key, value in FULL_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        httpx, "post", _judge_reply('{"ok": true, "score": NaN, "reason": "bad"}')
+    )
+    scored = assert_score(Case("c", {}, {"judge": "is polite"}), {"msg": "hi"})
+    assert scored["judge"]["unavailable"] is True
+    assert scored["score"] == 1.0  # content score untouched, nothing folded in
+
+
+def test_prose_reply_keeps_content_score_out_of_average(monkeypatch):
+    """Through assert_score: plain prose must not fold in as a 0 verdict."""
+    for key, value in FULL_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        httpx, "post", _judge_reply("The output looks polite and correct to me.")
+    )
+    scored = assert_score(Case("c", {}, {"judge": "is polite"}), {"msg": "hi"})
+    assert scored["judge"]["unavailable"] is True
+    assert scored["score"] == 1.0  # was 0.5 (content 1.0 ⊕ judge 0.0) before
+    assert scored["reasons"] == ["judge reply was not JSON"]
+
+
+def test_non_object_reply_does_not_break_the_eval_run(monkeypatch):
+    """[1,2] / null must degrade to unavailable, not raise AttributeError."""
+    for content in ("[1, 2]", "null"):
+        monkeypatch.setattr(httpx, "post", _judge_reply(content))
+        verdict = judge_output("rubric", {}, {"a": 1}, env=FULL_ENV)
+        assert verdict is not None
+        assert verdict["unavailable"] is True
+
+
+def test_ok_bool_wins_over_score(monkeypatch):
+    """With ok strict-bool, an explicit judge rejection stays a rejection
+    even when the score field contradicts it (ok 只由 bool 决定)."""
+    monkeypatch.setattr(
+        httpx, "post", _judge_reply('{"ok": false, "score": 1.0, "reason": "bad"}')
+    )
+    verdict = judge_output("rubric", {}, {"a": 1}, env=FULL_ENV)
+    assert verdict["ok"] is False
+    assert "unavailable" not in verdict
+
+
+@pytest.mark.parametrize(
+    "content, ok, score",
+    [
+        ('{"ok": true, "score": 0.9, "reason": "good"}', True, 0.9),
+        ('{"ok": false, "score": 0.0, "reason": "no"}', False, 0.0),
+        # fenced / trailing-prose JSON tolerance conserved
+        ('Verdict: {"ok": true, "score": 1.0, "reason": "good"} — end', True, 1.0),
+        # finite out-of-range scores still clamp; int scores accepted
+        ('{"ok": true, "score": 2.5}', True, 1.0),
+        ('{"ok": true, "score": 1}', True, 1.0),
+    ],
+)
+def test_well_formed_verdicts_score_unchanged(monkeypatch, content, ok, score):
+    monkeypatch.setattr(httpx, "post", _judge_reply(content))
+    verdict = judge_output("rubric", {}, {"a": 1}, env=FULL_ENV)
+    assert verdict is not None
+    assert "unavailable" not in verdict
+    assert verdict["ok"] is ok
+    assert verdict["score"] == score
+
+
 # -- scoring -------------------------------------------------------------------
 
 

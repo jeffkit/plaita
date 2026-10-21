@@ -17,12 +17,55 @@ judge (transport / HTTP / bad reply envelope) returns a verdict stamped
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 from typing import Any, Dict, Optional
 
 import httpx
 
 _TIMEOUT_S = 60.0
+
+_log = logging.getLogger(__name__)
+
+
+def _unavailable_reply(reason: str) -> Dict[str, Any]:
+    """Broken judge reply → ``unavailable`` stamp, never a 0/1-score verdict.
+
+    ``assert_score``/``evaluate`` drop unavailable cases out of the averages,
+    so a degraded reply must carry this stamp to stay out of the denominator.
+    """
+    return {"ok": False, "score": 0.0, "unavailable": True, "reason": reason}
+
+
+def _normalize_verdict(verdict: Any) -> Dict[str, Any]:
+    """Named-type gate on the judge's verdict fields (A2R32-04).
+
+    Only ``{"ok": <real bool>, "score": <finite number>, "reason": str}`` is a
+    judgment about the output: NaN/±Infinity are rejected explicitly (they
+    used to clamp to a full 1.0 pass), numeric-looking strings and booleans
+    are not scores, ``"false"`` is not an ``ok``, non-object JSON and missing
+    fields are broken replies. Anything else degrades to ``unavailable``.
+    """
+    if not isinstance(verdict, dict):
+        return _unavailable_reply("judge reply was not an object")
+    raw_score = verdict.get("score")
+    if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+        return _unavailable_reply("judge verdict score was not a finite number")
+    try:
+        finite = math.isfinite(raw_score)
+    except OverflowError:  # int too large for float: magnitude, not a verdict
+        finite = False
+    if not finite:
+        return _unavailable_reply("judge verdict score was not a finite number")
+    ok = verdict.get("ok")
+    if not isinstance(ok, bool):
+        return _unavailable_reply("judge verdict ok was not a boolean")
+    return {
+        "ok": ok,
+        "score": round(float(max(0.0, min(1.0, raw_score))), 4),
+        "reason": str(verdict.get("reason", ""))[:300],
+    }
 
 
 def judge_configured(env: Optional[Dict[str, str]] = None) -> bool:
@@ -48,8 +91,9 @@ def judge_output(
 
     Returns {"ok": bool, "score": 0..1, "reason": str} on a real verdict, or
     {"ok": False, "score": 0.0, "unavailable": True, ...} when the judge could
-    not be reached — the two must not be confused, since only the former is a
-    judgment about the output.
+    not be reached or its reply was not a well-formed verdict object — the two
+    must not be confused, since only the former is a judgment about the output
+    (A2R32-04: broken shapes degrade to unavailable instead of scoring 0/1).
     """
     env = dict(os.environ if env is None else env)
     if not judge_configured(env):
@@ -80,22 +124,14 @@ def judge_output(
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
-    except Exception:  # judge unavailability must never fail the eval run
-        return {
-            "ok": False,
-            "score": 0.0,
-            "unavailable": True,
-            "reason": "judge endpoint unavailable",
-        }
+    except Exception as e:  # judge unavailability must never fail the eval run
+        _log.warning("judge endpoint unreachable; case degrades to unavailable: %s", e)
+        return _unavailable_reply("judge endpoint unavailable")
     if not isinstance(content, str):
         # 200 with a non-text envelope ("content": null, or a parts list):
         # a broken judge reply, not a verdict about the output.
-        return {
-            "ok": False,
-            "score": 0.0,
-            "unavailable": True,
-            "reason": "judge reply had no text content",
-        }
+        _log.warning("judge reply had no text content; case degrades to unavailable")
+        return _unavailable_reply("judge reply had no text content")
 
     try:
         verdict = json.loads(content)
@@ -103,18 +139,16 @@ def judge_output(
         # Tolerate fenced or trailing-prose replies: grab the first {...}.
         start, end = content.find("{"), content.rfind("}")
         if start < 0 or end <= start:
-            return {"ok": False, "score": 0.0, "reason": "judge reply was not JSON"}
+            _log.warning("judge reply was not JSON; case degrades to unavailable: %.200s", content)
+            return _unavailable_reply("judge reply was not JSON")
         try:
             verdict = json.loads(content[start : end + 1])
         except ValueError:
-            return {"ok": False, "score": 0.0, "reason": "judge reply was not JSON"}
+            _log.warning("judge reply was not JSON; case degrades to unavailable: %.200s", content)
+            return _unavailable_reply("judge reply was not JSON")
 
     try:
-        score = max(0.0, min(1.0, float(verdict.get("score", 0.0))))
-    except (TypeError, ValueError):
-        score = 0.0
-    return {
-        "ok": bool(verdict.get("ok")) or score >= 0.999,
-        "score": round(score, 4),
-        "reason": str(verdict.get("reason", ""))[:300],
-    }
+        return _normalize_verdict(verdict)
+    except Exception as e:  # a weird reply shape must never fail the eval run
+        _log.warning("judge verdict normalization failed; case degrades to unavailable: %s", e)
+        return _unavailable_reply("judge reply could not be normalized")

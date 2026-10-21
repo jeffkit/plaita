@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, Field
@@ -72,16 +73,34 @@ class ClusterConfigError(RuntimeError):
         super().__init__(f"集群配置载入失败（{self.config_path}）：{self.reason}")
 
 
+#: 数据面占位 host（精确比较，大小写不敏感）：localhost 是模板留的占位，
+#: 127.0.0.1/::1/0.0.0.0 是回环/未指定地址——Docker 跨容器场景都连不到集群
+#: Redis 实例（A2R44-01：此前用子串包含判定，LOCALHOST 变体逃逸抢占权威、
+#: 凭据段含占位子串的具体地址反向失权）。
+_PLACEHOLDER_REDIS_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
 def _is_concrete_redis_url(url: Any) -> bool:
-    """集群配置是否给出了「非占位」的 Redis URL。
+    """集群配置是否给出了「非占位」的 Redis URL（按 host 段精确判定）。
 
     localhost / 127.0.0.1 是模板留的占位（Docker 里 console 容器与 redis 容器
-    不同主机），不算具体地址——只有具体地址才是集群的权威配置。
+    不同主机），不算具体地址——只有具体地址才是集群的权威配置。判定解析
+    URL 取 host 精确比较（hostname 已小写化）：``LOCALHOST`` 大小写变体不得
+    逃逸抢占权威，userinfo 凭据段含占位子串不得反向失权。
     """
     if not url:
         return False
     text = str(url)
-    return "localhost" not in text and "127.0.0.1" not in text
+    try:
+        host = urlsplit(text).hostname
+    except ValueError:
+        # 解析不出 host 的畸形 URL 不能当权威——让位 env/metadata 兜底
+        return False
+    if not host:
+        # 无 host 段的历史形态（裸 host:port 等）：退回字面子串口径保守判占位
+        lowered = text.lower()
+        return "localhost" not in lowered and "127.0.0.1" not in lowered
+    return host not in _PLACEHOLDER_REDIS_HOSTS
 
 
 def config_redis_url(config: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -206,7 +225,7 @@ def service_restart_redis_urls(
                 continue
             if "${redis.url}" in value:
                 resolved = value.replace("${redis.url}", placeholder_url)
-            elif "localhost" in value:
+            elif value and not _is_concrete_redis_url(value):
                 resolved = placeholder_url
             else:
                 resolved = value
@@ -820,7 +839,10 @@ class ServiceManager:
         for key, value in env.items():
             if "${redis.url}" in value:
                 value = value.replace("${redis.url}", actual_redis_url)
-            elif key.upper() in ("REDIS_URL", "PLAITA_REDIS_URL") and "localhost" in value:
+            elif (key.upper() in ("REDIS_URL", "PLAITA_REDIS_URL")
+                    and value and not _is_concrete_redis_url(value)):
+                # 与 concrete 判定同口径（A2R44-01）：LOCALHOST 变体等占位
+                # URL 一并改写成生效地址，不再按子串漏判透传
                 value = actual_redis_url
             resolved[key] = value
         return resolved
