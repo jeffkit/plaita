@@ -105,8 +105,10 @@ from plaita.server.task_queue import (
     RECONNECT_BACKOFF_SECONDS,
     RedisStreamTaskQueue,
     StreamTask,
+    START_DEDUP_TTL_SECONDS,
     _dlq_max_len_from_env,
     enqueue_task,
+    start_dedup_map_key,
     timestamp_from_stream_id,
 )
 from plaita.server.execution_lease import (
@@ -2572,7 +2574,9 @@ class FlowWorker:
     # ---- start 幂等键（波次二任务③）----
 
     # start 去重映射键 TTL：7 天自清理（与取消标志/重试计数键同款模式）。
-    START_DEDUP_TTL_SECONDS = 7 * 86400
+    # plaita#274：单源在 task_queue.START_DEDUP_TTL_SECONDS（console 生产侧
+    # 预认领共用同一 TTL），类属性保留为兼容别名。
+    START_DEDUP_TTL_SECONDS = START_DEDUP_TTL_SECONDS
 
     def _load_execution_tombstone(
         self, execution_id: str, tenant_id: Optional[str]
@@ -2666,15 +2670,22 @@ class FlowWorker:
         return True
 
     def _start_dedup_key(self, dedup_key: str) -> str:
-        """start 去重映射键：``{ns}:start-dedup:{key}``（租户路由，与租约键同规则）。"""
-        return f"{tenant_namespace(current_tenant())}:start-dedup:{dedup_key}"
+        """start 去重映射键：``{ns}:start-dedup:{key}``（租户路由，与租约键同规则）。
+
+        键形状单源在 ``task_queue.start_dedup_map_key``（#274：console 生产侧
+        的入队前预认领必须与消费侧认领命中**同一把键**，否则「同键必同 id」
+        契约在某一侧漂移即失效）。
+        """
+        return start_dedup_map_key(tenant_namespace(current_tenant()), dedup_key)
 
     def _claim_start_dedup(self, dedup_key: Optional[str], execution_id: str) -> Tuple[str, Optional[str]]:
         """原子认领 start 幂等键（SET NX + EX 7 天）。
 
         返回 ``(action, mapped_execution_id)``：
 
-        - ``("claimed", None)``：认领成功，本消息是这条逻辑 start 的首次执行；
+        - ``("claimed", None)``：认领成功，本消息是这条逻辑 start 的首次执行
+          （含 #274 自命中：映射已指向本载体 id——console 生产侧预认领或同
+          消息先前投递的认领，本次投递按归属者继续）；
         - ``("hit", mapped)``：键已存在（重投/双开），mapped 为首次执行映射的
           execution_id，调用方**绝不二次 start**；mapped 为 None 表示键刚好
           过期/被清（罕见竞态），调用方按孤儿映射处理；
@@ -2704,6 +2715,15 @@ class FlowWorker:
             logger.warning("start 幂等键读取失败（按孤儿映射处理）: %s: %s", key, _scrub_url_text(e))
             return ("hit", None)
         mapped = raw.decode() if isinstance(raw, bytes) else raw
+        if mapped == execution_id:
+            # plaita#274 自命中：映射已指向**本载体** id——console 在 POST 时
+            # 以同键预认领（生产侧「同键必同 id」），或同一消息先前投递留下的
+            # 认领（at-least-once 重投）。本次投递就是这条逻辑 start 的归属者，
+            # 按认领成功继续；绝不走 hit 分支把唯一执行哑掉（映射行是 queued
+            # 占位/初始快照时，hit 的现状回报会让 start 不被消费、执行永不
+            # 推进）。重投安全由 preminted 载体转换（#234：非空 checkpoint 转
+            # resume）与 start 入口取消检查兜底。
+            return ("claimed", None)
         return ("hit", mapped or None)
 
     def _release_start_dedup(self, dedup_key: str, execution_id: str) -> None:

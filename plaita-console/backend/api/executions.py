@@ -190,6 +190,7 @@ try:
         try_admit_tenant_start,
     )
     from plaita.storage.fenced import FencedExecutionStorage
+    from plaita.storage.base import ExecutionState
     from plaita.storage.redis import (
         TERMINAL_EXECUTION_STATUSES,
         RedisExecutionStorage,
@@ -214,6 +215,7 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
         try_admit_tenant_start,
     )
     from plaita.storage.fenced import FencedExecutionStorage
+    from plaita.storage.base import ExecutionState
     from plaita.storage.redis import (
         TERMINAL_EXECUTION_STATUSES,
         RedisExecutionStorage,
@@ -363,6 +365,156 @@ def _cancel_key(tenant: Optional[str], execution_id: str) -> str:
     本键后终态化。带 TTL 自清理。
     """
     return f"{tenant_namespace(tenant)}:execution:cancel:{execution_id}"
+
+
+# ---- plaita#273 / #274：队列档 start 的「已受理未接管」窗口 ----
+#
+# POST /executions 返回 queued+id 之后、worker 消费落 running 行之前，调用方
+# 拿着这个 id 必须能 GET（200/queued）也能 CANCEL；同 dedup_key 的幂等重试
+# 必须拿到同一个 id。三件事配合：
+#
+# 1. 占位状态行（#273）：入队**之前**同步落 ``queued`` 行（经 storage 写路径
+#    ——索引成员同 pipeline 维护，列表/状态过滤立即可见；非终态无 TTL）。
+#    行 context 为空，worker 侧 ``_existing_start_checkpoint`` 对「非终态且
+#    空 checkpoint」返回 None（按首投处理），消费时在租约内以 running 行
+#    覆盖接管——占位行不会把 start 载体误转成 resume。
+# 2. 生产侧幂等认领（#274）：铸造 id 后、入队前，以 **worker 同源键**
+#    ``{ns}:start-dedup:{key}``（task_queue.start_dedup_map_key 单源，SET NX
+#    + 7d）认领；命中即返回既有 execution_id（同键必同 id），不再入队、不再
+#    占配额。worker 消费侧对「映射值==载体 id」按自命中继续（#274 配套改动，
+#    flow_worker._claim_start_dedup），start 照常推进。
+# 3. queued 行的直接取消（#273）：先写取消标志（覆盖「console 置终态与
+#    worker 消费」竞窗——标志在位时 worker 的 start 入口/步界检查仍会
+#    终态化），再投 cancel 消息，最后以 CAS（仅当行仍是 queued）置终态
+#    cancelled 并释放租户 start 配额——worker 全灭时排队执行也能取消、
+#    配额立即回收，不再等条目 TTL 自愈。
+
+# queued 占位行的调用者标记（worker 接管后写的 running 行 invoker=worker）
+_QUEUED_PLACEHOLDER_INVOKER = "console"
+
+# 条件终态化（CAS）：仅当状态键当前行仍是 queued 时，把调用方构造好的
+# cancelled 行（ARGV[1]，Python json.dumps——刻意不用 Lua cjson 回写整行：
+# cjson 把空表编码成 ``[]``，会把占位行的 ``context:{}`` 篡改成数组，GET 侧
+# ExecutionInfo 直接 500）原子换入并补终态 TTL。
+# 返回 1=已置终态；0=行已被接管/不存在（worker 竞态赢，标志+消息兜底）；
+# -1=行损坏（不动，交标志+消息路径）。KEYS[1]=状态键；ARGV: payload, ttl 秒。
+_CANCEL_QUEUED_ROW_LUA = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, obj = pcall(cjson.decode, raw)
+if not ok or type(obj) ~= 'table' then return -1 end
+if tostring(obj['status'] or '') ~= 'queued' then return 0 end
+local ttl = tonumber(ARGV[2]) or 0
+if ttl > 0 then
+  redis.call('set', KEYS[1], ARGV[1], 'EX', ttl)
+else
+  redis.call('set', KEYS[1], ARGV[1])
+end
+return 1
+"""
+
+
+def _start_dedup_map_key(tenant: Optional[str], dedup_key: str) -> str:
+    """生产侧 start 幂等映射键——与 worker 消费侧**同一把键**（单源
+    ``task_queue.start_dedup_map_key``，键形状/TTL 漂移即「同键必同 id」失效）。"""
+    from plaita.server.task_queue import start_dedup_map_key
+
+    return start_dedup_map_key(tenant_namespace(tenant), dedup_key)
+
+
+def _claim_start_dedup_at_post(
+    redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str
+) -> Tuple[bool, Optional[str]]:
+    """POST 入队前的 start 幂等认领（SET NX + 7d，与 worker._claim_start_dedup
+    同键同 TTL）。
+
+    返回 ``(claimed, mapped)``：``(True, None)`` = 认领成功，本次提交持有该
+    逻辑 start；``(False, mapped)`` = 已有在先提交，mapped 是其 execution_id，
+    调用方必须返回 mapped（同键必同 id），**不得**再入队/占配额。认领瞬断
+    按 ``(True, None)`` 放行（与 worker 认领失败同哲学：退化为存量行为，
+    消费侧 SET NX 仍兜底收敛）。
+    """
+    from plaita.server.task_queue import START_DEDUP_TTL_SECONDS
+
+    key = _start_dedup_map_key(tenant, dedup_key)
+    try:
+        claimed = redis.set(key, execution_id, ex=START_DEDUP_TTL_SECONDS, nx=True)
+    except Exception as exc:  # noqa: BLE001 — 认领瞬断：不阻塞提交（消费侧仍兜底）
+        logger.warning(
+            "start 幂等键生产侧认领失败（按未认领继续，消费侧兜底）: %s: %s",
+            key, exc,
+        )
+        return True, None
+    if claimed:
+        return True, None
+    try:
+        raw = redis.get(key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("start 幂等键生产侧读取失败（按孤儿映射处理）: %s: %s", key, exc)
+        return False, None
+    return False, (raw.decode() if isinstance(raw, bytes) else raw) or None
+
+
+def _release_start_dedup_if_owner(
+    redis: Redis, tenant: Optional[str], dedup_key: str, execution_id: str
+) -> None:
+    """删除孤儿映射（GET==id 才 DEL，防误删并发后来者的认领；尽力而为）。"""
+    key = _start_dedup_map_key(tenant, dedup_key)
+    try:
+        raw = redis.get(key)
+        current = raw.decode() if isinstance(raw, bytes) else raw
+        if current == execution_id:
+            redis.delete(key)
+    except Exception as exc:  # noqa: BLE001 — 释放失败无害（键 7 天自动过期）
+        logger.warning("start 幂等键孤儿映射释放失败（忽略）: %s: %s", key, exc)
+
+
+def _placeholder_storage(redis: Redis, tenant: Optional[str]) -> "RedisExecutionStorage":
+    """占位行读写用的租户命名空间 storage（与 GET/列表同一键形状/索引）。"""
+    return RedisExecutionStorage(client=redis, namespace=tenant_namespace(tenant))
+
+
+def _write_queued_placeholder(
+    redis: Redis, tenant: Optional[str], execution_id: str,
+    flow_id: str, version: Optional[str], now_iso: str,
+) -> bool:
+    """同步落 ``queued`` 占位状态行（#273）：POST 返回前该 id 必须可 GET。
+
+    经 ``RedisExecutionStorage.save_execution_state`` 写——索引成员同 pipeline
+    维护（列表/状态过滤立即命中）；非终态不设 TTL。失败返回 False，调用方
+    以 5xx 终止 POST 并回滚配额（绝不带着「响应已发、行不存在」的窗口入队）。
+    """
+    state = ExecutionState(
+        execution_id=execution_id,
+        flow_id=flow_id,
+        flow_version=version,
+        tenant_id=tenant,
+        context={},
+        status="queued",
+        start_time=now_iso,
+        last_update_time=now_iso,
+        invoker=_QUEUED_PLACEHOLDER_INVOKER,
+    )
+    try:
+        return _placeholder_storage(redis, tenant).save_execution_state(
+            execution_id, state
+        )
+    except Exception as exc:  # noqa: BLE001 — 落盘异常与 False 同处置（5xx + 回滚）
+        logger.error("queued 占位状态行写入异常 execution=%s: %s", execution_id, exc)
+        return False
+
+
+def _discard_queued_placeholder(
+    redis: Redis, tenant: Optional[str], execution_id: str
+) -> None:
+    """入队失败时清掉占位行（状态键 + 索引成员）；尽力而为，失败留 ERROR。"""
+    try:
+        _placeholder_storage(redis, tenant).delete_execution_state(execution_id)
+    except Exception as exc:  # noqa: BLE001 — 清理失败必须可观测（幽灵 queued 行）
+        logger.error(
+            "入队失败后占位状态行清理失败 execution=%s（将残留 queued 行，"
+            "需人工清理）: %s", execution_id, exc,
+        )
 
 
 def _is_mechanism_key(key: str) -> bool:
@@ -1506,6 +1658,51 @@ async def start_execution(
     # 消费后从执行列表里猜（P0 可见性修复的 API 侧一半）。
     execution_id = uuid.uuid4().hex
     tenant = tenant_scope(http_request, required=True)
+
+    # start 幂等键生产侧认领（plaita#274）：铸造 id 后、入队前以 worker 同源
+    # 键 SET NX 认领；命中即返回**既有** execution_id——同键必同 id，响应
+    # 丢失后的幂等重试拿到的不再是幽灵 id。命中路径不入队、不占配额。
+    if request.dedup_key:
+        claimed, mapped = _claim_start_dedup_at_post(
+            redis, tenant, request.dedup_key, execution_id
+        )
+        if not claimed and mapped:
+            row = _load_full_state(redis, _exec_key(tenant, mapped))
+            if row is not None:
+                _audit(http_request, "execution.start", mapped,
+                       {"flow_id": request.flow_id, "mode": "queue",
+                        "dedup_hit": True, "dedup_key": request.dedup_key},
+                       tenant_id=tenant)
+                return {
+                    "status": row.get("status") or "queued",
+                    "flow_id": row.get("flow_id") or request.flow_id,
+                    "execution_id": mapped,
+                    "message": (
+                        "同 dedup_key 的 start 已受理（幂等重试收敛到既有执行）"
+                    ),
+                }
+            # 孤儿映射（映射的执行行已被删除，如 force DELETE 后 7 天内重试
+            # ——旧 id 有墓碑，worker 拒绝重建，绝不能复用）：释放后按全新
+            # start 继续；并发后来者抢先认领则返回其 id（其 POST 正在落行）。
+            _release_start_dedup_if_owner(
+                redis, tenant, request.dedup_key, mapped
+            )
+            claimed, mapped = _claim_start_dedup_at_post(
+                redis, tenant, request.dedup_key, execution_id
+            )
+            if not claimed and mapped:
+                _audit(http_request, "execution.start", mapped,
+                       {"flow_id": request.flow_id, "mode": "queue",
+                        "dedup_hit": True, "dedup_key": request.dedup_key,
+                        "orphan_reclaim": True},
+                       tenant_id=tenant)
+                return {
+                    "status": "queued",
+                    "flow_id": request.flow_id,
+                    "execution_id": mapped,
+                    "message": "同 dedup_key 的 start 已受理（幂等重试收敛到既有执行）",
+                }
+
     message = {
         "type": "start",
         "flow_id": request.flow_id,
@@ -1544,12 +1741,30 @@ async def start_execution(
                 max_running=max_running,
             ),
         )
+    # 入队**之前**同步落 queued 占位状态行（plaita#273）：POST 返回的 id
+    # 立刻可 GET/列表可见，worker 消费时以 running 行覆盖接管（占位行空
+    # context，worker 按「非终态+空 checkpoint=首投」处理，不误转 resume）。
+    # 落盘失败即 5xx 并回滚配额，不入队（不带病返回 200）。
+    _now_iso = datetime.now().isoformat()
+    if not _write_queued_placeholder(
+        redis, tenant, execution_id, request.flow_id, request.version, _now_iso
+    ):
+        release_tenant_start(redis, tenant, execution_id)
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail(
+                "execution_state_persist_failed",
+                "执行状态落盘失败，请稍后重试",
+            ),
+        )
     # 写入任务队列 Stream（FlowWorker 消费组消费）
     try:
         _enqueue(message, redis)
     except Exception:
-        # 入队失败回滚名额，防泄漏（否则该 execution 的名额要等 TTL 才自愈）
+        # 入队失败回滚名额，防泄漏（否则该 execution 的名额要等 TTL 才自愈）；
+        # 占位行同步清掉，不留无人消费的幽灵 queued 行（清理失败留 ERROR）。
         release_tenant_start(redis, tenant, execution_id)
+        _discard_queued_placeholder(redis, tenant, execution_id)
         raise
 
     _audit(http_request, "execution.start", execution_id,
@@ -1606,6 +1821,68 @@ async def cancel_execution(
             "status": status,
             "execution_id": execution_id,
             "message": f"执行已是终态（{status}），忽略取消",
+        }
+
+    # queued（已受理、worker 未接管）直接终态化（plaita#273）：worker 停机/
+    # 积压期的排队执行必须可取消，且配额立即回收（不等条目 TTL 自愈）。
+    # 顺序：先写取消标志——覆盖「console 置终态与 worker 消费落 running」的
+    # 竞窗（标志在位时 worker 的 start 入口检查仍会终态化 cancelled）；再投
+    # cancel 消息（保留：PEL/重投语义）；最后 CAS 仅当行仍是 queued 时置
+    # 终态——CAS 输了说明 worker 恰好接管（running），走下方标志+消息路径。
+    if status == "queued":
+        redis.set(
+            _cancel_key(tenant, execution_id),
+            datetime.now().isoformat(),
+            ex=CANCEL_FLAG_TTL_SECONDS,
+        )
+        _enqueue(
+            {
+                "type": "resume",
+                "flow_id": flow_id,
+                "execution_id": execution_id,
+                "resume_type": "cancel",
+                "tenant_id": tenant or "default",
+                "data": None,
+                "timestamp": datetime.now().isoformat(),
+            },
+            redis,
+        )
+        _now = datetime.now().isoformat()
+        cancelled_row = dict(info)
+        cancelled_row["status"] = "cancelled"
+        cancelled_row["end_time"] = _now
+        cancelled_row["last_update_time"] = _now
+        try:
+            cas = redis.eval(
+                _CANCEL_QUEUED_ROW_LUA,
+                1,
+                _exec_key(tenant, execution_id),
+                json.dumps(cancelled_row),
+                str(execution_state_ttl_seconds()),
+            )
+        except Exception as exc:  # noqa: BLE001 — CAS 失败不回滚取消意图（标志已落）
+            cas = -1
+            logger.warning(
+                "queued 执行条件终态化失败（取消意图已落，worker 消费时终态化）: "
+                "execution=%s: %s", execution_id, exc,
+            )
+        if cas == 1:
+            release_tenant_start(redis, tenant, execution_id)
+        elif cas == -1:
+            logger.warning(
+                "queued 执行状态行损坏，跳过条件终态化（标志+消息路径兜底）: "
+                "execution=%s", execution_id,
+            )
+        _audit(request, "execution.cancel", execution_id, tenant_id=tenant)
+        return {
+            "success": True,
+            "status": "cancelled",
+            "execution_id": execution_id,
+            "message": (
+                "执行已取消（排队中，配额已释放）" if cas == 1
+                # 竞态：worker 恰好接管——标志+消息路径生效，配额由其终态释放
+                else "执行已取消"
+            ),
         }
 
     # 取消消息入队（保留）：worker 全灭后的死人开关——消息留在 pending，

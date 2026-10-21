@@ -371,6 +371,61 @@ class TestConsoleBFF:
         assert req2.dedup_key == "order-123"
 
 
+class TestProducerPreclaimSelfHit:
+    """plaita#274 配套（worker 侧）：console 生产侧在 POST 时以同键预认领
+    （SET NX，映射值=预铸载体 id）。worker 消费该消息时 `_claim_start_dedup`
+    必须把它当**自命中**按认领成功继续——绝不能走 hit 分支把唯一执行哑掉
+    （映射行还是 queued 占位/初始快照时，hit 的现状回报会让 start 不被
+    消费、执行永不推进）。重投安全由 preminted 载体转换（#234）兜底。"""
+
+    def test_preclaimed_mapping_same_carrier_proceeds_to_start(self):
+        """映射值==载体 id（console 预认领）→ start 照常执行，不再回现状。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, _flow_storage())
+        # console POST 时的预认领：键已存在且指向载体 id 本身
+        fake.set("plaita:start-dedup:k1", "exec-1")
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.execution_id = "exec-1"
+            inst.run_distributed.return_value = {
+                "execution_id": "exec-1", "is_end": True, "context": {},
+            }
+            result = worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                       execution_id="exec-1")
+
+        assert result["is_end"] is True
+        inst.run_distributed.assert_called_once()  # 确实启动了（不是 dedup 现状回报）
+        assert "deduplicated" not in result
+
+    def test_preclaimed_mapping_different_carrier_still_hits(self):
+        """映射值≠载体 id（真正的双开/重投）→ 仍走 hit，绝不二次 start。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        worker = _redis_worker(fake, storage, _flow_storage())
+        storage.save_execution_state(
+            "exec-1",
+            ExecutionState(
+                execution_id="exec-1", flow_id="f1", status="suspended",
+                context={"$LAST_NODE": "wait", "$NODE": {}},
+            ),
+        )
+        fake.set("plaita:start-dedup:k1", "exec-1")
+
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.execution_id = "exec-2"
+            result = worker.start_flow("f1", {}, version="1", dedup_key="k1",
+                                       execution_id="exec-2")
+
+        assert result["execution_id"] == "exec-1"
+        assert result["deduplicated"] is True
+        inst.run_distributed.assert_not_called()
+
+
 class TestStartToResumeParamsCarry:
     """plaita#122：start 幂等命中把 start 载体转成 resume 载体时，必须把原
     start 的 params 带上。

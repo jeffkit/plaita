@@ -35,6 +35,18 @@ DEFAULT_CLAIM_MIN_IDLE_MS = 60_000
 DEFAULT_MAX_DELIVERIES = 5
 DEFAULT_DLQ_SUFFIX = ":dlq"
 
+# ---- start 幂等映射（plaita#274）----
+# 键形状与 TTL 的**唯一单源**：worker 消费侧（FlowWorker._claim_start_dedup）
+# 与 console 生产侧（POST /executions 的入队前认领）共用，防两处键名/TTL
+# 漂移导致「同键必同 id」契约在某一条路径上失效。键按租户 namespace 路由
+# （与租约键同规则），不同租户同 dedup_key 互不可见。
+START_DEDUP_TTL_SECONDS = 7 * 86400
+
+
+def start_dedup_map_key(namespace: str, dedup_key: str) -> str:
+    """start 去重映射键：``{ns}:start-dedup:{key}``。"""
+    return f"{namespace}:start-dedup:{dedup_key}"
+
 # 消息信封版本：**语义**版本的唯一入口。字段只增不改语义时不 bump；
 # 一旦改了同名字段的含义/必需性，必须 bump，让仍按旧语义解析的消费者
 # 明确拒收（进 DLQ）而不是「猜着跑」。缺该字段 = v1（历史消息）。
