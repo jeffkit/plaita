@@ -295,7 +295,11 @@ python -m plaita.server.flow_worker \
 - **与 G1 retry 唤醒的组合**（43828aa）：预算耗尽终态化的执行仍可经人工
   `resume_type=retry` 唤醒（error 态断点续跑）——唤醒放行即清零该执行下**所有节点**
   的计数键，人工唤醒后拿全新预算；flow 定义指纹校验先于唤醒，定义被改时执行保持
-  error（修复定义后仍可再 retry）。
+  error（修复定义后仍可再 retry）。**清预算与记唤醒配额是同一 Lua 脚本原子收口**
+  （第七十一轮任务①）：此前两步散调，清计数失败被吞而记数照常执行——配额被
+  消耗却没拿到新预算，下一次失败直接终态化，半生效唤醒净烧额度；现在脚本未生效
+  即抛 `G1WakeupAccountingError`（StatePersistError 子族，消息重投、不终态化），
+  配额守恒，重投按 running 行「从断点续跑」收敛。
 - **唤醒/失败次数是有界的（plaita#73，2026-10-10）**：只清预算不限次数的循环是
   自毁的（`唤醒 → 清零预算 → 跑 5 次 → 又终态化 → 再唤醒`，实测某执行一天被
   唤醒 5 轮、每轮烧 5 次沙箱）。两道**上限**都落在 `FlowWorker` 类常量上，
@@ -531,6 +535,14 @@ start 消息重投（worker 崩溃/保存失败）历史上会新建 execution_i
     `sched:{schedule_id}:fired:{墙钟秒}` 并 warning（调度循环会先自愈
     `next_run_at`，该路径只在定义缺失且调用方未传 due 时可达）。
   手动 `POST /executions` 仍不自动加键。
+  调度触发与手动 start 同一受理语义（A43-04 收口可见性双标）：`fire_schedule`
+  入队前以同款 worker 同源键**生产侧预认领**——同 due 重触发（状态回写失败 +
+  锁过期）不再产生第二条注定被 worker 吞掉的消息，而是收敛到首次触发的
+  execution_id（fire_record `enqueue="dedup"`）；入队前同步落 `queued` 占位状态行
+  （`invoker="schedule"`，消费时被 running 行覆盖接管），入队失败逐级回滚
+  （配额/占位行/映射）；fire_record 记 `execution_id`——worker 停机/积压期，
+  调度触发的执行可经 console history 定位、GET 占位行、CANCEL 直取消并回收配额，
+  与手动 start 的受理窗口完全一致。
 
 
 ## 职责

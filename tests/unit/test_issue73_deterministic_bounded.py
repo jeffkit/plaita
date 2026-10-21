@@ -215,7 +215,13 @@ class TestCounterIsConsecutiveNotCumulative:
 
         src = inspect.getsource(RedisFlowWorker.resume_flow)
         seg = src.split("if retry_wakeup:")[1].split("execution = FlowExecution(")[0]
-        assert "_reset_node_retry_counter(execution_id)" in seg, "可重试预算仍要清零"
+        # 第七十一轮任务①起，「清零可重试预算」收口进原子记账
+        # `_commit_g1_wakeup`（单段 Lua 清 noderetry 全族 + 记 g1wakeups，
+        # 清预算失败不再烧配额）——机制名换了，契约不变：可重试预算仍要清零。
+        assert "_commit_g1_wakeup(execution_id)" in seg, "可重试预算仍要清零（原子收口）"
+        assert "_reset_node_retry_counter(execution_id)" not in seg, (
+            "唤醒块不得再散调清预算（回到非原子两步=第七十一轮缺陷复归）"
+        )
         assert "_reset_deterministic_failure_counter(execution_id)" not in seg, (
             "确定性失败计数不得在唤醒时清零（否则上限形同虚设）"
         )
