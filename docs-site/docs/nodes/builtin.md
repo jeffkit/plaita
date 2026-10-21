@@ -291,11 +291,12 @@ register_code_node()  # 默认 docker；无 Docker 时显式传 default_backend
 ```
 
 访问策略（SSRF 防护）：`requestTimeout`（默认 30s，**上限 600s**，必须是正的有限秒数；
+布尔/字符串一律拒绝、不做宽松强转（`true`→1s、`"600"`→600s 的隐式转换已移除）；
 它是**整个请求含所有重定向跳的总预算**，每跳只拿剩余额度，不再逐跳重新起算——#267）、
 `allowedHosts` / `deniedHosts`（精确域名 / `*.suffix` / CIDR）、`blockPrivateNetworks`
 （拒绝回环/内网/链路本地等私网段）、`maxRedirects`（默认 5，**上限 20**，必须是
-**非负整数**：负值 / 非有限 / 小数在构造期具名拒绝，`0` 合法 = 不跟随重定向；同步与
-异步同口径，超限报 `Too many redirects`）。
+**非负整数**：负值 / 非有限 / 小数 / 布尔 / 字符串（含数字字符串 `"5"`）在构造期具名
+拒绝，`0` 合法 = 不跟随重定向；同步与异步同口径，超限报 `Too many redirects`）。
 上述边界均在**构造期**校验：保存/发布/加载时越界直接失败，避免单个节点长期占用共享
 worker。负值必须在构造期拒绝——sync/async 的重定向循环对负值解释不同（sync 会先发
 一跳，async 的 `range(max_redirects+1)` 为空则一跳都不发）。执行级取消

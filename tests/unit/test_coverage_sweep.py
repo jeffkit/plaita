@@ -35,6 +35,10 @@ class TestRunnerLine165(unittest.TestCase):
         历史行为：range(-1+1) 为空 → 不执行节点 → _get_error_result 静默返回
         None，abort 策略下错误被吞、流程"成功"。钳制后节点必然执行，错误走
         正常的 _handle_node_error 分发。
+
+        B2R27-01 口径变更（2026-10-21）：负值已在 RecoverableErrorHandler
+        构造期具名拒绝（test_a2r35_01_caps_shape.py）；本用例经
+        ``model_construct`` 绕过校验，只验证 runner 钳位的纵深防御仍在。
         """
         runner = self._make_runner()
         node = MagicMock()
@@ -42,8 +46,9 @@ class TestRunnerLine165(unittest.TestCase):
         node.timeout_handler = None
         node.id = "n1"
         node.run.side_effect = RuntimeError("boom")
-        handler = RecoverableErrorHandler.model_validate(
-            {"strategy": "continue", "retryTimes": -1}
+        handler = RecoverableErrorHandler.model_construct(
+            retry_times=-1,
+            strategy=ErrorStrategy.CONTINUE,
         )
         node.error_handler = handler
         flow = MagicMock()

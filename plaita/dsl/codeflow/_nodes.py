@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from typing import Any, Dict, List, Optional
 
 from plaita.dsl.codeflow._common import (
@@ -35,6 +36,41 @@ def _apply_base_kwargs(spec: Dict[str, Any], kw: Dict[str, Any], ctx: _CompileCt
     eh = kw.get("on_error") or kw.get("on_error_handler")
     if eh is not None and "errorHandler" not in spec:
         spec["errorHandler"] = _eval_error_handler(eh, ctx)
+
+
+def _caps_literal(node: ast.AST, field: str, *, integer: bool) -> Any:
+    """caps 数值字段（requestTimeout/maxRedirects/retryTimes）的编译期字面量门。
+
+    A2R35-01 / A2R28-04：负字面量是 ``ast.UnaryOp``，此前要么被编译成
+    ``$F.sub(0, 1)``（到 Pydantic 才以 ``int_parsing`` 的面目失败，非具名边界），
+    要么在 ErrorHandler 里因「只认 ``ast.Constant``」被**静默丢弃**
+    （``retry_times=-5`` 等价于没写）。现在构造期具名拒绝：负数、布尔、
+    字符串、表达式，以及整数字段的非有限/带小数值——与其他四入口同口径。
+    """
+    if (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, (int, float))
+            and not isinstance(node.operand.value, bool)):
+        raise _CodeflowError(
+            f"{field} 不能为负数: -{node.operand.value!r}"
+            "（codeflow 编译期拒绝，与其他入口同口径）", node)
+    if (not isinstance(node, ast.Constant)
+            or isinstance(node.value, bool)
+            or not isinstance(node.value, (int, float))):
+        shown = repr(node.value) if isinstance(node, ast.Constant) \
+            else type(node).__name__
+        raise _CodeflowError(
+            f"{field} 必须是数字字面量（布尔/字符串/表达式不支持）: {shown}",
+            node)
+    value = node.value
+    if not math.isfinite(value):
+        raise _CodeflowError(f"{field} 必须是有限数字: {value!r}", node)
+    if integer:
+        if int(value) != value:
+            raise _CodeflowError(
+                f"{field} 必须是有限整数: {value!r}", node)
+        return int(value)
+    return value
 
 
 def _compile_node_call(
@@ -99,12 +135,20 @@ def _compile_node_call(
             ("deniedHosts", ("denied_hosts", "deniedHosts")),
             ("blockPrivateNetworks",
              ("block_private_networks", "blockPrivateNetworks")),
-            ("requestTimeout", ("request_timeout", "requestTimeout")),
-            ("maxRedirects", ("max_redirects", "maxRedirects")),
         ):
             for name in spellings:
                 if name in kw:
                     spec[ir_key] = _const(kw[name])
+                    break
+        # A2R35-01/A2R28-04：caps 数值字段走字面量门，负数/非数字在编译期
+        # 具名拒绝（不落到 ``$F.sub(0, 1)`` 的 int_parsing 面目）。
+        for ir_key, spellings, integer in (
+            ("requestTimeout", ("request_timeout", "requestTimeout"), False),
+            ("maxRedirects", ("max_redirects", "maxRedirects"), True),
+        ):
+            for name in spellings:
+                if name in kw:
+                    spec[ir_key] = _caps_literal(kw[name], ir_key, integer=integer)
                     break
         eh = kw.get("on_error") or kw.get("on_error_handler")
         if eh is not None:
@@ -282,8 +326,10 @@ def _eval_error_handler(node: ast.AST, ctx: _CompileCtx) -> Dict[str, Any]:
             )
         spec: Dict[str, Any] = {"strategy": strategy}
         rt = kw.get("retry_times") or kw.get("retryTimes")
-        if rt is not None and isinstance(rt, ast.Constant):
-            spec["retryTimes"] = rt.value
+        if rt is not None:
+            # A2R35-01/A2R28-04：只认 ast.Constant 时 UnaryOp（-5）被静默
+            # 丢弃（等价 retryTimes=0）——改走字面量门，负数/非数字具名拒绝。
+            spec["retryTimes"] = _caps_literal(rt, "retryTimes", integer=True)
         dv = kw.get("default") or kw.get("default_value") or kw.get("defaultValue")
         if dv is not None:
             spec["defaultValue"] = _compile_expr(dv, ctx)
