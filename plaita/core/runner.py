@@ -556,9 +556,10 @@ class NodeRunner:
         max_timeout_ms: Optional[int],
     ) -> Any:
         error_handler = node.error_handler
-        # retryTimes 配成负数时 range(max_retries+1) 为空, 循环体一次不跑直接
-        # 落到 _get_error_result——abort 策略下错误被静默吞掉, 流程"成功"结束。
-        # 钳到 >=0 保证至少执行一次, 错误走正常的 _handle_node_error 分发。
+        # retryTimes 负值已在构造期具名拒绝（B2R27-01 口径变更，2026-10-21）；
+        # 这里仍钳到 >=0 作纵深防御——绕过 Pydantic 的构造路径（如
+        # model_construct）不致让 range(max_retries+1) 为空、把错误静默吞成
+        # 流程"成功"。
         max_retries = max(0, error_handler.retry_times if error_handler else 0)
         config_timeout = self._parse_timeout(node.timeout)
 

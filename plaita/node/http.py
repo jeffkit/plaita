@@ -1457,6 +1457,24 @@ class HTTP(Node):
             
         return values
 
+    # A2R35-01：布尔/字符串此前被 Pydantic 宽松强转（true→1.0 秒、"600"→600 秒），
+    # 与 sexpr 的严格式（``_positive_seconds`` 响亮拒绝）构成入口分叉。以 sexpr
+    # 为锚统一：bool/str 一律构造期具名拒绝，合法域只留正的有限数字。
+    @field_validator("request_timeout", mode="before")
+    @classmethod
+    def _validate_request_timeout_shape(cls, value):
+        if isinstance(value, bool):
+            raise ValueError(
+                f"requestTimeout 必须是正的有限秒数，不能是布尔值: {value!r}"
+                "（true/false 会被宽松强转成 1/0 秒，请直接写数字）"
+            )
+        if isinstance(value, str):
+            raise ValueError(
+                f"requestTimeout 必须是正的有限秒数，不能是字符串: {value!r}"
+                "（数字字符串不会被强转，请直接写数字）"
+            )
+        return value
+
     # A2 r22 P1：构造期上限。放在字段 validator（而非 validate()）里，是因为
     # Flow.validate_nodes 把 validate() 异常降级为 warning；只有 Pydantic 校验
     # 才能让 console 保存/发布（Flow.model_validate）与运行期加载一并硬拒绝。
@@ -1482,11 +1500,24 @@ class HTTP(Node):
     # ``maxRedirects=-1`` 会一路构造成功，而 sync/async 的重定向循环对负值
     # 的解释不同（sync 先发一跳再报超限；async 的 ``range(max_redirects+1)``
     # 为空，一跳都不发就报超限），同一配置两种行为。``0`` 仍是合法的「不跟随」。
+    # A2R35-01：bool/str 此前在这里放行、由 Pydantic 宽松强转（true→1、"5"→5），
+    # 注释声称「交给 Pydantic 报类型错误」与实测相反——现以 sexpr 严格式为锚
+    # 具名拒绝，五入口同口径。
     @field_validator("max_redirects", mode="before")
     @classmethod
     def _validate_max_redirects_shape(cls, value):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return value  # 交给 Pydantic 报类型错误（不吞字符串等输入）
+        if isinstance(value, bool):
+            raise ValueError(
+                f"maxRedirects 必须是整数，不能是布尔值: {value!r}"
+                "（true/false 会被宽松强转成 1/0，请直接写整数）"
+            )
+        if isinstance(value, str):
+            raise ValueError(
+                f"maxRedirects 必须是整数，不能是字符串: {value!r}"
+                "（数字字符串不会被强转，请直接写整数）"
+            )
+        if not isinstance(value, (int, float)):
+            return value  # 其余类型交给 Pydantic 报类型错误（不吞输入）
         if isinstance(value, float) and (
             not math.isfinite(value) or not value.is_integer()
         ):

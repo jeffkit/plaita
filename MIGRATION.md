@@ -8,6 +8,24 @@
 
 ## Unreleased
 
+### caps 数值字段形状收紧：布尔/数字字符串/负数构造期拒绝（A2R35-01 / A2R28-04 / B2R27-01）
+
+**口径（contract）**：`maxRedirects` / `requestTimeout` / `retryTimes` 不再做宽松
+强转——布尔（`true`→1/1.0s）与字符串（`"5"`→5、`"600"`→600）现在在**构造期具名
+拒绝**（JSON / Builder / @flow / console / S-expression 五入口同口径，此前仅
+S-expression 拒）。**`retryTimes` 负数为口径变更**：`-1`/`-5` 此前构造期接受、
+运行期被 `max(0, …)` **静默钳 0**（无任何 WARNING）；现在构造期具名拒绝。
+`@flow` 源码里 caps 字段只认数字字面量：负字面量（`max_redirects=-1`）此前编译成
+`$F.sub(0, 1)` 后以 `int_parsing` 的面目失败（非具名边界）、`retry_times=-5` 更是
+被**静默丢弃**（等价 0），现在均为编译期具名拒绝。
+
+- **受影响**：定义里写 `retryTimes` 负数（本意「默认/不重试」应写 `0` 或省略）、
+  用布尔/数字字符串配 caps 的流程与脚本；`@flow` 源码用变量/表达式给 caps 字段
+  赋值（本就不被运行期支持，现在报错前移到编译期）。
+- **迁移**：`retryTimes: -1` → 省略字段或写 `0`；`"5"`/`true` → 直接写整数。
+- **不受影响**：`0`..上限的合法整数、`requestTimeout` 的小数秒（`0.5` 合法）、
+  `maxRedirects=0`（不跟随重定向）、整数值 float（`5.0` 归一为 `5`）。
+
 ### console 列表 `total` 语义与分页参数（A2R24-02/05/08）
 
 **口径（contract）**：`/api/logs`、`/api/logs/instance/{id}`、`/api/events` 的

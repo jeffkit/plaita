@@ -355,9 +355,35 @@ MAX_RETRY_TIMES = 10
 class RecoverableErrorHandler(ErrorHandler):
     retry_times: int = Field(0, alias="retryTimes")
 
+    @field_validator("retry_times", mode="before")
+    @classmethod
+    def _validate_retry_times_shape(cls, value):
+        # A2R35-01：布尔/数字字符串此前被 Pydantic 宽松强转（true→1、"5"→5），
+        # 五入口（JSON/Builder/@flow/console/sexpr）全收，与 maxRedirects/
+        # requestTimeout 的 sexpr 严格式构成契约分叉——统一为构造期具名拒绝。
+        if isinstance(value, bool):
+            raise ValueError(
+                f"retryTimes 必须是整数，不能是布尔值: {value!r}"
+                "（true/false 会被宽松强转成 1/0，请直接写整数）"
+            )
+        if isinstance(value, str):
+            raise ValueError(
+                f"retryTimes 必须是整数，不能是字符串: {value!r}"
+                "（数字字符串不会被强转，请直接写整数）"
+            )
+        return value
+
     @field_validator("retry_times")
     @classmethod
     def _validate_retry_times_upper_bound(cls, value: int) -> int:
+        # B2R27-01 口径变更（2026-10-21）：负数此前构造期接受、运行期
+        # ``max(0, ...)`` 静默钳 0（无任何 WARNING，与「任何降级必须可观测」
+        # 相悖）；现与其他入口的 -1 具名拒绝对齐，构造期直接拒绝。
+        if value < 0:
+            raise ValueError(
+                f"retryTimes 不能为负值: {value}"
+                "（0 表示不重试；负值此前被静默钳 0，现已构造期拒绝）"
+            )
         if value > MAX_RETRY_TIMES:
             raise ValueError(
                 f"retryTimes 超过上限: {value} > {MAX_RETRY_TIMES}"

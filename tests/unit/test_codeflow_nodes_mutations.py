@@ -353,12 +353,16 @@ class TestEvalErrorHandlerMutations:
         assert spec["errorCode"] == 404
         assert spec["errorMessage"] == "not found"
 
-    def test_retry_times_ignores_non_constant(self):
+    def test_retry_times_rejects_non_constant(self):
+        """A2R28-04（B2 r61 口径变更，原 test_retry_times_ignores_non_constant）：
+        非 Constant（变量/表达式）不再**静默丢弃**（等价 retryTimes=0），
+        编译期具名拒绝。"""
         ctx = _ctx()
         ctx.names["n"] = "$NODE.n"
         node = _call('ErrorHandler("abort", retry_times=n)')
-        spec = _eval_error_handler(node, ctx)
-        assert "retryTimes" not in spec
+        with pytest.raises(_CodeflowError) as exc:
+            _eval_error_handler(node, ctx)
+        assert "retryTimes" in str(exc.value)
 
     def test_reference_missing_flow_message(self):
         with pytest.raises(_CodeflowError) as exc:
