@@ -6,17 +6,24 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { 
-  Server, 
-  ChevronUp, 
-  Check, 
-  Plus, 
-  Settings, 
+import {
+  Server,
+  ChevronUp,
+  Check,
+  Plus,
+  Settings,
   Trash2,
   X,
-  Loader2
+  Loader2,
+  AlertTriangle
 } from 'lucide-react'
 import { api, ClusterInfo, CreateClusterRequest } from '../services/api'
+import {
+  dataPlaneMismatched,
+  dataPlaneNeedsNotice,
+  dataPlaneNoticeText,
+  dataPlaneSourceLabel,
+} from '../services/clusterDataplane'
 
 // 架构配套预设（与后端 cluster_registry._PRESET_SERVICES 对齐）
 const PRESET_OPTIONS = [
@@ -194,6 +201,9 @@ export default function ClusterSwitcher({ collapsed = false, placement = 'bottom
     onSuccess: () => {
       setSwitchError('')
       queryClient.invalidateQueries({ queryKey: ['clusters'] })
+      // 集群管理页的 activeCluster 查询（GET /clusters/active）也要失效：
+      // 数据面错位警示条以它为数据源，切换后滞留旧集群就是撒谎（A2R40-01）
+      queryClient.invalidateQueries({ queryKey: ['activeCluster'] })
       queryClient.invalidateQueries({ queryKey: ['cluster-info'] })
       queryClient.invalidateQueries({ queryKey: ['service-types'] })
       queryClient.invalidateQueries({ queryKey: ['managed-instances'] })
@@ -296,9 +306,19 @@ export default function ClusterSwitcher({ collapsed = false, placement = 'bottom
                   }}
                 >
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{cluster.name}</div>
+                    <div className="text-sm font-medium truncate flex items-center gap-1.5">
+                      {cluster.name}
+                      {/* A2R40-01：元数据≠生效在列表行就可见，等切过去才发现就晚了 */}
+                      {dataPlaneNeedsNotice(cluster) && (
+                        <span title={dataPlaneNoticeText(cluster)}>
+                          <AlertTriangle className="w-3.5 h-3.5 text-status-warning" />
+                        </span>
+                      )}
+                    </div>
                     <div className="text-xs text-dark-500 truncate">
-                      {cluster.description || cluster.redis_url}
+                      {dataPlaneMismatched(cluster)
+                        ? `生效 ${cluster.data_plane_redis_url}（${dataPlaneSourceLabel(cluster.data_plane_redis_source)}）`
+                        : cluster.description || cluster.redis_url}
                     </div>
                   </div>
                   {cluster.is_active && <Check className="w-4 h-4 flex-shrink-0" />}
