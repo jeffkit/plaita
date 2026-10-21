@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十五轮，2026-10-22）：**B109-01/02 + B2 r67 注记轻量硬化（基线 `a75b4ab`）**——① `safeExternalUrl` 外部链接 scheme 白闸（仅 http/https；javascript:/data:/相对路径返回 null），`ExecutionDetail` Langfuse 链接非白即降级纯文本；② `buildLogsHref` 用 URLSearchParams 逐参数编码，Cluster 日志深链的 serviceType/instanceId 特殊字符不再改写 query；③ `test_issue69_mutation_matrix.py` 的恒真断言 `assertTrue(x is False or x)` 改为 `assertFalse(refused)`（对照实现 Reduce.initial refused=False，写穿由 live_changed 全表断言兜住）。前端 `node check-api-transport` **33/33** + tsc 干净；unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1121P/13S**；负控（去 scheme 白闸/退回字符串拼接/改错期望值）三红→恢复绿；`landing_gate.py ci` rc=0（`eee7b37` CI + Console E2E `a75b4ab` 绿）。
+
 > 一行摘要（第六十四轮，2026-10-22；任务书标称第六十三轮——台账第六十三轮已被 #289 park-retry 轮占用，按序列顺延）：**B108-01/02 收尾（基线 `c24ce3e`）**——① **park 周期清扫**：新增 `plaita/server/start_dedup_sweeper.py`，park 时写 `{ns}:start-dedup-park:{key}`（id+parked_at），console cluster lifespan 启动 `ParkSweeper`（默认 30s/超时 60s=claiming TTL/预算 100，env 可调/可关）；超时后 queued/缺失行 ⇒ 墓碑+删行+清 map/token+回配额+WARNING，running/终态只删标记；`mark_enqueued` 成功清除标记。② **discarded 独立审计**：worker 终态放弃载体递增 `_dedup_discarded_total`，`/metrics` 新 counter `worker_dedup_discarded_total`，写 `plaita:execution:dedup-discard:{id}`（7d），console 执行详情返回 `dedup_discarded`。测试 unit **4P** sweeper + console 既有 3P 追加指标/审计/详情断言；负控 A–D（永不清理/忽略超时/无 counter/无审计）实红；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1121P/13S**；`landing_gate.py ci` rc=0（`eee7b37` CI + Console E2E 绿）。
 
 > 一行摘要（第六十三轮，2026-10-22；任务书标称第六十二轮——台账第六十二轮已被 #288 reservation 轮占用，按序列顺延）：**#289 mark 失败 park-retry（基线 `39c875a`）**——`mark_enqueued` 失败不再 discard/墓碑/XDEL（carrier 可能已被 worker 消费执行）：新增 `recover_after_mark_failure`（guard→reserve→mark 原地恢复）；map 仍属本 id 且无墓碑时 **park**（保留载体/占位行/映射/配额），同 key/同 due 重试收敛原 id（console 409 in-progress + Retry-After）；只有映射换主/墓碑才清收。schedule 孤儿 row 在且无墓碑时用 `adopt_for_recovery` 同 id 恢复，不再清理换新 id。worker 消费点终态防线：载体命中的执行已 completed/error/cancelled 时具名 WARNING + `discarded=True`，ack 不执行。测试 unit **2P** + console **3P** + 既有 #288/schedule/状态机/console dedup 全绿；负控 A–C（console/schedule 回退 discard、worker 去 discarded）实红；全量 unit **8776P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1118P/13S**；`landing_gate.py ci` rc=0（`39c875a` CI + Console E2E 绿）。#289 关单回执另附。
@@ -539,5 +541,30 @@
 - 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
   subtests**（rebase 到 `eee7b37` 后复跑）；e2e+integration **287P/4S**；
   console **1121P/13S**；`landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十五轮 · B109-01/02 + B2 r67 注记（轻量硬化，2026-10-22，B1 修复席）
+
+- 基线：`origin/main` `a75b4ab`；落地门 `eee7b37` CI success + Console E2E
+  `a75b4ab` 绿。
+- **B109-01 ExecutionDetail Langfuse href scheme**：外部链接直接进 `<a
+  href>`；新增 `safeExternalUrl`（`new URL` + 仅 http/https，其余/相对/
+  畸形返回 null），页面在 null 时降级 `<span>` 纯文本（title 说明）。
+- **B109-02 Cluster 日志深链拼接**：`service_type`/`instance_id` 直接拼
+  query；新增 `buildLogsHref` 用 URLSearchParams 逐参数编码，特殊字符
+  （& = #）不改查询结构；Cluster 改用它。
+- **B2 r67 注记恒真断言**：`assertTrue(x is False or x)` → `assertFalse(x)`；
+  对照实现 Reduce.initial 的 live 子对象由引擎物化/隔离，refused=False，
+  写穿由 live_changed 全表断言兜住。
+- 测试：前端 node `check-api-transport` **33/33**（新增 scheme/编码行为断言
+  + 两处接线静态断言）、`tsc --noEmit` 干净；mutation matrix
+  **40 passed + 1265 subtests**。
+- 负控：① safeExternalUrl 去 scheme 检查 → B109-01 断言 1F；② buildLogsHref
+  退回字符串拼接 → B109-02 断言 1F；③ 恒真断言改成 assertTrue → mutation
+  matrix 1F。证据 `docs/proofs/data/r63-hardening-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
+  subtests**；e2e+integration **287P/4S**；console **1121P/13S**；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

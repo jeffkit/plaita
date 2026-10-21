@@ -1464,8 +1464,9 @@ class TestIssue69R5Provenance(unittest.TestCase):
                          ["refused"])
         self.assertFalse(by_position["X1 verbatim (nested scope = live sub-object)"]
                          ["live_changed"])
-        self.assertTrue(by_position["Reduce.initial (live sub-object)"]["refused"] is False
-                        or by_position["Reduce.initial (live sub-object)"]["refused"])
+        # Reduce.initial 的 live 子对象由引擎物化/隔离，不需要拒绝（refused=False）；
+        # 写穿由上面的 live_changed 全表断言兜住，这里钉住具体期望值。
+        self.assertFalse(by_position["Reduce.initial (live sub-object)"]["refused"])
         self.assertFalse(by_position["engine-bound non-persisted key (fresh by construction)"]
                          ["refused"])
         self.assertTrue(by_position["host-bound non-persisted key (boundary)"]["refused"])

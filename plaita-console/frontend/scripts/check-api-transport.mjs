@@ -19,12 +19,14 @@ import {
   ApiError,
   START_RETRY_WINDOW_MS,
   buildHttpError,
+  buildLogsHref,
   decodeSuccessBody,
   isExecutionStartInProgress,
   isExecutionStartRetryable,
   isTerminalStatus,
   parseRetryAfterMs,
   resolveApiUrl,
+  safeExternalUrl,
   shouldRetryQuery,
   startRetryDelayMs,
   startRetryWindowError,
@@ -272,6 +274,28 @@ check('startExecution 生成/复用 dedup_key 且 409 重试同 body', () => {
   assert.match(apiSrc, /startRetryWindowError\(error\)/)
   assert.match(apiSrc, /startRetryDelayMs\(error, attempt\)/)
   assert.doesNotMatch(apiSrc, /attempt >= 3/)
+})
+check('B109-01：外部链接 scheme 白闸（http/https 之外降级）', () => {
+  assert.equal(safeExternalUrl('https://langfuse.example/trace/1'), 'https://langfuse.example/trace/1')
+  assert.equal(safeExternalUrl('http://langfuse.example/trace/1'), 'http://langfuse.example/trace/1')
+  assert.equal(safeExternalUrl('javascript:alert(1)'), null)
+  assert.equal(safeExternalUrl('data:text/html,<script>alert(1)</script>'), null)
+  assert.equal(safeExternalUrl('/relative/path'), null)
+  assert.equal(safeExternalUrl(null), null)
+})
+check('B109-02：日志深链逐参数编码，特殊字符不改查询结构', () => {
+  const href = buildLogsHref('/plaita', 'web', 'inst&id=1#frag')
+  const parsed = new URL(href, 'https://console.local')
+  assert.equal(parsed.pathname, '/plaita/logs')
+  assert.equal(parsed.searchParams.get('service_type'), 'web')
+  assert.equal(parsed.searchParams.get('instance_id'), 'inst&id=1#frag')
+  assert.deepEqual([...parsed.searchParams.keys()], ['service_type', 'instance_id'])
+})
+check('B109 接线：ExecutionDetail 用 safeExternalUrl，Cluster 用 buildLogsHref', () => {
+  const detail = read('../src/pages/ExecutionDetail.tsx')
+  const cluster = read('../src/pages/Cluster.tsx')
+  assert.match(detail, /safeExternalUrl\(execution\.langfuse_trace_url\)/)
+  assert.match(cluster, /buildLogsHref\(SUB_PATH, serviceType, instanceId\)/)
 })
 check('request 解析 Retry-After 并透传 buildHttpError', () => {
   assert.match(apiSrc, /parseRetryAfterMs\(response\.headers\.get\('retry-after'\)\)/)

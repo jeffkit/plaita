@@ -29,6 +29,7 @@ import {
   ExecutionInfo,
   type NodeTiming,
 } from '../services/api'
+import { safeExternalUrl } from '../services/transport'
 import { Button, Card, StatusBadge, JsonViewer, jsonSummary, cn } from '../components/ui'
 import { useFlowDefinition, type FlowDefinitionState } from '../hooks/useFlowDefinition'
 import { nodeOutgoing } from '../components/flow/flowDefinition'
@@ -279,6 +280,7 @@ export default function ExecutionDetail() {
   }
 
   const terminal = isTerminalStatus(execution.status)
+  const langfuseHref = safeExternalUrl(execution.langfuse_trace_url)
 
   return (
     <div className="p-6 h-full overflow-auto space-y-5">
@@ -293,16 +295,26 @@ export default function ExecutionDetail() {
             <p className="text-data-sm text-ink-muted mt-0.5 truncate flex items-center gap-2">
               <span className="truncate">{execution.execution_id}</span>
               {execution.langfuse_trace_url && (
-                <a
-                  href={execution.langfuse_trace_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-plaita-400 hover:text-plaita-300 hover:underline shrink-0"
-                  title="在 Langfuse 中查看完整 trace（含 agent 内部事件与 token 用量）"
-                >
-                  <ExternalLink size={12} />
-                  Langfuse
-                </a>
+                langfuseHref ? (
+                  <a
+                    href={langfuseHref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-plaita-400 hover:text-plaita-300 hover:underline shrink-0"
+                    title="在 Langfuse 中查看完整 trace（含 agent 内部事件与 token 用量）"
+                  >
+                    <ExternalLink size={12} />
+                    Langfuse
+                  </a>
+                ) : (
+                  <span
+                    className="inline-flex items-center gap-1 text-ink-muted shrink-0"
+                    title="Langfuse trace 链接的 scheme 不受支持，已降级为纯文本"
+                  >
+                    <ExternalLink size={12} />
+                    Langfuse
+                  </span>
+                )
               )}
             </p>
           </div>

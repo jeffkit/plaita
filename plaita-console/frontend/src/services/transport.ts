@@ -106,6 +106,39 @@ export function resolveApiUrl(input: string, subPath: string): string {
   return `${subPath}${path}`
 }
 
+/**
+ * B109-01：外部深链 scheme 白闸——只放行 http/https。
+ * 返回 null 时调用方必须降级纯文本，绝不渲染可点击 href。
+ */
+export function safeExternalUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const text = value.trim()
+  if (!text) return null
+  try {
+    const parsed = new URL(text)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return text
+  } catch {
+    // 非绝对 URL（相对路径/畸形串）一律不当作外部链接。
+  }
+  return null
+}
+
+/**
+ * B109-02：日志深链查询串必须逐参数编码，serviceType/instanceId 里的
+ * `&`/`=`/`#` 不得改写查询结构。
+ */
+export function buildLogsHref(
+  subPath: string,
+  serviceType: string,
+  instanceId: string,
+): string {
+  const params = new URLSearchParams({
+    service_type: serviceType,
+    instance_id: instanceId,
+  })
+  return `${subPath}/logs?${params.toString()}`
+}
+
 /** 从 401 以外的错误响应体里取展示文案（兼容 detail 字符串/结构化对象）。 */
 export function messageFromDetail(rawDetail: unknown): string | null {
   if (typeof rawDetail === 'string' && rawDetail.trim()) return rawDetail
