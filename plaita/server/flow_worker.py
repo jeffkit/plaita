@@ -57,6 +57,7 @@ from plaita.runtime_config import (
     ConfigError,
     ConfigGeneration,
     LEGACY_GENERATION,
+    envelope_budget_values,
     load_runtime_config,
     log_config_effective,
     preflight_security_and_limits,
@@ -7555,17 +7556,50 @@ def _cli_startup_problems(args) -> list:
       the env value; a matching CLI value is accepted.
     """
     problems = []
+    invalid_budget_keys = set()
     if int(args.lease_ttl_seconds) < 1:
         problems.append(
             f"--lease-ttl-seconds: {args.lease_ttl_seconds} < minimum 1 "
             "(resume lease TTL; 0/negative makes acquire/renew invalid, and a "
             "silent clamp to 1 leaves no renewal headroom)"
         )
+        invalid_budget_keys.add("lease_ttl_seconds")
     if int(args.max_deliveries) < 1:
         problems.append(
             f"--max-deliveries: {args.max_deliveries} < minimum 1 "
             "(a silent clamp to 1 dead-letters on the first failure)"
         )
+        invalid_budget_keys.add("max_deliveries")
+
+    # #272：生产者（console/schedule/event_filter）只从 env 算 budget_generation。
+    # worker 的 CLI 预算覆盖若与 env-resolved 值不同，新任务信封仍带 env 预算；
+    # 首投可执行，但失败/崩溃留下的 PEL 会被 worker 按不同预算判 stale，永久
+    # 跳过 reclaim（直到 30 天年龄闸）。要求预算四键全部署同源：不一致即拒启。
+    producer_budget = envelope_budget_values()
+    worker_budget = {
+        "lease_ttl_seconds": int(args.lease_ttl_seconds),
+        "max_deliveries": int(args.max_deliveries),
+        "task_max_age_seconds": task_max_age_seconds(),
+        "dlq_max_len": _dlq_max_len_from_env(),
+    }
+    budget_labels = (
+        ("lease_ttl_seconds", "--lease-ttl-seconds", "PLAITA_LEASE_TTL_SECONDS"),
+        ("max_deliveries", "--max-deliveries", "PLAITA_MAX_DELIVERIES"),
+        ("task_max_age_seconds", "task_max_age_seconds", "PLAITA_TASK_MAX_AGE_SECONDS"),
+        ("dlq_max_len", "dlq_max_len", "PLAITA_DLQ_MAX_LEN"),
+    )
+    for key, label, env_key in budget_labels:
+        if key in invalid_budget_keys:
+            continue
+        actual = worker_budget[key]
+        expected = producer_budget[key]
+        if actual != expected:
+            problems.append(
+                f"{label}: worker actual {actual} != producer/env/default "
+                f"{expected} ({env_key}); console/schedule/event_filter hash "
+                f"env only — set {env_key} for the whole deployment instead "
+                "of a worker-only CLI override"
+            )
 
     group = str(args.consumer_group or "").strip()
     if not group:

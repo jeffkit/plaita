@@ -1325,6 +1325,34 @@ def preflight_security_and_limits(environ: Optional[Mapping[str, str]] = None) -
     return warnings
 
 
+def envelope_budget_values(
+    environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, int]:
+    """The four budget inputs producers hash into ``budget_generation``.
+
+    Single source for ``envelope_for_stream`` and the worker CLI preflight
+    (plaita#272). Producers only read env; a worker CLI budget override that
+    differs makes the two ends hash different budgets, so reclaim rejects the
+    new task's PEL forever. Callers compare their actual worker values with
+    this tuple and fail fast on mismatch.
+    """
+    env: Mapping[str, str] = os.environ if environ is None else environ
+    return {
+        "max_deliveries": _safe_int(
+            env.get("PLAITA_MAX_DELIVERIES"), DEFAULT_MAX_DELIVERIES
+        ),
+        "lease_ttl_seconds": _safe_int(
+            env.get("PLAITA_LEASE_TTL_SECONDS"), DEFAULT_LEASE_TTL_SECONDS
+        ),
+        # plaita#271：0 是文档定义的「关闭年龄闸」合法值。生产者必须与 worker
+        # 共用 core.retention.task_max_age_seconds（非法→30d+WARNING，<=0→0）。
+        "task_max_age_seconds": _task_max_age_seconds(env),
+        "dlq_max_len": _safe_int(
+            env.get("PLAITA_DLQ_MAX_LEN"), DEFAULT_DLQ_MAX_LEN
+        ),
+    }
+
+
 def envelope_for_stream(
     stream_key: str,
     *,
@@ -1357,16 +1385,14 @@ def envelope_for_stream(
             dlq = f"{stream_key}{DEFAULT_DLQ_SUFFIX}"
     deployment_epoch = env.get("PLAITA_DEPLOYMENT_EPOCH", LEGACY_GENERATION).strip()
     deployment_epoch = deployment_epoch or LEGACY_GENERATION
-    # Producers do not own the delivery budget of the consumer; using the
-    # process env keeps console/schedule/worker on the same defaults.
-    max_deliveries = _safe_int(env.get("PLAITA_MAX_DELIVERIES"), DEFAULT_MAX_DELIVERIES)
-    lease_ttl = _safe_int(env.get("PLAITA_LEASE_TTL_SECONDS"), DEFAULT_LEASE_TTL_SECONDS)
-    # plaita#271：0 是文档定义的「关闭年龄闸」合法值。生产者必须与 worker
-    # 共用 core.retention.task_max_age_seconds（非法→30d+WARNING，<=0→0），
-    # 否则 age=0 时生产者按 30d 算 budget、worker 按 0 算，reclaim 永远
-    # budget_stale，且 age=0 又关闭了年龄闸 → 失败载体永久留 PEL。
-    task_max_age = _task_max_age_seconds(env)
-    dlq_max_len = _safe_int(env.get("PLAITA_DLQ_MAX_LEN"), DEFAULT_DLQ_MAX_LEN)
+    # Producers do not own the delivery budget of the consumer; the four
+    # values come from env only and are the same tuple the worker CLI
+    # preflight compares against (#272).
+    budget = envelope_budget_values(env)
+    max_deliveries = budget["max_deliveries"]
+    lease_ttl = budget["lease_ttl_seconds"]
+    task_max_age = budget["task_max_age_seconds"]
+    dlq_max_len = budget["dlq_max_len"]
     namespace = (
         env.get("PLAITA_TENANT_NAMESPACE_VERSION", DEFAULT_TENANT_NAMESPACE_VERSION)
         or DEFAULT_TENANT_NAMESPACE_VERSION

@@ -105,8 +105,9 @@ class TestCliStartsGuards:
         assert f"{value}" in text
         assert "minimum 1" in text
 
-    def test_lease_one_is_legal_but_extreme(self):
-        """1s is allowed (issue acceptance #3) but has no renewal headroom."""
+    def test_lease_one_is_legal_but_extreme(self, monkeypatch):
+        """1s is allowed when env agrees (issue #270 acceptance #3)."""
+        monkeypatch.setenv("PLAITA_LEASE_TTL_SECONDS", "1")
         assert _cli_startup_problems(_args(lease_ttl_seconds=1)) == []
         worker = RedisFlowWorker(
             redis_url="redis://localhost:6379/15",

@@ -137,3 +137,32 @@
   `landing_gate.py ci` rc=0（main `4eec873` success）。
 - 单 commit 关闭 #269/#270/#271；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md` / `duo-a2-ledger.md`。
+
+## 第五十三轮 · #272（2026-10-21，B1 修复席）
+
+- 基线：`origin/main` `0c5dea5`（CI success，gate rc=0）。
+- **#272（P1）生产者 envelope 仍只按 env 算预算**：worker 合法 CLI
+  `--lease-ttl-seconds 600 --max-deliveries 3` 时自身哈希 600/3，生产者
+  信封仍 120/5；首投可执行，失败/崩溃留 PEL 后被 worker 判
+  `config_budget_stale`，reclaim 永久跳过（默认 30 天年龄闸）。
+- 修法（沿 r52 #269 先例，fail-fast）：新增
+  `runtime_config.envelope_budget_values()` 作为生产者预算四键单源，
+  `envelope_for_stream` 改用它；`_cli_startup_problems` 将 worker 实际
+  四键（CLI lease/max + `task_max_age_seconds()` + `_dlq_max_len_from_env()`）
+  与生产者元组逐键比较，任一不一致 → 具名 ConfigError（给两边值与 env
+  键名）；`main()` exit 2、worker 不构造。CLI 与 env 一致或仅 env 配置照常，
+  两端 `budget_generation` 必同哈希。四键全部覆盖（lease/max 为 CLI 面，
+  task_max_age/dlq_max_len 比对 worker 实际解析 vs 生产者解析）。
+- 文档：`docs-site/docs/distributed/ops-runbook.md`「配置代际」新增
+  **预算四键只走 env** 口径（CLI 必须与 env 一致，否则启动拒绝；worker-only
+  覆盖会让新任务带旧 budget、PEL 永久 stale）。
+- 负控：budget_labels 置空 → **6F/4P**（CLI 600/3 无 problem、四键
+  mismatch 各红、main `DID NOT RAISE SystemExit`；匹配/env-only、单源 helper、
+  reclaim、分叉探针 4 条仍绿），还原 **10P**。分叉探针记录 pre-fix 形态
+  （producer bg1-6a07… vs worker bg1-ed55…，reclaim None/stale）。
+- 验收：全量 unit `-m "not slow"` **8697P/12S/14 deselected/3498
+  subtests**；e2e+integration **287P/4S**；console **1054P/13S**；
+  plaita-ai **241P/14S/12 subtests**；layering/wheel/size 全绿；
+  `landing_gate.py ci` rc=0（main `0c5dea5` success）。
+- 单 commit 关闭 #272；r51/r52 既有负控（b94-02 6 条、#269-271 20 条）
+  零回归；未触碰他席 `duo-a-ledger.md`/`duo-a2-ledger.md`。

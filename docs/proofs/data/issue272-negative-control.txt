@@ -1,0 +1,41 @@
+=== 负控 #272：budget_labels 置空（恢复 pre-fix 不做预算覆盖比对） ===
+变异（plaita/server/flow_worker.py，_cli_startup_problems）：
+    budget_labels = (
+        ("lease_ttl_seconds", ...),
+        ("max_deliveries", ...),
+        ("task_max_age_seconds", ...),
+        ("dlq_max_len", ...),
+    )
+  →
+    budget_labels = ()  # 负控变异：pre-fix 不做预算覆盖比对
+
+命令：
+  python -m pytest tests/unit/test_issue272_budget_propagation.py -q
+
+测试输出（节选）：
+    def test_cli_budget_override_rejected_with_both_values():
+        ...
+>       assert "--lease-ttl-seconds" in text
+E       AssertionError: assert '--lease-ttl-seconds' in ''
+        （CLI 600/3 与 env 120/5 不被拒绝）
+
+    def test_main_rejects_cli_budget_mismatch(...):
+>       with pytest.raises(SystemExit) as excinfo:
+E       Failed: DID NOT RAISE SystemExit
+        （worker 被构造，未 fail-fast）
+
+FAILED ...test_cli_budget_override_rejected_with_both_values
+FAILED ...test_each_budget_key_mismatch_rejected[lease_ttl_seconds-600-120---lease-ttl-seconds-PLAITA_LEASE_TTL_SECONDS]
+FAILED ...test_each_budget_key_mismatch_rejected[max_deliveries-3-5---max-deliveries-PLAITA_MAX_DELIVERIES]
+FAILED ...test_each_budget_key_mismatch_rejected[task_max_age_seconds-1-2592000-task_max_age_seconds-PLAITA_TASK_MAX_AGE_SECONDS]
+FAILED ...test_each_budget_key_mismatch_rejected[dlq_max_len-7-1000-dlq_max_len-PLAITA_DLQ_MAX_LEN]
+FAILED ...test_main_rejects_cli_budget_mismatch
+6 failed, 4 passed in 0.65s
+
+=== 还原修复后 ===
+10 passed in 0.59s
+
+=== 分叉探针（post-fix，直接构造队列绕过 CLI 门） ===
+producer bg1-6a07ef4af763 != worker bg1-ed55554c3872
+first read: True；reclaim: None；pending 1；config_budget_stale 1+
+（CLI 预检在真实入口阻止的正是这条路径）

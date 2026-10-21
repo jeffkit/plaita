@@ -322,6 +322,13 @@ worker 启动时计算并打印 `event=config.effective`，同时写入 registry
   触发 `queue_config_budget_stale_total` / `config.budget_stale` 告警。这是
   迁移面而非数据损坏：drain 旧消息或接受一次性告警，待全部 worker/console
   重启到新构建后收敛，新消息按新哈希写入。
+- **预算四键只走 env（#272）**：`PLAITA_LEASE_TTL_SECONDS` /
+  `PLAITA_MAX_DELIVERIES` / `PLAITA_TASK_MAX_AGE_SECONDS` /
+  `PLAITA_DLQ_MAX_LEN` 是生产者信封（console/schedule/event_filter）与
+  worker 共用的唯一预算来源。worker CLI `--lease-ttl-seconds` /
+  `--max-deliveries` 必须与 env 一致；不一致时启动即 `ConfigError`（给两边
+  值与 env 键名），否则新任务带旧 `budget_generation`，失败载体在 PEL 中
+  永久 `config_budget_stale`（直到 30 天年龄闸），reclaim 无法接管。
 - **租户状态纪元**：console 每次状态写入/对账都刷新
   `plaita:tenant_status:epoch`（值来自 `PLAITA_DEPLOYMENT_EPOCH`）。worker
   发现 Redis epoch 缺失/更旧 → 非 default 租户拒绝、default 保持 #237
