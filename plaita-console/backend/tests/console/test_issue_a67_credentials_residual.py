@@ -8,7 +8,9 @@ A67-04：console 的 ``_db_dir`` 与引擎各自实现「SQLite ⇒ DB 目录，
 A67-05：密钥文件先 ``write_bytes``（通常 0644）再 ``chmod 0600``，窗口内可读
 44B Fernet key；存量 0644 key 启动对账不收紧。修复契约：``os.open(O_EXCL,
 0o600)`` 创建（不再有宽权限窗口），并发落败者复用胜者 key；启动对账把存量
-key 收紧到 0600 并在摘要里报 ``key_permission_tightened``。
+key 收紧到 0600 并在摘要里报 ``key_permission_tightened``。字段加密
+（``secure_fields``，与凭据共用同一 key 文件）同样覆盖相对 DB URL/相对显式
+key 路径告警、O_EXCL 0600 创建与落败者复用前收紧。
 
 负控形态：
 - 去掉回退 WARNING → 前三个用例的 caplog 断言红；
@@ -26,6 +28,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 import plaita.credentials as credentials
+import secure_fields
 from services import credentials_svc, flow_store
 
 
@@ -33,9 +36,11 @@ from services import credentials_svc, flow_store
 def _reset_warning_state():
     credentials._reset_path_fallback_warnings()
     credentials._KEY_PERMISSION_WARNINGS.clear()
+    secure_fields.reset_for_tests()
     yield
     credentials._reset_path_fallback_warnings()
     credentials._KEY_PERMISSION_WARNINGS.clear()
+    secure_fields.reset_for_tests()
 
 
 def _messages(caplog) -> list[str]:
@@ -94,6 +99,56 @@ def test_console_relative_sqlite_url_warns(tmp_path, monkeypatch, caplog):
     )
     messages = _messages(caplog)
     assert any("相对路径" in message for message in messages), messages
+
+
+def test_console_explicit_relative_key_file_warns(tmp_path, monkeypatch, caplog):
+    """显式相对 PLAITA_CREDENTIALS_KEY_FILE 也按各进程 cwd 解析（A67-04）。"""
+    monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", "rel/creds.key")
+    monkeypatch.chdir(tmp_path)
+    credentials._reset_path_fallback_warnings()
+    caplog.set_level(logging.WARNING, logger="plaita.credentials")
+
+    assert credentials_svc.credentials_key_file() == Path("rel/creds.key")
+    messages = _messages(caplog)
+    assert any("是相对路径" in message for message in messages), messages
+
+
+def test_secure_fields_relative_sqlite_url_warns(tmp_path, monkeypatch, caplog):
+    """字段加密密钥的解析不能绕过 A67-04 的相对 DB URL 告警。"""
+    for name in (
+        "PLAITA_CONSOLE_DB_URL",
+        "PLAITA_CREDENTIALS_FILE",
+        "PLAITA_CREDENTIALS_KEY_FILE",
+        "PLAITA_CREDENTIALS_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    secure_fields.reset_for_tests()
+    caplog.set_level(logging.WARNING, logger="plaita.credentials")
+
+    secure_fields.configure("sqlite:///./relative.db")
+    key = secure_fields._load_master_key(generate=True)
+
+    assert len(key) == 32  # base64 解码后的主密钥
+    assert len((tmp_path / ".plaita-credentials.key").read_bytes()) == 44
+    messages = _messages(caplog)
+    assert any(
+        "相对路径" in message and "relative.db" in message for message in messages
+    ), messages
+
+
+def test_secure_fields_explicit_relative_key_file_warns(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("PLAITA_CREDENTIALS_KEY", raising=False)
+    monkeypatch.setenv("PLAITA_CREDENTIALS_KEY_FILE", "rel/field.key")
+    monkeypatch.chdir(tmp_path)
+    secure_fields.reset_for_tests()
+    caplog.set_level(logging.WARNING, logger="plaita.credentials")
+
+    secure_fields.configure(None)
+
+    assert secure_fields._state.key_source == ("file", Path("rel/field.key"))
+    messages = _messages(caplog)
+    assert any("是相对路径" in message for message in messages), messages
 
 
 def test_console_reconcile_warns_on_non_sqlite_url(tmp_path, monkeypatch, caplog):
@@ -192,6 +247,60 @@ def test_key_creation_loser_reuses_winner_key(tmp_path, monkeypatch):
     assert credentials_svc._create_key_file(key_file) == winner
     assert key_file.read_bytes() == winner
     assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+
+
+def test_secure_fields_key_created_o_excl_0600(tmp_path, monkeypatch):
+    """字段加密密钥与凭据密钥同一创建口径：无 0644→chmod 窗口。"""
+    key_file = tmp_path / "field.key"
+
+    real_open = os.open
+    open_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+
+    def spy_open(path, flags, mode=0o777):
+        open_calls.append((str(path), flags, mode))
+        return real_open(path, flags, mode)
+
+    def spy_chmod(path, mode):
+        chmod_calls.append((str(path), mode))
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "chmod", spy_chmod)
+
+    key = secure_fields._create_key_file(key_file)
+
+    assert key_file.read_bytes() == key
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    key_calls = [call for call in open_calls if call[0] == str(key_file)]
+    assert len(key_calls) == 1, key_calls
+    _, flags, mode = key_calls[0]
+    assert flags & os.O_CREAT and flags & os.O_EXCL and flags & os.O_WRONLY
+    assert mode == 0o600
+    assert chmod_calls == [], chmod_calls
+
+
+def test_secure_fields_key_creation_loser_tightens_0644(
+    tmp_path, monkeypatch, caplog
+):
+    """O_EXCL 落败者复用旧版本以 0644 建好的胜者 key 前必须收紧（A67-05）。"""
+    key_file = tmp_path / "field.key"
+    winner = Fernet.generate_key()
+    key_file.write_bytes(winner)
+    key_file.chmod(0o644)
+
+    real_open = os.open
+
+    def racing_open(path, flags, mode=0o777):
+        if str(path) == str(key_file):
+            raise FileExistsError
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    caplog.set_level(logging.WARNING, logger="plaita.credentials")
+
+    assert secure_fields._create_key_file(key_file) == winner
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    assert any("宽于 0600" in message for message in _messages(caplog))
 
 
 def test_reconcile_tightens_existing_0644_key(tmp_path, monkeypatch, caplog):

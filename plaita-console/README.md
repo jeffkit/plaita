@@ -78,7 +78,7 @@ python run.py
 
 流程定义、版本、执行历史、节点 trace 全部存 SQLite（默认 `./plaita_console.db`，可用 `PLAITA_CONSOLE_DB_URL` 换库）；流程在 console 进程内的后台线程执行。
 
-> **DB 是敏感数据（A2R25-08/09）**：`local_executions.input_json/context_json`（执行 params/`$INPUT`/checkpoint）与 `tenants.contract_secret_key`（对外 HMAC 契约密钥）**字段级加密落盘**（`enc:v1:` 密文，AES-GCM；主密钥与凭据加密同源、按用途 HKDF 派生）。ORM 读取透明解密；裸 SQL/备份只见密文；存量明文在 `init_engine` 回填 + `VACUUM`。SQLite 文件仍收紧为 0600（第二道闸），默认库名与 `.plaita-credentials*` 已进 `.gitignore`。**备份 DB 必须同时保护 `.plaita-credentials.key`，否则历史执行与租户契约密钥不可恢复**；`output_json/nodes_json` 仍是明文功能副本（读面脱敏），DB 备份/外发整体按凭据泄露处置。
+> **DB 是敏感数据（A2R25-08/09）**：`local_executions.input_json/context_json`（执行 params/`$INPUT`/checkpoint）与 `tenants.contract_secret_key`（对外 HMAC 契约密钥）**字段级加密落盘**（`enc:v1:` 密文，AES-GCM；主密钥与凭据加密同源、按用途 HKDF 派生）。ORM 读取透明解密；裸 SQL/备份只见密文；存量明文在 `init_engine` 回填 + `VACUUM`。SQLite 文件仍收紧为 0600（第二道闸），默认库名与 `.plaita-credentials*` 已进 `.gitignore`。字段加密密钥与凭据密钥同文件、同解析规则：相对 SQLite URL 或相对显式 `PLAITA_CREDENTIALS_KEY_FILE` 按各进程 cwd 解析并打 WARNING（A67-04），首建/O_EXCL 落败复用均以 0600 收紧（A67-05）。**备份 DB 必须同时保护 `.plaita-credentials.key`，否则历史执行与租户契约密钥不可恢复**；`output_json/nodes_json` 仍是明文功能副本（读面脱敏），DB 备份/外发整体按凭据泄露处置。
 
 想强制本地档（即使本机有 Redis 也不连），把 Redis URL 指向一个不可达地址即可：
 

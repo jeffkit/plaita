@@ -129,8 +129,10 @@ def _resolve_key_source(db_url: Optional[str]) -> _State:
     """解析主密钥来源，不读取密钥内容（读取推迟到首次加/解密）。
 
     - ``PLAITA_CREDENTIALS_KEY``：内联 Fernet key，最高优先级（与凭据一致）；
-    - ``PLAITA_CREDENTIALS_KEY_FILE``：显式密钥文件；
-    - SQLite 文件库：DB 同目录 ``.plaita-credentials.key``（r48 的 0600 面）；
+    - ``PLAITA_CREDENTIALS_KEY_FILE``：显式密钥文件（相对路径按各进程 cwd
+      解析，与凭据侧同一条 A67-04 WARNING）；
+    - SQLite 文件库：DB 同目录 ``.plaita-credentials.key``（r48 的 0600 面；
+      相对 DB URL 同样告警）；
     - 内存 SQLite：无落盘面，跳过加密；
     - 其他后端：沿用凭据侧路径解析（PG 无文件权限，密钥文件由部署注入）。
     """
@@ -139,7 +141,16 @@ def _resolve_key_source(db_url: Optional[str]) -> _State:
         return _State(db_url, True, "env", ("env", env_key.encode()))
     explicit_file = os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", "").strip()
     if explicit_file:
-        return _State(db_url, True, "file", ("file", Path(explicit_file)))
+        key_path = Path(explicit_file)
+        if not key_path.is_absolute():
+            # 字段加密密钥与凭据密钥同源：相对显式路径按各进程 cwd 解析，
+            # 多副本会各自加密/解密不同文件——不得静默（A67-04）。
+            from plaita.credentials import _warn_relative_explicit_path
+
+            _warn_relative_explicit_path(
+                "PLAITA_CREDENTIALS_KEY_FILE", "密钥文件", key_path
+            )
+        return _State(db_url, True, "file", ("file", key_path))
     if not db_url:
         return _State(db_url, True, "file", ("file", _credentials_key_file()))
     try:
@@ -155,6 +166,11 @@ def _resolve_key_source(db_url: Optional[str]) -> _State:
         return _State(db_url, True, "file", ("file", _credentials_key_file()))
     path = Path(database)
     if not path.is_absolute():
+        # 与凭据导出/密钥解析同一条 A67-04 告警：相对 DB URL 的「同值」
+        # 在不同进程 cwd 下会落到不同目录，字段加密密钥也会跟着分叉。
+        from plaita.credentials import _warn_relative_sqlite_url
+
+        _warn_relative_sqlite_url(db_url, path, "密钥文件")
         path = Path.cwd() / path
     from plaita.credentials import DEFAULT_KEY_FILE
 
@@ -190,6 +206,11 @@ def _create_key_file(key_file: Path) -> bytes:
         fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         logger.info("字段加密密钥文件已由另一进程创建，复用: %s", key_file)
+        # 滚动升级边界：旧版本可能刚以 0644 写好了胜者 key（A67-05）。
+        # 落败者复用前同样收紧，否则宽权限会一直留到下次读取/重启。
+        from plaita.credentials import _tighten_key_file_permissions
+
+        _tighten_key_file_permissions(key_file)
         return _read_key_file(key_file)
     except OSError as exc:
         raise FieldCryptoError(

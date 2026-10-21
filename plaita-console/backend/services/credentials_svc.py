@@ -28,6 +28,7 @@ from plaita.credentials import (
     _default_credentials_dir as _engine_default_credentials_dir,
     _read_key_file as _engine_read_key_file,
     _tighten_key_file_permissions as _engine_tighten_key_file_permissions,
+    _warn_relative_explicit_path as _engine_warn_relative_explicit_path,
     credentials_base_file as _engine_credentials_base_file,
 )
 from plaita.tenant_context import guard_tenant_write
@@ -86,7 +87,13 @@ def _db_dir() -> Path:
 def credentials_key_file() -> Path:
     explicit = os.environ.get("PLAITA_CREDENTIALS_KEY_FILE", "").strip()
     if explicit:
-        return Path(explicit)
+        path = Path(explicit)
+        if not path.is_absolute():
+            # 显式相对路径同样按各进程 cwd 解析，不能静默（A67-04）。
+            _engine_warn_relative_explicit_path(
+                "PLAITA_CREDENTIALS_KEY_FILE", "密钥文件", path
+            )
+        return path
     return _db_dir() / DEFAULT_KEY_FILE
 
 

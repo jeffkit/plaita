@@ -195,8 +195,13 @@ SQLite 部署导出到 DB 同目录的 `.plaita-credentials.json`。以下情形
 共享目录，按历史语义回退**当前工作目录**并打一次性 WARNING（A67-04）：
 未设置 `PLAITA_CONSOLE_DB_URL`、URL 非 `sqlite:///`（PG/MySQL 等）、内存
 SQLite；相对 SQLite URL（如 `sqlite:///./x.db`）即使两端字符串相同也会按
-各自进程 cwd 解析，同样 WARNING。回退只保证单进程可用——升级后忘记注入
-DB env 的 worker 会继续读旧 cwd 文件，并能解出已吊销/已轮换的旧值，因此
+各自进程 cwd 解析，同样 WARNING。**显式**设置
+`PLAITA_CREDENTIALS_FILE` / `PLAITA_CREDENTIALS_KEY_FILE` 时，绝对路径不触发
+路径回退告警；若显式值是**相对路径**，仍按各进程 cwd 解析，并打一次性
+WARNING——「值相同」不等于「同一个文件」。DB 敏感列的字段级加密密钥
+（与凭据共用 `.plaita-credentials.key`）走同一套解析与告警。回退只保证
+单进程可用——升级后忘记注入 DB env 的 worker 会继续读旧 cwd 文件，并能
+解出已吊销/已轮换的旧值，因此
 **不能把该 WARNING 当噪音**。导出文件是 DB 的派生缓存，按 DB 路径落盘让
 **同一 DB 的多个 console/worker 副本共享同一份文件**；不再各按 cwd 持有
 一份互不收敛的副本（否则一个副本删除/轮换凭据，其他副本的引擎仍能解出
@@ -241,7 +246,9 @@ DB env 的 worker 会继续读旧 cwd 文件，并能解出已吊销/已轮换�
 
 **密钥文件权限**：console 首次生成密钥时用 `O_EXCL` 直接以 0600 创建
 （不再先 0644 再 chmod，A67-05）；并发首建只有一把 key 胜出，落败进程
-等待并复用胜者写入的 key，不重新生成。已存在的 0644 存量 key 会在启动
+等待并复用胜者写入的 key，不重新生成，并在复用前把旧版本可能留下的
+0644 胜者文件收紧为 0600。DB 字段加密（`secure_fields`）使用同一密钥
+文件，创建/落败复用/收紧口径与凭据侧一致。已存在的 0644 存量 key 会在启动
 对账与每次读取时收紧为 0600 并打 WARNING；只读挂载等无法 chmod 的场景会
 持续告警（每个路径一次），请修正属主/挂载权限。密钥是解密所有租户凭据的
 唯一材料，`.plaita-credentials.key` 的备份/外发按凭据泄露处置。
