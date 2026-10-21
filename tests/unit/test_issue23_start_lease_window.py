@@ -498,13 +498,30 @@ class TestIssue118DedupKeyBasis:
         return out
 
     def test_same_due_two_fires_share_key(self):
-        """① 同一个 next_run_at 被触发两次（回写失败 + 30s 锁过期重触发）→ 同键。"""
+        """① 同一个 next_run_at 被触发两次（回写失败 + 30s 锁过期重触发）→ 同键。
+
+        A43-04 起生产侧预认领（#274 同源键）：同键的第二次触发**不入队**，
+        收敛到首次触发的 execution_id（fire_record enqueue=dedup）——「同键必
+        同 id」从消费侧兜底前移到生产侧收敛，注定被 worker 吞掉的第二条消息
+        不再产生（也就不再有幽灵占位行/配额占用）。
+        """
         fake = fakeredis.FakeRedis(decode_responses=True)
         sched = self._schedule(next_run_at=str(self.DUE))
         _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 5))
         _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 6))
-        keys = [m["dedup_key"] for m in self._msgs(fake)]
-        assert keys == [f"sched:s118:due:{self.DUE}"] * 2
+        msgs = self._msgs(fake)
+        assert len(msgs) == 1, "同键重触发只允许首次入队"
+        assert msgs[0]["dedup_key"] == f"sched:s118:due:{self.DUE}"
+        fires = [
+            json.loads(r)
+            for r in fake.lrange("plaita:schedule:fires:s118", 0, -1)
+        ]
+        assert len(fires) == 2
+        assert fires[0]["enqueue"] == "dedup", "重触发记录必须标记 dedup 收敛"
+        assert fires[0]["execution_id"] == msgs[0]["execution_id"], (
+            "同键必同 id：重触发记录收敛到首次触发的 execution_id"
+        )
+        assert fires[1]["enqueue"] == "ok"
 
     def test_different_due_same_wall_second_differ(self):
         """② 同一墙钟秒内两个不同 due → 键必须不同（下一周期不被误吞）。"""
@@ -570,7 +587,13 @@ class TestIssue118DedupKeyBasis:
         assert self._msgs(fake)[0]["dedup_key"] == f"sched:s118:fired:{self.DUE // 1000 + 5}"
 
     def test_same_due_two_dispatches_single_execution(self):
-        """端到端：同 due 的两条消息被消费 → 只有 1 行执行、run_distributed 只跑 1 次。"""
+        """端到端：同 due 两次触发 → 只有一条载体，worker 消费恰跑 1 次。
+
+        A43-04 前本用例钉「两条消息被 worker dedup 收敛」；生产侧预认领后
+        收敛前移：同 due 的第二次触发根本不入队，worker 只见一条载体。
+        worker 侧「映射值≠载体 id 绝不二次 start」的消费兜底另由
+        TestStartDedup* / test_worker_start_dedup.py 钉住。
+        """
         from plaita.server.tenant_context import reset_current_tenant, set_current_tenant
 
         fake = fakeredis.FakeRedis(decode_responses=True)
@@ -580,16 +603,11 @@ class TestIssue118DedupKeyBasis:
         _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 5))
         _fire_with_clock(fake, sched, QUEUE, datetime.fromtimestamp(self.DUE / 1000 + 6))
         msgs = self._msgs(fake)
-        assert len(msgs) == 2
-        assert msgs[0]["dedup_key"] == msgs[1]["dedup_key"]
-        # 生产里两条消息各自铸 execution_id；同一 due 的两条本不该都存在，
-        # 这里显式给不同 id 证明 worker 侧也收敛。
-        msgs[0]["execution_id"] = "exec-a"
-        msgs[1]["execution_id"] = "exec-b"
+        assert len(msgs) == 1
+        msg = msgs[0]
         # B52-02 消息最大年龄闸（默认 30 天）会丢弃历史载体；本用例的 DUE
         # 是固定日期，消费时刻按「刚入队」处理，避免年龄闸干扰去重语义。
-        now_iso = datetime.now().isoformat()
-        msgs[0]["timestamp"] = msgs[1]["timestamp"] = now_iso
+        msg["timestamp"] = datetime.now().isoformat()
 
         runs = []
         with patch("plaita.server.flow_worker.FlowExecution") as FE:
@@ -598,20 +616,10 @@ class TestIssue118DedupKeyBasis:
             inst.run_distributed.side_effect = lambda flow, params=None, execution_id=None: (
                 runs.append(execution_id) or {"execution_id": execution_id, "is_end": True, "context": {}}
             )
-            results = []
-            for msg in msgs:
-                token = set_current_tenant(msg["tenant_id"])
-                try:
-                    results.append(worker._dispatch_task(msg, delivery_count=1))
-                finally:
-                    reset_current_tenant(token)
+            token = set_current_tenant(msg["tenant_id"])
+            try:
+                worker._dispatch_task(msg, delivery_count=1)
+            finally:
+                reset_current_tenant(token)
 
-        assert runs == ["exec-a"], f"同 due 必须只跑一次，实际 {runs}"
-        assert storage.load_execution_state("exec-b") is None
-        # 第二条消息的同键认领必须命中并映射回首次执行（绝不二次 start）；
-        # 键按租户 namespace 路由，须在同租户上下文里核。
-        token = set_current_tenant(msgs[1]["tenant_id"])
-        try:
-            assert worker._claim_start_dedup(msgs[1]["dedup_key"], "exec-c") == ("hit", "exec-a")
-        finally:
-            reset_current_tenant(token)
+        assert runs == [msg["execution_id"]], f"同 due 必须只跑一次，实际 {runs}"

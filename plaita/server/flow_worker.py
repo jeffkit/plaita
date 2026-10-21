@@ -1219,6 +1219,42 @@ class StatePersistError(RuntimeError):
     """
 
 
+# G1 唤醒记账原子收口（第七十一轮任务①）：清 noderetry 全族（执行维度缺省键
+# + 节点维度 ``{id}:*`` 子键，与 _delete_node_retry_keys 的 SCAN 语义一致）与
+# INCR/EXPIRE g1wakeups 必须同轮生效——修复前两步散调，清预算失败被吞而记数
+# 照常执行 ⇒ 配额被消耗但没拿到新预算，半生效唤醒净烧唤醒额度。
+# KEYS[1]=noderetry 基键；KEYS[2]=g1wakeups 键；ARGV[1]=g1wakeups TTL 秒。
+_G1_WAKEUP_COMMIT_LUA = """
+local base = KEYS[1]
+local cursor = '0'
+repeat
+  local scan = redis.call('SCAN', cursor, 'MATCH', base .. ':*', 'COUNT', 100)
+  cursor = scan[1]
+  for i = 1, #scan[2] do
+    redis.call('DEL', scan[2][i])
+  end
+until cursor == '0'
+redis.call('DEL', base)
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[1]))
+return 1
+"""
+
+
+class G1WakeupAccountingError(StatePersistError):
+    """G1 唤醒记账原子收口失败（第七十一轮任务①）——瞬态，StatePersistError 子族。
+
+    ``retry_wakeup`` 的「清 noderetry 预算 + 记 g1wakeups 配额」两步已收敛为
+    单段 Lua（``_commit_g1_wakeup``），脚本未生效即抛本类。此时状态行已翻
+    running，但**预算未清、配额未记（整体不生效，配额守恒）**——绝不许出现
+    修复前的「配额已消耗、预算没拿到」半生效态。消息不 ack 走 at-least-once
+    重投；重投见 running 行按「从断点续跑」正常推进（预算仍是耗尽态，下次
+    失败照常终态化，届时 retry 唤醒不占额度——记账从未发生），收敛。
+    继承 StatePersistError 是契约的一部分：resume_flow 对该族原样上抛、
+    不终态化，记账失败绝不能把已翻 running 的执行打成 error。
+    """
+
+
 class ServiceDispatchError(RuntimeError):
     """挂起服务任务投递失败（有 redis 客户端时不再吞）。
 
@@ -1681,6 +1717,55 @@ class FlowWorker:
             pipe.execute()
         except Exception as e:  # noqa: BLE001 — 计数失败不阻断唤醒（人工救援优先）
             logger.warning("G1 唤醒计数失败（忽略）: %s: %s", execution_id, _scrub_url_text(e))
+
+    def _commit_g1_wakeup(self, execution_id: str) -> None:
+        """原子收口 G1 唤醒的「清零节点预算 + 记一次唤醒」（第七十一轮任务①）。
+
+        此前两步散调（``_reset_node_retry_counter`` → ``_record_g1_wakeup``）
+        非原子且失败各被吞：清计数失败时记数照常执行 ⇒ **g1 配额被消耗但
+        执行没拿到新预算**——下一次失败直接终态化，每次半生效唤醒净烧一次
+        唤醒额度。现收敛为单段 Lua（SCAN 清 noderetry 全族 + INCR/EXPIRE
+        g1wakeups），整体生效或整体不生效：
+
+        - 脚本失败 ⇒ ERROR 留痕 + 抛 :class:`G1WakeupAccountingError`
+          （StatePersistError 子族：消息不 ack 重投，绝不终态化）——配额守恒，
+          唤醒方可安全重来；
+        - 落 running（``_persist_state_or_raise``）刻意**不**并入脚本：它走
+          fenced 世代 CAS + timeline/usage 收口，先行失败时两个计数键分毫
+          未动，本就守恒；
+        - 无 redis 客户端 → no-op（与原两步同）；不支持 eval 的受限客户端
+          → 降级为旧两步序列，WARNING 留痕（可观测降级纪律）。
+        """
+        redis_client = getattr(self, "redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "incr"):
+            return
+        if not hasattr(redis_client, "eval"):
+            logger.warning(
+                "执行 %s G1 唤醒记账降级：redis 客户端不支持 eval，"
+                "退回非原子两步序列（清预算失败仍可能烧配额）",
+                execution_id,
+            )
+            self._reset_node_retry_counter(execution_id)
+            self._record_g1_wakeup(execution_id)
+            return
+        try:
+            redis_client.eval(
+                _G1_WAKEUP_COMMIT_LUA,
+                2,
+                self._retry_counter_key(execution_id),
+                self._g1_wakeup_key(execution_id),
+                self.G1_WAKEUP_COUNTER_TTL_SECONDS,
+            )
+        except Exception as e:  # noqa: BLE001 — 整体未生效，具名上抛走重投
+            logger.error(
+                "执行 %s G1 唤醒记账失败（清预算+记配额原子脚本未生效，"
+                "配额守恒，消息将重投）: %s",
+                execution_id, _scrub_url_text(e),
+            )
+            raise G1WakeupAccountingError(
+                f"G1 唤醒记账原子收口失败: execution_id={execution_id}, "
+                f"{_scrub_url_text(e)}"
+            ) from e
 
     def _node_retry_budget(self) -> int:
         """节点重试预算：沿用队列 max_deliveries 语义（默认 5）。
@@ -3886,11 +3971,14 @@ class FlowWorker:
                 state.error = None
                 state.end_time = None
                 self._persist_state_or_raise(execution_id, state, "retry_wakeup")
-                self._reset_node_retry_counter(execution_id)
-                # 记一次唤醒（plaita#73 补丁）：唤醒会重置节点预算，必须计数
-                # 才能让「唤醒→重置→耗尽→再唤醒」收敛。达上限的拒绝在上方
-                # 入口处（`_g1_wakeup_budget_exhausted`）。
-                self._record_g1_wakeup(execution_id)
+                # 清预算 + 记配额原子收口（第七十一轮任务①）：两步散调在清
+                # 计数失败时会留下「配额已消耗、预算没拿到」的半生效态（记数
+                # 照常执行、失败被吞）——下一次失败直接终态化，每次半生效唤醒
+                # 净烧一次额度。收敛为单段 Lua：整体生效或具名抛
+                # G1WakeupAccountingError（StatePersistError 子族，消息不 ack
+                # 重投、不终态化，配额守恒）。达上限的拒绝仍在上方入口处
+                # （`_g1_wakeup_budget_exhausted`）。
+                self._commit_g1_wakeup(execution_id)
                 logger.info("执行 %s error 态经 retry 放行（重试计数已清零），从断点步进", execution_id)
 
             # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
