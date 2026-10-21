@@ -5,13 +5,21 @@
 # ``plaita:approval:queue`` 塞成 string，worker 的 RPUSH 撞 WRONGTYPE →
 # ``ServiceDispatchError`` → 走「不 ack」兜底路径（执行**已**落 suspended、
 # **不**终态化）；「清道夫」worker（PLAITA_CLAIM_MIN_IDLE_MS=3000 +
-# PLAITA_MAX_DELIVERIES=1，独立容器，不污染共享组主 worker 的旋钮）3s 后回收
-# 这条 pending 消息 → 死信守卫按「非终态 + 租约空」判活（见
-# FlowWorker._dead_letter_guard）→ 重入队一份新副本（恢复路径重生）+ 原消息
-# dead_letter。
+# PLAITA_MAX_DELIVERIES=1 + PLAITA_TASK_MAX_AGE_SECONDS=5，独立容器，不污染
+# 共享组主 worker 的旋钮）3s 后扫描这条 pending 消息。
 # 断言：① ``plaita:flow:queue:dlq`` 收到该消息（收容可观察）；② 执行仍**非**
 # 终态（suspended/running）——派发失败不该把执行误终态化，它就是重投要救的
 # 那个执行。
+#
+# 收容路线（B2R31-01 A2R31 后更新）：清道夫预算（max_deliveries=1）与生产者
+# 信封（默认 5）的 ``budget_generation`` 不同 → ``_reclaim_one`` 对**年轻**
+# budget-stale 消息一律不认领（留给正确预算的 worker）——旧的「超投递 →
+# 死信守卫」路线对新消息结构性失效（2026-10-21 Console E2E 八连红的根因：
+# DLQ empty，而主链路三条 chaos 全绿）。跨预算回收的合规收容 = 年龄闸：消息
+# 年龄超过清道夫的 ``task_max_age_seconds``（此处 5s）→
+# ``dead_letter_config_rejected`` 收容进 DLQ（保留源代际证据，绝不静默留
+# PEL）。执行行不被触碰（断言②不受影响）；恢复路径 = DLQ replay/人工。
+# 主 worker 不改任何旋钮——同一 5s 闸只存在于清道夫容器内。
 #
 # 为什么换载体：旧载体是「挂起执行上投 resume_type=continue」，其语义已改为
 # worker 入口**幂等短路**（消息 ack + 状态保持 suspended，见 #33）——既不终态化
@@ -131,6 +139,7 @@ docker run -d --name e2e-dlq-scavenger --network "$NET" \
   -e PLAITA_REDIS_URL=redis://plaita-e2e-redis:6379/0 \
   -e PLAITA_CLAIM_MIN_IDLE_MS=3000 \
   -e PLAITA_MAX_DELIVERIES=1 \
+  -e PLAITA_TASK_MAX_AGE_SECONDS=5 \
   plaita-e2e-worker:latest >/dev/null || { echo "[chaos-dlq] scavenger start failed" >&2; exit 5; }
 
 FAIL=0
@@ -144,7 +153,7 @@ for _i in $(seq 1 30); do
   sleep 1
 done
 if [[ "$DLQ" -eq 1 ]]; then
-  echo "[chaos-dlq] OK: 派发失败的消息重投耗尽后进了 DLQ (XLEN=$N)"
+  echo "[chaos-dlq] OK: budget-stale 消息过年龄闸后被清道夫收容进 DLQ (XLEN=$N)"
 else
   echo "[chaos-dlq] FAIL: DLQ empty" >&2
   FAIL=1
