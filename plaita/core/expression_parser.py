@@ -2912,17 +2912,20 @@ def _render_path(root_key: str, walked: List[Tuple[str, Any, str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ``$NODE.raw.<node>[.<path>...]`` — explicit verbatim accessor (plaita#130)
+# ``$NODE.raw.<node>[.<path>...]`` — compatibility verbatim accessor (plaita#130)
 # ---------------------------------------------------------------------------
-# ``$NODE.<node>.<field>`` keeps the historical semantics: a string value that
-# looks like an expression/template may be re-evaluated with its parent
-# runtime values (contract #268: runtime strings are data — the nested
-# text that a node produced (LLM output, document content, prompt echo) can
-# therefore still be silently rewritten — ``"{% $F.eq(1, 1) %}"`` -> ``"True"``.
-# The accessor makes "return the stored value, do not evaluate it" **explicit**:
-# with the ``raw`` modifier no string is re-evaluated at any depth (the #104
-# root scan is bypassed too).  Non-string values are returned exactly as the
-# non-``raw`` path returns them.
+# Historically ``$NODE.<node>.<field>`` re-evaluated a string value that looked
+# like an expression/template with its parent container as the context, so data
+# text a node produced (LLM output, document content, prompt echo) could be
+# silently rewritten — ``"{% $F.eq(1, 1) %}"`` -> ``"True"`` — and ``raw`` was
+# the explicit opt-out (#130; the #104 root scan narrowed the recursion first).
+# Since plaita#268 (contract: expressions live in the flow config, runtime
+# values are DATA) the non-``raw`` path returns strings verbatim as well:
+# ``$NODE.llm.text`` and ``$NODE.raw.llm.text`` both yield
+# ``"{% $F.eq(1, 1) %}"``.  The modifier is therefore a compatibility no-op —
+# accepted so existing flows keep parsing — and the only behaviour it still
+# carries is the name-collision rule below.  Non-string values are returned
+# exactly as the non-``raw`` path returns them.
 #
 # Name-collision rule (deterministic, backwards compatible): the first segment
 # after ``$NODE`` is the modifier **only when** the ``$NODE`` container has no
