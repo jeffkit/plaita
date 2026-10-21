@@ -7,6 +7,11 @@
   客户端在 ``data`` 里自报的 tenant_id 一律剥离（data 是载荷，不是授权来源）。
 - 读/删：事件与订阅按记录里的受信 ``tenant_id`` 收窄；单条资源不匹配按 404
   返回（不暴露存在性）。平台视角（``tenant_scope() is None``）保持全量。
+
+读面成本（A2R45-04，#202 原语）：两列表端点的键枚举走有界 ``scan_keys``
+（页大小 ≤ ``PAGE_SIZE_MAX``、键数 / 轮次 / 墙钟三预算），触界时响应
+``scan_truncated=true`` + WARNING，绝不 ``KEYS``、绝不无界空转——这两个端点
+只要 viewer 的 GET 权限，共享 Redis 的 keyspace 不能被最低权限反复全库遍历。
 """
 import json
 import logging
@@ -33,6 +38,11 @@ try:  # A2R24-01：异常文本脱敏
     from ..error_contract import scrubbed_detail
 except ImportError:
     from error_contract import scrubbed_detail  # type: ignore
+
+try:  # A2R45-04：有界 SCAN（与 logs / queues / services / executions / metrics 同一原语）
+    from .redis_scan import scan_keys
+except ImportError:
+    from redis_scan import scan_keys  # type: ignore
 
 # A69-02：console 发布事件写引擎正典键形，与回扫/引擎读面同源。
 from plaita.event.core import Event
@@ -79,7 +89,7 @@ class EventInfo(BaseModel):
 
 class EventListResponse(BaseModel):
     events: List[EventInfo]
-    # A2R24-05：``total`` 是**匹配总数**（受全局扫描预算约束；``truncated=true``
+    # A2R24-05：``total`` 是**匹配总数**（受扫描预算约束；``scan_truncated=true``
     # 时是下界），``returned`` 是本页条数；``next_cursor`` 可直接回传给
     # ``?cursor=`` 继续翻页（历史不再在 limit 之外不可达）。
     total: int
@@ -89,6 +99,9 @@ class EventListResponse(BaseModel):
     # A2R19-04：部分键读取失败时显式标注——空列表不等于「没有事件」。
     degraded: bool = False
     skipped: int = 0
+    # A2R45-04：键枚举触到有界 SCAN 预算——列表只是匹配键的一部分（``total``
+    # 为下界）。与 ``truncated``（翻页：本页之后还有）是两回事，分开表达。
+    scan_truncated: bool = False
 
 
 class SubscriptionInfo(BaseModel):
@@ -107,6 +120,8 @@ class SubscriptionListResponse(BaseModel):
     total: int
     degraded: bool = False
     skipped: int = 0
+    # A2R45-04：同 EventListResponse.scan_truncated
+    scan_truncated: bool = False
 
 
 #: A55-S5：事件类型是 Redis 键的一部分（``plaita:event:types:{event_type}``），
@@ -152,16 +167,17 @@ def get_redis(request: Request) -> Redis:
     return redis
 
 
-def _scan_keys(redis: Redis, pattern: str, count: int = 100) -> List[str]:
-    """使用 SCAN 替代 KEYS 获取匹配的键"""
-    keys = []
-    cursor = 0
-    while True:
-        cursor, batch = redis.scan(cursor=cursor, match=pattern, count=count)
-        keys.extend(k if isinstance(k, str) else k.decode() for k in batch)
-        if cursor == 0:
-            break
-    return keys
+# A2R45-04：列表端点的扫描预算。COUNT 取 PAGE_SIZE_MAX（同 logs：同样的 keyspace
+# 轮次比默认 500 少一半）；匹配键上限 5000——每个匹配键随后还要各发一次
+# TYPE + GET，上限同时约束这段 N+1 的成本。轮次 / 墙钟沿 scan_keys 默认
+# （250 轮 / 1s）。触界 fail-safe：返回已收集部分 + ``scan_truncated``，不抛错。
+EVENT_SCAN_COUNT = 1000
+EVENT_SCAN_MAX_KEYS = 5000
+
+
+def _bounded_event_keys(redis: Redis, pattern: str) -> tuple[List[str], bool]:
+    result = scan_keys(redis, pattern, count=EVENT_SCAN_COUNT, max_keys=EVENT_SCAN_MAX_KEYS)
+    return result.keys, result.truncated
 
 
 # ============ 事件 API ============
@@ -199,7 +215,7 @@ async def list_events(
     """
     cursor_key = _parse_event_cursor(cursor)
     pattern = "plaita:event:*"
-    keys = _scan_keys(redis, pattern)
+    keys, scan_truncated = _bounded_event_keys(redis, pattern)
     tenant = tenant_scope(request) if request is not None else None
 
     events_by_id: Dict[str, EventInfo] = {}
@@ -276,6 +292,7 @@ async def list_events(
         next_cursor=next_cursor,
         degraded=skipped > 0,
         skipped=skipped,
+        scan_truncated=scan_truncated,
     )
 
 
@@ -367,7 +384,7 @@ async def list_subscriptions(
     tenant = tenant_scope(request) if request is not None else None
 
     pattern = "plaita:subscription:*"
-    keys = _scan_keys(redis, pattern)
+    keys, scan_truncated = _bounded_event_keys(redis, pattern)
 
     subscriptions: List[SubscriptionInfo] = []
     skipped = 0
@@ -420,6 +437,7 @@ async def list_subscriptions(
         total=len(subscriptions),
         degraded=skipped > 0,
         skipped=skipped,
+        scan_truncated=scan_truncated,
     )
 
 

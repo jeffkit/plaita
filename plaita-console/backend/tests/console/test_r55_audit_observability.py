@@ -332,9 +332,11 @@ def test_copilot_and_supervisor_are_audited(env: Env, monkeypatch):
         lambda: (lambda path: {"cases": []}, lambda: object(), lambda: object(),
                  lambda: object(), _FakeSupervisor, lambda **kwargs: object()),
     )
-    monkeypatch.setattr(supervisor_api, "_local_client", lambda request: object())
+    # plaita#290：回环客户端现带调用方租户；入口归属校验要求 flow 真实存在
+    monkeypatch.setattr(supervisor_api, "_local_client", lambda request, tenant_id: object())
     monkeypatch.setattr(
         supervisor_api, "_resolve_dataset_path", lambda name: Path("/tmp/r55-ds"))
+    env.store.create_flow("flow-r55", tenant_id="default")
     resp = env.client.post(
         "/api/flows/flow-r55/supervisor/iterate",
         json={"dataset": "ds-r55"}, headers=root,

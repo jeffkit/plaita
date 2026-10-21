@@ -421,11 +421,18 @@ def logout(store, token: str) -> bool:
 # ---- 用户管理 ----
 
 def list_users(store, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """用户列表。给 ``tenant_id`` 时只返回该租户成员（#260 租户 admin 读面）。"""
+    """用户列表。给 ``tenant_id`` 时只返回该租户成员（#260 租户 admin 读面）。
+
+    A2R45-03：成员的 ``memberships`` 同样收窄到该租户——用户行按租户筛过，
+    但成员关系若仍是全表，同时属于多租户的用户会把他租户的 (租户 id, 角色)
+    带进租户 admin 的视图（#260 只堵了用户名枚举这一半）。
+    """
     with store._session_local() as session:
         rows = session.scalars(select(User).order_by(User.username)).all()
         memberships: Dict[str, List[Dict[str, str]]] = {}
         for m in session.scalars(select(TenantMember)).all():
+            if tenant_id is not None and m.tenant_id != tenant_id:
+                continue
             memberships.setdefault(m.username, []).append(
                 {"tenant_id": m.tenant_id, "role": m.role}
             )
@@ -442,10 +449,7 @@ def list_users(store, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
         ]
         if tenant_id is None:
             return result
-        return [
-            u for u in result
-            if any(m["tenant_id"] == tenant_id for m in u["memberships"])
-        ]
+        return [u for u in result if u["memberships"]]
 
 
 def is_platform_admin(store, username: str) -> bool:
