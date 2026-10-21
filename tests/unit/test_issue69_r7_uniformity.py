@@ -22,6 +22,11 @@ Finding 3：四个边界物化点（`child._materialise_child_input` /
 是**具名拒绝**（default-deny），父活 state 与 checkpoint 零写穿。并行分支的拒绝原因
 **不是** "``ContextVar`` 不跨线程"——``mode="coroutine"`` 在 MainThread 里同样被拒，
 根因是调用点在作用域之外（见 ``test_parallel_modes_have_no_active_scope_at_boundary``）。
+
+plaita#268 之后（契约「配置求值、运行期数据」）具名拒绝只发生在**配置层**（mutator
+写在子 assignment 的配置里）；边界交来的数据里的嵌套改写串**不再求值**，原样流到子输出
+——四边界形状因此各有两面（运行期透传 / 配置层照常拒绝），都零写穿，见
+``test_four_boundary_shapes_are_isolated_as_data``。
 """
 from __future__ import annotations
 
@@ -36,14 +41,14 @@ from plaita.core.flow import Flow
 from plaita.io import Property
 from plaita.node import Assignment, End, Start
 from plaita.node.decide import CONDITION_OP_TRUTHY, Condition
-from plaita.node.loop import Loop, _condition_context
+from plaita.node.loop import Loop, Map, Reduce, _condition_context
 
 from tests.unit import test_issue69_mutation_matrix as matrix_mod
 from tests.unit.test_issue69_mutation_matrix import (
     _r4_child_flow,
+    _r5_item_child_flow,
     _r5_live_payload,
     _r5_run_flow,
-    build_r5_probe_rows,
 )
 
 
@@ -174,7 +179,8 @@ class TestIssue69R7LoopConditionCopy(unittest.TestCase):
 
 
 class TestIssue69R7BoundaryCopySemantics(unittest.TestCase):
-    """Finding 3：四个死登记点删除后的语义（具名拒绝 + 零写穿）。"""
+    """Finding 3：四个死登记点删除后的语义——#268 后分两面：运行期数据**透传**（嵌套串
+    不求值、不拒绝）+ 配置层 mutator **照常具名拒绝**；两面都零写穿。"""
 
     FOUR_SHAPES = (
         "Reduce.initial (live sub-object)",
@@ -183,10 +189,132 @@ class TestIssue69R7BoundaryCopySemantics(unittest.TestCase):
         "parallel-branch-input (live sub-object)",
     )
 
+    #: ``_r5_live_payload()["cmd"]``——四边形共用的嵌套改写串。#268 后它是**数据**：
+    #: 子执行读到的必须是这一串本身（不是求值结果、不是具名拒绝）。
+    NESTED_MUTATOR = "$F.set($myroot,'k','v')"
+
+    #: 运行期面：子 assignment（配置层）**读**边界交来的嵌套串——子流程视角的路径。
+    DATA_READ = {
+        "Reduce.initial (live sub-object)": "$INPUT[0].cmd",
+        "loop-item": "$INPUT.item.cmd",
+        "map-item": "$INPUT.item.cmd",
+        "parallel-branch-input (live sub-object)": "$INPUT.cmd",
+    }
+
+    #: 配置面：同一个 mutator 写在子 assignment 的**配置**里，目标是边界交来的活派生
+    #: 子对象 ``deep``（parallel 形经分支输入的 ``$myroot`` 键指向父活 ``cfg``）。
+    CONFIG_MUTATOR = {
+        "Reduce.initial (live sub-object)": "$F.set($INPUT[0].deep,'k','v')",
+        "loop-item": "$F.set($INPUT.item.deep,'k','v')",
+        "map-item": "$F.set($INPUT.item.deep,'k','v')",
+        "parallel-branch-input (live sub-object)": "$F.set($INPUT.$myroot,'k','v')",
+    }
+
     def test_four_boundary_shapes_are_isolated_as_data(self):
         """#268 后四边形的嵌套串是数据：不求值、不拒绝、零写穿——结构性隔离
         （旧「具名拒绝」通道随嵌套求值摘除；零写穿性质不变且更强：字符串根本
-        不会变成代码）。"""
+        不会变成代码）。
+
+        每个形状钉**两面**（A104-02：本用例曾只剩 docstring，0 断言）：
+
+        * **运行期透传**——子 assignment 读 ``cmd``，拿到的是**原串**。嵌套求值若回潮，
+          这一面立刻变红：串会变成 ``$F.set`` 调用 ⇒ 要么被门具名拒绝（输出不再是
+          原串）、要么真的写进副本（输出变 ``None``）；
+        * **配置层照常**——同一 mutator 写在子 assignment 配置里 ⇒ #69 身份判定具名
+          拒绝（``in-place mutator`` + ``plaita#69``）。门若被绕过，这一面变红。
+
+        两面都要求：父活 ``$INPUT`` 与 checkpoint 与起始载荷逐位相等、活子对象
+        ``deep`` 零变化。
+        """
+        for position in self.FOUR_SHAPES:
+            with self.subTest(position=position, face="runtime-data"):
+                raised, live, checkpoint, pristine, output = self._run_boundary(
+                    position, self.DATA_READ[position])
+                self.assertIsNone(
+                    raised, f"{position}: the nested string is data, nothing may raise")
+                self.assertEqual(
+                    self._expected_passthrough(position), output,
+                    f"{position}: the nested string must reach the child output verbatim")
+                self._assert_zero_write_through(position, live, checkpoint, pristine)
+            with self.subTest(position=position, face="config-gate"):
+                raised, live, checkpoint, pristine, _ = self._run_boundary(
+                    position, self.CONFIG_MUTATOR[position])
+                detail = self._boundary_detail(raised)
+                self.assertIn("in-place mutator", detail,
+                              f"{position}: config-layer mutator must be refused by name")
+                self.assertIn("plaita#69", detail)
+                self._assert_zero_write_through(position, live, checkpoint, pristine)
+
+    def _expected_passthrough(self, position: str):
+        if position == "map-item":
+            return [self.NESTED_MUTATOR]
+        if position.startswith("parallel"):
+            return {"b": self.NESTED_MUTATOR}
+        return self.NESTED_MUTATOR
+
+    def _run_boundary(self, position: str, child_expr: str):
+        """按 r5 探针表同形构造四边界流程并运行；``child_expr`` 是子 assignment 的
+        **配置层**表达式。返回 ``(raised, live, checkpoint, pristine, node_output)``。"""
+        payload = _r5_live_payload()
+        if position == "Reduce.initial (live sub-object)":
+            child = Flow(flow_id="r7-reduce-child", version="1", runtime="python",
+                         input_type=Property(data_type=types.ARRAY),
+                         output_type=Property(data_type=types.ANY),
+                         nodes=[Start(id="s", next="a"),
+                                Assignment(id="a", output=child_expr,
+                                           output_type=Property(data_type=types.ANY),
+                                           next="e"),
+                                End(id="e", resultType="success", output="$NODE.a")])
+            node = Reduce(id="n", collection="$INPUT.items", initial="$INPUT.cfg",
+                          child_flow=child, next="e")
+            start = {"items": [1], "cfg": payload}
+        elif position == "loop-item":
+            node = Loop(id="n", collection="$INPUT.items",
+                        child_flow=_r5_item_child_flow(child_expr), next="e")
+            start = {"items": [payload]}
+        elif position == "map-item":
+            node = Map(id="n", collection="$INPUT.items",
+                       child_flow=_r5_item_child_flow(child_expr), next="e")
+            start = {"items": [payload]}
+        else:
+            from plaita.node.concurrent import Parallel
+            # 与 r5 探针表同形：``cmd`` 经配置层 ``$F.concat`` 产出嵌套串（运行期数据）。
+            branch_input = {"$myroot": "$INPUT.cfg",
+                            "cmd": "$F.concat(\"$F.set($myroot,'k','v')\")"}
+            node = Parallel(id="n", name="n", mode="thread",
+                            branches=[{"name": "b", "flow": _r4_child_flow(child_expr),
+                                       "input": branch_input}],
+                            join_branches=["b"], next="e")
+            start = {"cfg": payload}
+        flow = Flow(flow_id="r7-boundary", version="1", runtime="python",
+                    input_type=Property(data_type=types.OBJECT),
+                    output_type=Property(data_type=types.ANY),
+                    nodes=[Start(id="s", next="n"), node,
+                           End(id="e", resultType="success", output="$NODE.n")])
+        raised, live, checkpoint, pristine = _r5_run_flow(flow, start)
+        last_node = matrix_mod._R5_LAST_NODE
+        output = last_node.get("n") if isinstance(last_node, dict) else None
+        return raised, live, checkpoint, pristine, output
+
+    @staticmethod
+    def _boundary_detail(raised) -> str:
+        """Reduce/Loop/Map 的子执行错误上抛；Parallel 记进分支结果的
+        ``__parallel_error__`` 而不上抛（``_r5_run_flow`` 重绑模块全局，须动态取）。"""
+        if raised is not None:
+            return str(raised)
+        last_node = matrix_mod._R5_LAST_NODE
+        node = last_node.get("n") if isinstance(last_node, dict) else {}
+        if isinstance(node, dict):
+            for value in node.values():
+                if isinstance(value, dict) and "__parallel_error__" in value:
+                    return str(value["__parallel_error__"])
+        return ""
+
+    def _assert_zero_write_through(self, position, live, checkpoint, pristine):
+        self.assertEqual(pristine, live, f"{position}: write-through to live $INPUT")
+        self.assertEqual(pristine, checkpoint, f"{position}: write-through to checkpoint")
+        holder = live["items"][0] if position in ("loop-item", "map-item") else live["cfg"]
+        self.assertEqual({"a": 1}, holder["deep"], f"{position}: live sub-object changed")
 
     def _parallel_flow(self, mode: str) -> Flow:
         from plaita.node.concurrent import Parallel
