@@ -58,6 +58,8 @@ class ExecutionState(BaseModel):
         end_time: 流程结束时间，ISO格式字符串
         error: 错误信息，当status为error时存储错误详情
         invoker: 调用者，标识发起流程的实体
+        trigger: 触发归因（可选）：调度触发的执行带 {kind, schedule_id,
+            schedule_name}；None = 手动启动/老执行
     """
     execution_id: str
     flow_id: Optional[str] = None
@@ -89,6 +91,15 @@ class ExecutionState(BaseModel):
     end_time: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
     invoker: Optional[str] = None
+    trigger: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "触发归因（A2R44-02）：调度触发（cron / console「立即触发」manual）"
+            "的执行带 {kind, schedule_id, schedule_name}——触发侧写入 queued 占位"
+            "行、worker 接管落行时随 start 消息透传，终态写沿用同一 state 对象。"
+            "None = 手动启动（console POST/SDK）或老执行，读取方按缺省处理。"
+        ),
+    )
     node_timings: Optional[Dict[str, Any]] = Field(
         None,
         description=(

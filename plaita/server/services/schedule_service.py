@@ -166,9 +166,17 @@ def build_dedup_key(
     )
 
 
-# queued 占位行的调用者标记（A43-04；worker 接管后写的 running 行 invoker=worker，
-# console POST 占位行为 invoker=console——触发来源可从行上直接分辨）。
+# queued 占位行的调用者标记（A43-04；worker 接管后按 trigger 归因落行
+# invoker=schedule 并透传 trigger——A2R44-02，归因不再被接管覆写断链）。
 _SCHEDULE_PLACEHOLDER_INVOKER = "schedule"
+
+# 触发拒绝留痕（B44-01）：fire_record.enqueue="rejected" + rejection_reason。
+# 拒绝此前在 fire_record 写入前 return——「到期被拒」与「未到期」在调度面
+# 不可区分（静默停走）。拒绝不带 execution_id：预铸 id 未落任何行/消息、
+# 幂等映射已回滚，留 id 只会链到 404。
+FIRE_ENQUEUE_REJECTED = "rejected"
+REJECTION_TENANT_DISABLED = "tenant_disabled"
+REJECTION_QUOTA_EXHAUSTED = "tenant_quota_exhausted"
 
 
 def _placeholder_storage(
@@ -187,6 +195,7 @@ def _write_queued_placeholder(
     flow_id: str,
     version: Optional[str],
     now_iso: str,
+    trigger: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """同步落 ``queued`` 占位状态行（A43-04 复用 #273 受理语义）：触发返回前该
     id 必须可查。
@@ -195,8 +204,9 @@ def _write_queued_placeholder(
     维护（列表/状态过滤立即命中）；非终态无 TTL。行 context 为空：worker 侧
     ``_existing_start_checkpoint`` 对「非终态且空 checkpoint」按首投处理，
     消费时以 running 行覆盖接管，占位行不会把 start 载体误转成 resume。
-    失败返回 False，调用方不入队并逐级回滚（绝不带着「已受理、行不存在」的
-    窗口入队——那正是本单要关的可见性缺口）。
+    ``trigger``（A2R44-02）：触发归因随占位行落盘——受理窗口内归因即可查，
+    不等 worker 接管。失败返回 False，调用方不入队并逐级回滚（绝不带着
+    「已受理、行不存在」的窗口入队——那正是本单要关的可见性缺口）。
     """
     state = ExecutionState(
         execution_id=execution_id,
@@ -208,6 +218,7 @@ def _write_queued_placeholder(
         start_time=now_iso,
         last_update_time=now_iso,
         invoker=_SCHEDULE_PLACEHOLDER_INVOKER,
+        trigger=trigger,
     )
     try:
         return _placeholder_storage(redis_client, tenant_id).save_execution_state(
@@ -260,13 +271,26 @@ def fire_schedule(
             定义里的 ``next_run_at``（见 ``normalized_due_ms``）。manual 忽略。
 
     Returns:
-        Stream message id；入队失败 / 预算或落盘回滚 / 同键 dedup 收敛返回 None。
+        Stream message id；入队失败 / 预算或落盘回滚 / 同键 dedup 收敛 /
+        闸拒绝（停用租户、配额满——留 rejected fire_record，B44-01）返回 None。
     """
     schedule_id = schedule["schedule_id"]
     # 租户状态闸（plaita#27）：停用租户的调度不再入队。状态来自 console 发布
     # 的 Redis 短视图；缺失/无记录 = active（fail-open，见 tenant_status 模块）。
+    # 拒绝留痕（B44-01）：拒绝也落 fire_record（rejected + 原因）——否则
+    # 「到期被拒」与「未到期」在调度面不可区分（静默停走）。不推进
+    # next_run_at/last_fired_at/last_enqueue_ok：恢复后同一 due 立即正常受理，
+    # 恢复后的 ok 记录与 rejected 记录并存（历史即调度面健康证据）。
     if not tenant_is_active(redis_client, schedule.get("tenant_id")):
         logger.info("租户 %s 已停用，跳过调度 %s 派发", schedule.get("tenant_id"), schedule_id)
+        _write_fire_record(
+            redis_client, schedule_id,
+            fired_at=datetime.now().isoformat(), trigger_kind=trigger_kind,
+            flow_id=schedule["flow_id"], version=schedule.get("version") or "",
+            dedup_key="", enqueue=FIRE_ENQUEUE_REJECTED, msg_id="",
+            execution_id="",
+            rejection_reason=REJECTION_TENANT_DISABLED,
+        )
         return None
     tenant_id = schedule.get("tenant_id") or "default"
     now = datetime.now()
@@ -309,6 +333,17 @@ def fire_schedule(
             logger.info(
                 "租户 %s start 配额已满，跳过调度 %s 本次触发（execution=%s）",
                 tenant_id, schedule_id, execution_id,
+            )
+            # 拒绝留痕（B44-01）：rejected + 原因；execution_id 不落——预铸 id
+            # 未落任何行/消息且认领已回滚，留 id 只会链到 404。不推进调度状态：
+            # 同 due 每 30s 锁窗重试，配额释放后正常受理（ok 与 rejected 并存）。
+            _write_fire_record(
+                redis_client, schedule_id,
+                fired_at=now.isoformat(), trigger_kind=trigger_kind,
+                flow_id=schedule["flow_id"], version=schedule.get("version") or "",
+                dedup_key=dedup_key, enqueue=FIRE_ENQUEUE_REJECTED, msg_id="",
+                execution_id="",
+                rejection_reason=REJECTION_QUOTA_EXHAUSTED,
             )
             return None
     else:
@@ -366,11 +401,20 @@ def fire_schedule(
             trigger_kind=trigger_kind, due_at=due_at,
         )
 
+    # trigger（A2R44-02）：触发归因三元组单源构造——随占位行落盘（受理窗口内
+    # 归因即可查）+ 随 start 消息透传（worker 接管落行按 schedule_id 派生
+    # invoker=schedule，周期/手动由 kind 区分）。
+    trigger = {
+        "kind": trigger_kind,
+        "schedule_id": schedule_id,
+        "schedule_name": schedule.get("name", ""),
+    }
     if claim_token is not None:
         # A43-04：入队前同步落 queued 占位行（invoker=schedule），失败逐级回滚。
         if not _write_queued_placeholder(
             redis_client, tenant_id, execution_id,
             schedule["flow_id"], schedule.get("version"), now.isoformat(),
+            trigger=trigger,
         ):
             logger.error(
                 "调度 %s 占位状态行写入失败 execution=%s：本次触发不入队，"
@@ -405,11 +449,9 @@ def fire_schedule(
         "flow_id": schedule["flow_id"],
         "params": schedule.get("params") or {},
         "timestamp": now.isoformat(),
-        "trigger": {
-            "kind": trigger_kind,
-            "schedule_id": schedule_id,
-            "schedule_name": schedule.get("name", ""),
-        },
+        # 触发归因（A2R44-02）：与占位行同源三元组，worker 接管落行时透传
+        # （invoker 按 schedule_id 派生为 schedule，周期/手动由 kind 区分）。
+        "trigger": trigger,
         # 受理凭据回填（A43-04）：fire_record 记同一 id，受理窗口可定位
         "dedup_key": dedup_key,
     }
@@ -539,6 +581,7 @@ def _write_fire_record(
     enqueue: str,
     msg_id: str,
     execution_id: str,
+    rejection_reason: str = "",
 ) -> None:
     """追加触发历史（保留最近 FIRE_HISTORY_MAX 条）。
 
@@ -546,6 +589,10 @@ def _write_fire_record(
     积压期凭它 GET 占位行 / CANCEL；console history 端点的
     ``ScheduleFireRecord.execution_id`` 字段已就绪，集群档记录补上即透出。
     ``enqueue="dedup"``：同键重触发收敛到既有 execution_id、未入队。
+    ``enqueue="rejected"`` + ``rejection_reason``（B44-01）：触发被闸拒绝
+    （tenant_disabled / tenant_quota_exhausted）也留痕——「到期被拒」与
+    「未到期」在调度面可区分；rejected 记录不带 execution_id（未落任何
+    行/消息）。非拒绝路径不写该键（存量记录形状零变化）。
     """
     fire_record = {
         "fired_at": fired_at,
@@ -557,6 +604,8 @@ def _write_fire_record(
         "msg_id": msg_id,
         "execution_id": execution_id,
     }
+    if rejection_reason:
+        fire_record["rejection_reason"] = rejection_reason
     try:
         fires_key = SCHEDULE_FIRES_KEY.format(schedule_id=schedule_id)
         pipe = redis_client.pipeline()

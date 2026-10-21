@@ -306,10 +306,10 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
                                    "version": "1",
                                    "timestamp": datetime.now().isoformat()})
             # rebase 组合：execution_id（G1 预铸）+ dedup_key / delivery_count
-            # （波次二任务③/①）三者一起透传
+            # （波次二任务③/①）三者一起透传；trigger=None（A2R44-02，旧消息无归因）
             start.assert_called_once_with(
                 "f", {}, "1", execution_id=None, dedup_key=None, delivery_count=None,
-                enqueued_at=ANY, schema_version=None)
+                enqueued_at=ANY, schema_version=None, trigger=None)
         with patch.object(worker, "start_flow") as start:
             # BFF 预铸 id 随消息透传（P0 可见性：提交方即刻可轮询）
             worker._dispatch_task({"type": "start", "flow_id": "f", "params": {},
@@ -317,7 +317,7 @@ class TestRedisFlowWorkerDispatch(unittest.TestCase):
                                    "timestamp": datetime.now().isoformat()})
             start.assert_called_once_with(
                 "f", {}, "1", execution_id="pre-1", dedup_key=None, delivery_count=None,
-                enqueued_at=ANY, schema_version=None)
+                enqueued_at=ANY, schema_version=None, trigger=None)
         with patch.object(worker, "resume_flow") as resume:
             worker._dispatch_task(
                 {

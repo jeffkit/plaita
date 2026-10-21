@@ -323,6 +323,8 @@ export interface ExecutionInfo {
   context?: Record<string, unknown>
   error?: Record<string, unknown>
   invoker?: string
+  /** 触发归因：调度触发的执行带 {kind, schedule_id, schedule_name}；null=手动/老执行 */
+  trigger?: { kind: string; schedule_id: string; schedule_name?: string } | null
   // 本地单机模式专有：节点级 trace 与最终输出
   nodes?: Array<{ id: string; type: string; name?: string; input?: unknown; output?: unknown; status: string; error?: string }> | null
   output?: unknown
@@ -1451,6 +1453,8 @@ export interface ScheduleFireRecord {
   execution_id?: string | null
   status?: string | null
   error?: string | null
+  /** 触发拒绝原因（enqueue="rejected" 时非空）：tenant_disabled / tenant_quota_exhausted */
+  rejection_reason?: string | null
 }
 
 export interface ScheduleHistoryResponse {

@@ -53,7 +53,13 @@ console 后端 /api/schedules ──CRUD──▶ plaita:schedules（与调度�
 ```
 
 触发历史：`plaita:schedule:fires:{id}` list（LPUSH+LTRIM 保留 50 条）：
-`{"fired_at","trigger_kind","flow_id","version","enqueue":"ok|failed","msg_id"}`
+`{"fired_at","trigger_kind","flow_id","version","dedup_key",
+"enqueue":"ok|failed|dedup|rejected","msg_id","execution_id"}`。
+`dedup`=同键重触发收敛到既有 execution_id；`rejected`=闸拒绝（B44-01：
+停用租户 / 配额满），带 `rejection_reason`（`tenant_disabled` /
+`tenant_quota_exhausted`）且**不带** execution_id——「到期被拒」与
+「未到期」在调度面可区分；拒绝不推进 `next_run_at`/`last_fired_at`
+（恢复后同一 due 正常受理，ok 与 rejected 记录并存）。
 
 本地单机档（`local_schedule_fires` 表）对外返回**同一字段集**：`fired_at`
 （表 `created_at`）、`flow_id`/`version`（取调度定义）、`enqueue`

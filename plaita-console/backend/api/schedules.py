@@ -148,6 +148,10 @@ class ScheduleFireRecord(BaseModel):
     execution_id: Optional[str] = None
     status: Optional[str] = None
     error: Optional[str] = None
+    # 触发拒绝原因（B44-01）：enqueue="rejected" 时非空
+    # （tenant_disabled / tenant_quota_exhausted）——「到期被拒」与「未到期」
+    # 在调度面可区分；其余记录为 None。
+    rejection_reason: Optional[str] = None
 
 
 class ScheduleHistoryResponse(BaseModel):

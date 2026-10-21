@@ -602,10 +602,18 @@ function HistoryDialog({ schedule, onClose }: { schedule: ScheduleInfo; onClose:
                   </span>
                   <span
                     className={`ml-auto text-caption ${
-                      r.enqueue === 'ok' ? 'text-status-success' : 'text-status-error'
+                      r.enqueue === 'ok'
+                        ? 'text-status-success'
+                        : r.enqueue === 'rejected'
+                          ? 'text-status-warning'
+                          : 'text-status-error'
                     }`}
                   >
-                    {r.enqueue === 'ok' ? '已入队' : '入队失败'}
+                    {r.enqueue === 'ok'
+                      ? '已入队'
+                      : r.enqueue === 'rejected'
+                        ? `已拒绝（${rejectionLabel(r.rejection_reason)}）`
+                        : '入队失败'}
                   </span>
                 </div>
               ))}
@@ -615,6 +623,13 @@ function HistoryDialog({ schedule, onClose }: { schedule: ScheduleInfo; onClose:
       </div>
     </div>
   )
+}
+
+/** 拒绝原因 → 可读标签（B44-01；未知原因原样展示，不吞） */
+function rejectionLabel(reason?: string | null): string {
+  if (reason === 'tenant_disabled') return '租户已停用'
+  if (reason === 'tenant_quota_exhausted') return '租户配额已满'
+  return reason || '原因未知'
 }
 
 /** 时间格式化：epoch 毫秒（数字或数字字符串）或 ISO 字符串 → 本地可读 */
