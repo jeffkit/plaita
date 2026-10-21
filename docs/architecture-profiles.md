@@ -96,10 +96,12 @@ quickstart 三件套最小集 / dev 全功能六服务 / prod 全家桶 + 上限
 以活动集群的 `cluster_config.yaml` 为准。目标 Redis 连不上时切换被拒（502），
 注册表活动指针不动——不会出现「页面显示集群 B、实际读写的还是 A」。
 
-Redis 地址的权威来源是活动集群配置文件的 `redis.url`；`redis://localhost:6379/0`
-与 `127.0.0.1` 视为模板占位，让位给 console 的 `PLAITA_CONSOLE_REDIS_URL`
-（Docker 部署里 redis 在另一个容器）。配置文件没给 `redis.url` 且 env 未设时，
-注册表元数据兜底（plaita#65 优先级序末位）。重启后 console 仍按注册表的活动集群连接。
+Redis 地址的权威来源是活动集群配置文件的 `redis.url`；host 为 `localhost`、
+`127.0.0.1`、`::1`、`0.0.0.0`（大小写不敏感，解析 URL 后按 host 段精确比较，
+userinfo 凭据段不参与——A2R44-01）视为模板占位，让位给 console 的
+`PLAITA_CONSOLE_REDIS_URL`（Docker 部署里 redis 在另一个容器）。配置文件没给
+`redis.url` 且 env 未设时，注册表元数据兜底（plaita#65 优先级序末位）。
+重启后 console 仍按注册表的活动集群连接。
 
 服务 env 里的 `${redis.url}` 引用按同一条链在**启动时**解析（plaita#276）：
 config_file > console_env > 注册表元数据，与集群读面的
