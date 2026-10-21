@@ -1,0 +1,58 @@
+=== 负控 r58：DLQ replay 目标 family 校验 ===
+
+环境：修复前 = `git worktree add --detach /tmp/r58-nc dc31efa` + 拷入本单
+源/测试文件后，删除 `replay_dead_letter` 的 target-family 检查块（其余改动
+保留）；修复后 = 主工作树。解释器 = 仓库 `.venv/bin/python`。
+
+--- A. 回归用例（先红后绿） ---
+命令：
+  cd <tree> && PYTHONPATH=<tree> .venv/bin/python -m pytest \
+    tests/unit/test_r58_dlq_replay_target_family.py -q
+
+修复前（rc=1）：
+FAILED ...::test_cross_family_replay_rejected_before_marker
+FAILED ...::test_legacy_source_rejected_by_default_and_allows_explicit_override
+FAILED ...::test_malformed_explicit_target_family_is_unknown_and_not_consumed
+3 failed, 2 passed in 0.41s
+
+关键断言：
+>       assert res.replayed is False
+E       AssertionError: assert True is False
+E        +  where True = ReplayResult(replayed=True, reason='ok',
+E            target_message_id='1792606700996-0', ...).replayed
+
+>       assert rejected.replayed is False
+E       AssertionError: assert True is False
+E        +  where True = ReplayResult(replayed=True, reason='ok', ...).replayed
+
+>       assert res.replayed is False
+E       AssertionError: assert True is False
+E        +  where True = ReplayResult(replayed=True, reason='ok', ...).replayed
+
+修复后（同一命令，主工作树）：
+  5 passed in 0.33s
+
+--- B. 规格探针 /tmp/r104_dlq_replay_family.py（ROOT=argv[1]） ---
+源 family cf1-ea7ed5a37a2c，目标 family cf1-41c046cf69ce。
+
+修复前：
+  replay result: True ok 1792606706485-0
+  target xlen: 1
+  replay marker: True
+  source DLQ xlen: 1
+  target queue read: None
+  target stats family_mismatch: 1
+  target pending: [{'message_id': '1792606706485-0', ...}]
+
+修复后：
+  replay result: False target_family_mismatch None
+  target xlen: 0
+  replay marker: False
+  source DLQ xlen: 1
+  target queue read: None
+  target stats family_mismatch: 0
+  target pending: []
+
+结论：修复前「replayed ok」但目标 worker 拒收留 pending；修复后拒绝发生
+在 marker/入队之前，目标 XLEN=0、marker 不存在、源 DLQ 保留、审计记
+rejection；同 family 正控与既有 replay 用例全绿。

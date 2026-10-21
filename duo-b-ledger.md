@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十轮，2026-10-22；任务书标称第五十九轮——台账第五十九轮已被 #285 占用，按序列顺延）：**DLQ replay 目标 family 校验（r58 a/P2，基线 `dc31efa`）**——replay 在源 `config_envelope` 后、marker/入队前解析目标 stream 的生效 family（默认按目标 stream + 生效 group/DLQ；自定义 group/DLQ 显式 `target_config_family`），源/目标不一致（含源 legacy）⇒ `target_family_mismatch`：不写 marker、目标 XLEN=0、源 DLQ 保留、审计记 rejection；管理员 `allow_family_mismatch=true` 才可跨 family（WARNING+审计），显式 family 非法/无法解析 ⇒ `target_family_unknown`。测试 unit **5P** + 既有 replay 三文件 **41P** + console replay 两文件 **19P**；负控 pre-fix worktree **3F/2P** + r104 规格探针「replayed ok 但目标 pending」实红→拒绝；全量 unit **8746P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1091P/13S**；`landing_gate.py ci` rc=0（`dc31efa` CI + Console E2E 绿）。无 issue 号（duo-a 第九十六轮 a/P2）。
+
 > 一行摘要（第五十九轮，2026-10-22；任务书标称第五十七轮——台账第五十七/五十八轮已被 A69 复核轮与 #282-284 轮占用，按台账序列顺延）：**#285 P1 owner CAS 收口（基线 `c08e118`）**——A 写占位行/入队/写 owner 前用 Lua 复核 map==我、无墓碑、owner==我（claiming TTL 过期但映射仍属我时原地续期），owner 写入改 CAS 绝不覆盖他 id；owner 键改独立前缀 `{ns}:start-dedup-owner:{key}` 修 `foo`/`foo:owner` 碰撞；败者不再 ghost 200（载体未落返回 409 in-progress，重试收敛），A 失去认领收敛当前映射或 409 superseded；占位行失败 503+Retry-After 并释放映射/写墓碑。测试 console **5P**（#280 并发用例按新契约调整，同 id/单载体断言保持）；负控 pre-fix worktree **5F→5P** + A1 探针 owner TTL=1s/force DELETE/后缀碰撞/3+ ghost 全部实红→单 id 单载体；全量 console **1091P/13S**、unit **8741P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、plaita-ai **293P/13S/12 subtests**、layering/wheel/size **46P**；`landing_gate.py ci` rc=0（`c08e118` CI + Console E2E 绿）。
 
 > 一行摘要（第五十八轮，2026-10-22；任务书标称第五十六轮——台账第五十六/五十七轮已被 A69 复核轮占用，按台账序列顺延）：**#282/#283/#284 三单 P1 收口（基线 `3276c20`）**——① #282 超投递改走 `dead_letter_if_allowed`（拒写不 ack、消息留 pending）+ 消费循环捕获 `TenantWriteRejected`（计数/不退出），删除租户后不再崩溃重启；② #283 世代随信封走（requeue/handover/DLQ replay 继承源世代），dispatch 按 ContextVar 源世代比对当前 meta 拒旧副本，订阅无上下文且当前世代已发布即具名拒绝（不再 adopt）；③ #284 create_tenant 世代先于 active、发布失败回滚，启动对账同序。测试 unit **5P** + console **2P**；负控隔离副本组合回退 7 处 **6F→6P**；全量 unit **8741P/12S/14 deselected/3493 subtests**、e2e+integration **287P/4S**、console **1086P/13S**、plaita-ai **293P/13S/12 subtests**、layering/wheel/size **46P**；`landing_gate.py ci` rc=0（`8c663df` CI + Console E2E 绿）。
@@ -323,3 +325,42 @@
   wheel/size **46P**；`landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit 关闭 #285；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十轮 · DLQ replay 目标 family（2026-10-22，B1 修复席；r58 a/P2，任务书标称第五十九轮——已被 #285 占用，按序列顺延）
+
+- 基线：`origin/main` `dc31efa`；落地门 main 最近完成 run `dc31efa`
+  CI success + Console E2E 绿。
+- **缺陷（r58 a/P2）**：`replay_dead_letter` 只继承源 family，不校验目标
+  stream family。源 F1 死信灌进 F2 stream 仍返回 `replayed=True/ok` + 写
+  marker + 目标 Stream；目标 worker family gate 拒收留 pending
+  （`config_family_mismatch=1`），无执行——「replayed ok」是假成功，且
+  marker 已烧导致修好后不能直接重放。
+- 修法：
+  - 新增 `_resolve_target_family`：默认
+    `envelope_for_stream(target_stream, role="worker")`（目标 stream + 生效
+    group/DLQ，与目标 worker/生产者同源）；自定义 group/DLQ 部署由调用方
+    显式传 `target_config_family`；显式值必须合法 `cf1-`，解析异常/非法 ⇒
+    `target_family_unknown`（fail-closed）。
+  - 在源 `config_envelope` 后、schema 检查/marker/入队前比较源 family
+    （缺失/畸形已归一为 `legacy`）与目标 family：不一致 ⇒
+    `target_family_mismatch`（detail 含双 family），不写 marker、目标 XLEN
+    不变、源 DLQ 保留，`_reject` 审计记 rejection。
+  - `allow_family_mismatch=True` 才允许显式跨 family（WARNING + 审计）；
+    console `DlqReplayRequest` additive 暴露 `target_config_family` /
+    `allow_family_mismatch`。
+- 测试：新增 `tests/unit/test_r58_dlq_replay_target_family.py` **5P**
+  （跨 family 拒绝 + 同 family 正控、同 family 成功、legacy 默认拒绝 +
+  显式 override、非法显式 family 不消耗 marker、自定义 group/DLQ 显式声明）；
+  既有 replay 用例源信封补 `config_family` 正控：unit 三文件 **41P**、
+  console 两文件 **19P**。
+- 负控：pre-fix worktree（`dc31efa` + 本单文件，删除 family 检查）→
+  **3F/2P**（跨 family / legacy / 非法显式均报 `ok`）；主树同命令 **5P**。
+  规格探针 r104（ROOT 参数化）：修复前 `replayed=True/ok`、目标 XLEN=1、
+  marker=True、family_mismatch=1、pending=1；修复后
+  `False/target_family_mismatch`、XLEN=0、marker=False、源 DLQ=1、无 pending。
+  日志 `docs/proofs/data/r58-dlq-replay-family-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8746P/12S/14 deselected/3493
+  subtests**；e2e+integration **287P/4S**；console **1091P/13S**；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 无 issue 号（duo-a 第九十六轮 a/P2）；未触碰 #286/#287 dedup seam、他席
+  `duo-b3-ledger.md` 与未跟踪 `duo-a-ledger.md`/`duo-a2-ledger.md`。

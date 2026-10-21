@@ -398,6 +398,8 @@ def test_event_filter_resume_gets_timestamp(env):
 def test_dlq_replay_does_not_refresh_timestamp(env):
     """DLQ replay 用 dead_lettered_at，不用 now；老载体回灌后仍被年龄闸拦。"""
     dead_at = (datetime.now() - timedelta(days=40)).timestamp()
+    from plaita.runtime_config import envelope_for_stream
+
     envelope = {
         "reason": "max_deliveries=5",
         "source_stream": QUEUE,
@@ -405,6 +407,8 @@ def test_dlq_replay_does_not_refresh_timestamp(env):
         "delivery_count": 5,
         "dead_lettered_at": dead_at,
         "schema_version": 1,
+        # r58：目标 family 与源一致（跨 family 由 replay 拒绝）。
+        "config_family": envelope_for_stream(TARGET, role="console")["config_family"],
         "payload": _start_body(),
     }
     dlq_id = env.fake.xadd(DLQ, {"payload": json.dumps(envelope)})

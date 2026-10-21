@@ -38,6 +38,7 @@ pytest.importorskip("redis")
 
 import fakeredis
 
+from plaita.runtime_config import envelope_for_stream
 from plaita.server.dlq_replay import (
     REPLAY_AUDIT_STREAM,
     deterministic_execution_id,
@@ -91,6 +92,9 @@ def _seed(
         "source_id": "1699-0",
         "delivery_count": 5,
         "dead_lettered_at": dead_lettered_at,
+        # r58：源/目标 family 一致的正控（跨 family 拒绝见
+        # test_r58_dlq_replay_target_family.py）。
+        "config_family": envelope_for_stream(TARGET, role="console")["config_family"],
         "payload": payload if payload_override is None else payload_override,
     }
     if schema_version is not None:

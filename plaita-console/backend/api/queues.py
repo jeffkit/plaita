@@ -132,6 +132,20 @@ class DlqReplayRequest(StrictRequestModel):
     tenant_id: Optional[str] = Field(
         default=None, description="为缺 tenant_id 的条目显式指定租户"
     )
+    target_config_family: Optional[str] = Field(
+        default=None,
+        description=(
+            "目标 queue 的 config_family；自定义 consumer group/DLQ 的部署"
+            "必须显式给（缺省按目标 stream + 生效 group/DLQ 解析）"
+        ),
+    )
+    allow_family_mismatch: bool = Field(
+        default=False,
+        description=(
+            "管理员显式跨 family 回灌（会 WARNING 并写审计；默认拒绝，"
+            "避免目标 worker 静默拒收后 replay 假报 ok）"
+        ),
+    )
 
 
 # ============ 工具函数 ============
@@ -694,6 +708,8 @@ async def replay_dlq(
         force=bool(body.force),
         execution_id=body.execution_id,
         tenant_id=body.tenant_id,
+        target_config_family=body.target_config_family,
+        allow_family_mismatch=bool(body.allow_family_mismatch),
     )
     payload = result.as_dict()
     target_tenant = result.tenant_id or body.tenant_id or caller_tenant

@@ -110,6 +110,8 @@ def _login(client, username, password):
 
 
 def _seed(redis, tenant=TENANT):
+    from plaita.runtime_config import envelope_for_stream
+
     envelope = {
         "reason": "max_deliveries=5",
         "source_stream": TARGET,
@@ -117,6 +119,8 @@ def _seed(redis, tenant=TENANT):
         "delivery_count": 5,
         "dead_lettered_at": 1700000000.0,
         "schema_version": 1,
+        # r58：源/目标 family 一致的正控。
+        "config_family": envelope_for_stream(TARGET, role="console")["config_family"],
         "payload": {
             "type": "start",
             "flow_id": "f1",
