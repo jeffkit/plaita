@@ -1,0 +1,47 @@
+=== 负控 b94-02：恢复 pre-fix（DEFAULT=300 + 预算键只读 env） ===
+变异：
+  runtime_config.DEFAULT_LEASE_TTL_SECONDS = 300
+  四个预算键从 _budget_int(overrides, ...) 改回 _int_value(env, ...)
+  （overrides 的 max_deliveries/lease_ttl_seconds/task_max_age_seconds/
+    dlq_max_len 被静默丢弃）
+
+命令：
+  python -m pytest tests/unit/test_b94_02_budget_generation.py -q
+
+测试输出（节选）：
+    def test_default_deployment_hash_uses_actual_120():
+>       assert cfg.lease_ttl_seconds == 120
+E       AssertionError: assert 300 == 120
+
+    def test_env_aligned_to_120_does_not_flip_hash():
+>       assert default_cfg.lease_ttl_seconds == env_cfg.lease_ttl_seconds == 120
+E       AssertionError: assert 300 == 120
+
+    def test_cli_overrides_change_hash():
+>       assert cli_lease.lease_ttl_seconds == 600
+E       AssertionError: assert 300 == 600
+
+    def test_remaining_budget_overrides_are_consumed():
+>       assert cfg.task_max_age_seconds == 3600
+E       AssertionError: assert 2592000 == 3600
+
+    def test_config_effective_matches_actual_default(...):
+>       assert "lease_ttl=120" in line
+E       AssertionError: assert 'lease_ttl=120' in 'event=config.effective ...
+        max_deliveries=5 lease_ttl=300 task_max_age=2592000 dlq_max_len=1000 ...
+        budget_generation=bg1-6cece37a8ab0 ...'
+
+    def test_config_effective_matches_cli_overrides(...):
+>       assert "lease_ttl=600" in line
+E       AssertionError: assert 'lease_ttl=600' in '... lease_ttl=300 ...'
+
+FAILED ...::test_default_deployment_hash_uses_actual_120
+FAILED ...::test_env_aligned_to_120_does_not_flip_hash
+FAILED ...::test_cli_overrides_change_hash
+FAILED ...::test_remaining_budget_overrides_are_consumed
+FAILED ...::test_config_effective_matches_actual_default
+FAILED ...::test_config_effective_matches_cli_overrides
+6 failed in 0.55s
+
+=== 还原修复后 ===
+7 passed in 0.54s

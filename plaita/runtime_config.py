@@ -42,7 +42,11 @@ DEFAULT_CONSUMER_GROUP = "plaita-workers"
 DEFAULT_DLQ_SUFFIX = ":dlq"
 DEFAULT_DLQ_MAX_LEN = 1000
 DEFAULT_MAX_DELIVERIES = 5
-DEFAULT_LEASE_TTL_SECONDS = 300
+#: 与 ``execution_lease.DEFAULT_LEASE_TTL_SECONDS``（worker 实际 acquire/renew
+#: 的默认值）及 ops-runbook 文档的 120 对齐（b94-02）。此模块不得 import
+#: ``plaita.server``（分层约束），故以常量单源对齐；改这里必须同步
+#: ``plaita/server/execution_lease.py``，否则预算代际哈希会再次与实际生效值脱钩。
+DEFAULT_LEASE_TTL_SECONDS = 120
 DEFAULT_TASK_MAX_AGE_SECONDS = 30 * 24 * 3600
 DEFAULT_TENANT_STATUS_RECONCILE_SECONDS = 60.0
 DEFAULT_TENANT_NAMESPACE_VERSION = "v1"
@@ -798,6 +802,48 @@ def _int_value(
         return default
 
 
+def _budget_int(
+    overrides: Mapping[str, Any],
+    key: str,
+    env: Mapping[str, str],
+    env_name: str,
+    default: int,
+    *,
+    minimum: int,
+    category: str,
+    errors: list,
+    warnings: list,
+) -> int:
+    """Resolve one budget knob: explicit override wins over env (b94-02).
+
+    Workers pass their constructor/CLI-effective values as ``overrides``
+    (``max_deliveries`` / ``lease_ttl_seconds`` / ``task_max_age_seconds`` /
+    ``dlq_max_len``). The budget generation hash must be computed from those
+    actual values; reading only env silently hashed the env-or-300 defaults
+    while the worker enforced the constructor values (default lease 120).
+    ``None`` means "not supplied" and falls back to env, like identity keys.
+    """
+    if overrides.get(key) is not None:
+        raw = overrides[key]
+        try:
+            return parse_int(raw, key, minimum=minimum)
+        except ConfigError as exc:
+            if category in (CLASS_IDENTITY, CLASS_SECURITY, CLASS_RESOURCE, CLASS_TTL):
+                errors.append(str(exc))
+            else:
+                warnings.append(f"{exc}; using default {default}")
+            return default
+    return _int_value(
+        env,
+        env_name,
+        default,
+        minimum=minimum,
+        category=category,
+        errors=errors,
+        warnings=warnings,
+    )
+
+
 def _float_value(
     env: Mapping[str, str],
     name: str,
@@ -886,21 +932,25 @@ def load_runtime_config(
         "tenant_status_epoch", deployment_epoch
     )
 
-    max_deliveries = _int_value(
-        env, "PLAITA_MAX_DELIVERIES", DEFAULT_MAX_DELIVERIES, minimum=1,
-        category=CLASS_RESOURCE, errors=errors, warnings=warnings,
+    max_deliveries = _budget_int(
+        overrides, "max_deliveries", env, "PLAITA_MAX_DELIVERIES",
+        DEFAULT_MAX_DELIVERIES, minimum=1, category=CLASS_RESOURCE,
+        errors=errors, warnings=warnings,
     )
-    lease_ttl = _int_value(
-        env, "PLAITA_LEASE_TTL_SECONDS", DEFAULT_LEASE_TTL_SECONDS, minimum=1,
-        category=CLASS_TTL, errors=errors, warnings=warnings,
+    lease_ttl = _budget_int(
+        overrides, "lease_ttl_seconds", env, "PLAITA_LEASE_TTL_SECONDS",
+        DEFAULT_LEASE_TTL_SECONDS, minimum=1, category=CLASS_TTL,
+        errors=errors, warnings=warnings,
     )
-    task_max_age = _int_value(
-        env, "PLAITA_TASK_MAX_AGE_SECONDS", DEFAULT_TASK_MAX_AGE_SECONDS,
-        minimum=0, category=CLASS_TTL, errors=errors, warnings=warnings,
+    task_max_age = _budget_int(
+        overrides, "task_max_age_seconds", env, "PLAITA_TASK_MAX_AGE_SECONDS",
+        DEFAULT_TASK_MAX_AGE_SECONDS, minimum=0, category=CLASS_TTL,
+        errors=errors, warnings=warnings,
     )
-    dlq_max_len = _int_value(
-        env, "PLAITA_DLQ_MAX_LEN", DEFAULT_DLQ_MAX_LEN, minimum=1,
-        category=CLASS_RESOURCE, errors=errors, warnings=warnings,
+    dlq_max_len = _budget_int(
+        overrides, "dlq_max_len", env, "PLAITA_DLQ_MAX_LEN",
+        DEFAULT_DLQ_MAX_LEN, minimum=1, category=CLASS_RESOURCE,
+        errors=errors, warnings=warnings,
     )
     reconcile = _float_value(
         env, "PLAITA_TENANT_STATUS_RECONCILE_SECONDS",

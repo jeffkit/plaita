@@ -4592,6 +4592,15 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         metrics_host: Optional[str] = None,
         alert_webhook: Optional[str] = None,
     ):
+        # b94-02：预算哈希必须与实际生效值一致——构造参数是 worker 真正
+        # acquire/renew 的 TTL，先按与 overrides 相同的口径钳制，避免
+        # lease_ttl_seconds<=0 时「实际 0 / 哈希 1」的再次分叉。
+        if int(lease_ttl_seconds) < 1:
+            logger.warning(
+                "lease_ttl_seconds=%s ≤0，钳制为 1（启动预检会拒绝该配置，B2R31-03）",
+                lease_ttl_seconds,
+            )
+        lease_ttl_seconds = max(1, int(lease_ttl_seconds))
         # A2R20-05：队列/租约共用客户端——connect 5s / read 30s 显式声明
         # （read 必须大于 XREADGROUP BLOCK 窗口，见 task_queue）。
         if redis_client is None:

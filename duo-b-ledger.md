@@ -78,3 +78,30 @@
 | 第三十三轮 | 台账 A46-04 / A47-F2（r46/r47；无 issue 号） | **决议载体租约冲突不再 ack**：suspend 提交窗口 `[订阅注册, 租约释放)` 内到达的 `event`/`timeout`/`cancel` 不是重复载体，而是 suspended 的唯一决议来源（#33）。旧 `_lease_conflict_ack_safe` 只查持有者注册表在册/非 draining，持有者活着就 ack 掉它们；持有者随后落盘 suspended 并释放租约 ⇒ 零载体、执行永久 suspended（默认 event 节点自动恢复网为 0，A47-02）。修法（A47 F2 配方）：`type=resume` 且 `resume_type∈{event,timeout,cancel}` **一律返回 False**（信号缺失分支——旧格式租约 / `--no-registry` / Redis 瞬断——也不退化 ack），消息留 pending；租约释放后由 reclaim 推进，租约长期持有时 #242 死信守卫拒绝死信并在释放后重入队副本（F2 探针 `pending=1/dlq=0` → 释放后 `delivery=1` → `completed`）。`continue`/`retry`/`start` 保持原存活判据 ack（#33/#50/#23 不变）；#258 的 `ResumeProtocolError` 状态感知分支是协议错配窗口，不受影响；回滚开关 `PLAITA_DISABLE_HOLDER_LIVENESS=1` 仍整体旁路（含本收紧）。同步 `flow-worker.md`（回收判据 / #33 / #53 丢弃可见性）与 `ops-runbook.md`。**另修 main 红**：`9411e2c` 引入 `_dispatch_task(schema_version=...)` 后 `test_worker_disk_guard` 假桩未跟上（`TypeError` 致任务重投烧到 DLQ，2 个消费循环用例红）——本 commit 补形参 | 新用例 10 条（`test_worker_lease_conflict_liveness.py` 31 passed）；**负控 pre-fix 7 failed / 24 passed**（event/timeout/cancel × 活持有者 3、× 无信号 3、pending→释放后回收 1 精确红），`continue`/`retry`/`start` 对照 3 条 pre-fix 即绿；修复后 31 passed。定向+相关 32 文件 **652 passed**；`tests/` 全量 **8541 passed / 16 skipped（rc=0）**；`ci-gate.sh` layering/wheel/size 绿；`mkdocs --strict` rc=0；ruff 改动行无新增（仅既有 BLE001）。**落地**：代码 commit `3090b47` 已推送 origin/main；推送前 `landing_gate.py ci` 为红（基线 `c0bffe0` CI failure = 上述 disk_guard 测试桩，本地复现 2F），本 commit 一并修绿，未走 `--override`；新 run `39201157306` **success**，落地后 `landing_gate.py ci` **绿**（main `3090b47`） |
 | 第三十二轮 | 台账 A42-05 / A44-01 / A44-02（r42/r44；无 issue 号） | **版本边界三格同族修复**：①A42-05——`_read_once` 超 `max_schema_version` 的死信改经 `_reject_unsupported_schema` → `dead_letter_if_allowed`（守卫拒绝/异常时留 pending、计 `dlq_guard_skipped`），与超投递/兜底异常同一入口；②A44-01——`_reclaim_one` 在 XCLAIM 后、返回消费循环前做与首投相同的信封版本校验，超版本走同一守卫死信路径（不回给旧语义执行），检查置于超投递判据之前；③A44-02——`enqueue_task`/`RedisStreamTaskQueue.enqueue` 新增显式 `schema_version`，worker 的 6 条重投/交接/归一化路径（start 幂等命中 resume、节点可重试失败、亲和交接、死信守卫恢复、超配额延迟、#258 归一化）经 `_requeue_envelope_kwargs` 继承源信封版本；`_dispatch_task`/`start_flow`/`_handle_start_dedup_hit` 透传。**语义选择**：重投副本承载源载体语义，故采用「继承源版本」而非「超版本副本进死信」——混跑池旧实例仍能接管唯一恢复载体；运维边界=worker 自身灰度不再要求整池原子升级，但 BFF/调度/event_filter 新载体仍须「先升消费者、再升生产者」。另：DLQ 信封固定带 `schema_version`（畸形消息另带 `raw_fields`/`truncated`），`_dead_letter_invalid` 同经守卫入口；历史缺字段消息固定按 `LEGACY_TASK_SCHEMA_VERSION=1` 解析/继承，不随写版本 bump。新增 `tests/unit/test_schema_version_boundary.py` 17 条；同步 `flow-worker.md` / `ops-runbook.md` | 新文件 **17 passed**；定向+相关 24 文件 **312 passed**（#186/#252/#258/affinity/quota/#28/#53/#91 重试/start dedup/event 回归）；rebase 后复跑核心 19 文件 **268 passed**；`tests/unit` 全量 **rc=0**；**负控**：A42-05 还原 → **2F**（`guard_calls=0`；deny 时 DLQ 1≠0、pending 0≠1）；A44-01 还原 → **2F/2P**（reclaim 返回 `StreamTask(schema_version=2)`，旧 build 真执行形态；同版本/缺版本两条保持绿）；A44-02 还原（helper 与 start-dedup 均不传）→ **6F**（副本落当前版本）；invalid-payload 还原 → **2F**。r42 探针 `probe_252.py` 由旧断言翻转（`guard_calls=1, dlq=0, pending=1`）；r44 矩阵 `crash-reclaim` 由 `served` → `dead_letter`（`schema_rejected=1`），DLQ 信封含 `schema_version`；混跑池探针：新 build 重投副本信封仍为 v1，旧 build **served** 而非死信。`mkdocs build --strict` **rc=0**；ruff 仅既有 BLE001（改动行无新增）；`landing_gate.py ci` **绿**（main `e11aabf` CI success）；代码 commit `9411e2c` 已推送 origin/main |
 | 第三十一轮 | [#258](https://github.com/jeffkit/plaita/issues/258)（P1；与 #50 同族） | **#258 P1**：`run()` 的 `ResumeProtocolError` 分支改为 `_handle_resume_protocol_error`——ack 前在租户上下文内读盘：仅当 `status=running` 且 `$LAST_NODE` 已不是 pending 挂起点（非挂起节点，或 suspending 但已决议）时，构建 `resume_type=continue` 副本，**先入队、后 ack** 原条；状态/定义读取瞬断或入队失败则不 ack，消息留 pending 等回收。`resume_flow` 在租约内复核后按同一判据把入口意图直接归一化为 continue（直接调用方也能恢复；已完成节点不重放）。真 #33 错配（suspended+continue、running+仍 pending 挂起点、陈旧 event 打在新挂起点）保持 `already_suspended` / ack+poison / #221 绑定守卫原语义。新增共用判据 `_resume_carrier_stale_reason`；`ResumeProtocolError` docstring 与 #50 互引；新增 `tests/unit/test_issue258_stranded_resume_carrier.py` 8 条（event/timeout 崩溃窗口恢复、真 #33 短路、陈旧绑定拒绝、run 分支状态感知与读盘瞬断）；同步 `flow-worker.md` / `idempotent-resume.md` | 新文件 **8 passed**；定向+相关 15 文件 **204 passed**（#33/#221/#233/#240/#242/#252/affinity/event 回归），复跑 **27 passed**；**负控** 还原 `flow_worker.py` → **5 failed / 3 passed**（入口 event/timeout 重投与 run 分支状态感知精确红；真 #33/陈旧绑定 3 条保持绿）；r41 探针 VERDICT 由 `STRANDED-RUNNING` → `NOT-REPRODUCED`（重投不再被判协议错误，而是继续撞注入的瞬态落盘失败）；全量 `bash scripts/ci-gate.sh` 通过（pytest+coverage≥80%、分层、wheel、SC-003）；`mkdocs build -f docs-site/mkdocs.yml --strict` **rc=0**；ruff 仅既有 BLE001（改动行无新增）；`landing_gate.py ci` **绿**（main `373395e` CI success）；代码 commit `3631755`（closes #258）已随 main `373395e` 推送 |
+
+## 第五十一轮 · b94-02 + b94-01（2026-10-21，B1 修复席）
+
+- 基线：`origin/main` `1032874`（CI success，`landing_gate.py ci` rc=0）。
+- **b94-02（P2）budget_generation 哈希与实际预算脱钩**：`load_runtime_config`
+  只消费 identity 类 overrides，worker 传入的 `max_deliveries` /
+  `lease_ttl_seconds` / `task_max_age_seconds` / `dlq_max_len` 被静默丢弃；
+  默认 worker 实际租约 120、哈希恒按 300，`config.effective` 自报 300。
+  修法：`_budget_int` 让显式 overrides 优先（env 回退），
+  `runtime_config.DEFAULT_LEASE_TTL_SECONDS` 与 `execution_lease`/runbook
+  对齐为 120，worker 实际 TTL 按同一口径钳制。负控 6F（默认 300 vs 120、
+  env 对齐不翻转、CLI 600/3 不生效、task_max_age/dlq override 丢弃、
+  config.effective 自报 300），还原 7P。迁移面：默认
+  `budget_generation`/`config_generation` 一次性翻转（300→120），在途消息
+  触发 `config.budget_stale`，drain 或接受一次性告警；commit message 与
+  `docs-site/docs/distributed/ops-runbook.md` 已注记。
+- **b94-01（P3）`PLAITA_EVENT_TTL_SECONDS` 无上界**：新增
+  `MAX_EVENT_TTL_SECONDS = 10 年`；`2^63`/`2^63-1`/上限+1 均 WARNING 具名
+  回退 7d，不再进入 `SET EX`；合法值（含上限）不变，惰性 ZREM 自愈保留。
+  负控 3F（3 个超界参数化全红，返回 315360001 等原值），还原 9P。
+- 验收：全量 unit `-m "not slow"` **8600P/12S/14 deselected/3498
+  subtests**；e2e+integration **287P/4S**；console **1039P/13S**（本地
+  stale `frontend/dist` 用当前源码重建后全绿，产物不入库）；plaita-ai
+  **241P/14S/12 subtests**；layering/wheel/size 全绿；`landing_gate.py ci`
+  rc=0（main `1032874` success）。
+- 本单为单 commit（见本轮 commit message）；未触碰他席未跟踪的
+  `duo-a-ledger.md` / `duo-a2-ledger.md`。

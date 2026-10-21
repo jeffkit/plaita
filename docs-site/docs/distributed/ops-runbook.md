@@ -314,6 +314,14 @@ worker 启动时计算并打印 `event=config.effective`，同时写入 registry
 - **迁移**：queue/group/DLQ 改名仍需 drain；新消费组对已存在 Stream 用
   `PLAITA_CONSUMER_GROUP_START_ID=$` 避免重放。family 不匹配的消息会留 pending，
   需要匹配代际的 worker 或迁移 runbook 处理，不会无限烧 delivery。
+- **b94-02 预算哈希迁移**：默认 `PLAITA_LEASE_TTL_SECONDS` 由 300 对齐为
+  **120**（与 `execution_lease` 实际默认及本文档一致），且
+  `load_runtime_config` 现在消费 worker 构造/CLI 的预算四键（不再是
+  env-only）。默认部署的 `budget_generation` 及含预算字段的
+  `config_generation` 会**一次性翻转**；在途消息携带旧哈希，滚动升级窗口会
+  触发 `queue_config_budget_stale_total` / `config.budget_stale` 告警。这是
+  迁移面而非数据损坏：drain 旧消息或接受一次性告警，待全部 worker/console
+  重启到新构建后收敛，新消息按新哈希写入。
 - **租户状态纪元**：console 每次状态写入/对账都刷新
   `plaita:tenant_status:epoch`（值来自 `PLAITA_DEPLOYMENT_EPOCH`）。worker
   发现 Redis epoch 缺失/更旧 → 非 default 租户拒绝、default 保持 #237

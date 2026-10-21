@@ -662,6 +662,10 @@ from plaita.core.url_redaction import (
 
 DEFAULT_EVENT_KEY_PREFIX = "plaita:event:"
 DEFAULT_EVENT_TTL_SECONDS = 60 * 60 * 24 * 7  # 7 days，与订阅记录同源
+# b94-01：业务上限 10 年。Redis ``SET EX`` 会把秒转毫秒，接近 2^63/1000
+# 即溢出（2^63-1 秒也会炸）；超大正数此前零 WARNING 放行，执行期炸 SET、
+# MULTI 不回滚又留下类型索引 ghost。入口处显式封顶，超界回退默认 + WARNING。
+MAX_EVENT_TTL_SECONDS = 10 * 365 * 24 * 60 * 60
 EVENT_TTL_ENV = "PLAITA_EVENT_TTL_SECONDS"
 
 
@@ -678,8 +682,9 @@ def event_type_index_key(event_type: str, key_prefix: str = DEFAULT_EVENT_KEY_PR
 def event_retention_ttl_seconds() -> int:
     """事件记录/类型索引的统一 TTL（秒）。
 
-    优先级：``PLAITA_EVENT_TTL_SECONDS`` > 默认 7 天。非法/非正数**不静默**降级
-    为无限额——记 WARNING 后回退默认（AGENTS.md「任何降级必须可观测」）。
+    优先级：``PLAITA_EVENT_TTL_SECONDS`` > 默认 7 天。非法/非正数/超过 10 年
+    上限**不静默**降级为无限额——记 WARNING 后回退默认（AGENTS.md「任何降级
+    必须可观测」）。上限防止 ``SET EX`` 秒转毫秒溢出及 MULTI 半提交 ghost。
     """
     raw = os.environ.get(EVENT_TTL_ENV)
     if raw is None or not raw.strip():
@@ -696,6 +701,13 @@ def event_retention_ttl_seconds() -> int:
         logger.warning(
             "%s=%d 非正数（事件记录不允许永不过期），回退默认 %d 秒",
             EVENT_TTL_ENV, ttl, DEFAULT_EVENT_TTL_SECONDS,
+        )
+        return DEFAULT_EVENT_TTL_SECONDS
+    if ttl > MAX_EVENT_TTL_SECONDS:
+        logger.warning(
+            "%s=%d 超过上限 %d 秒（10 年）——事件保留期回退默认 %d 秒；"
+            "超大值会在 Redis SET EX 秒转毫秒时溢出并留下半提交 ghost",
+            EVENT_TTL_ENV, ttl, MAX_EVENT_TTL_SECONDS, DEFAULT_EVENT_TTL_SECONDS,
         )
         return DEFAULT_EVENT_TTL_SECONDS
     return ttl
