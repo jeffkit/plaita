@@ -90,7 +90,7 @@
   `runtime_config.DEFAULT_LEASE_TTL_SECONDS` 与 `execution_lease`/runbook
   对齐为 120，worker 实际 TTL 按同一口径钳制。负控 6F（默认 300 vs 120、
   env 对齐不翻转、CLI 600/3 不生效、task_max_age/dlq override 丢弃、
-  config.effective 自报 300），还原 7P。迁移面：默认
+  config.effective 自报 300），还原 6P。迁移面：默认
   `budget_generation`/`config_generation` 一次性翻转（300→120），在途消息
   触发 `config.budget_stale`，drain 或接受一次性告警；commit message 与
   `docs-site/docs/distributed/ops-runbook.md` 已注记。

@@ -36,7 +36,7 @@
    「实际生效值 == 哈希输入 == config.effective 自报值」，不再出现
    实际 0 / 哈希 1 的边角分叉。
 
-## 测试（7 条，`tests/unit/test_b94_02_budget_generation.py`）
+## 测试（6 条，`tests/unit/test_b94_02_budget_generation.py`）
 
 对应任务要求四条负控：
 
@@ -72,7 +72,7 @@ E       AssertionError: assert 'lease_ttl=120' in '... lease_ttl=300 ...'  （co
 E       AssertionError: assert 'lease_ttl=600' in '... lease_ttl=300 ...'  （CLI 变体）
 ```
 
-还原修复后 **7 passed**。完整日志
+还原修复后 **6 passed**。完整日志
 `docs/proofs/data/b94-02-negative-control.txt`。
 
 ## 哈希翻转迁移面（已写入 commit message 与 ops-runbook）
@@ -85,7 +85,7 @@ E       AssertionError: assert 'lease_ttl=600' in '... lease_ttl=300 ...'  （CL
 
 ## 验收（2026-10-21，基线 1032874）
 
-- 新增 7 passed；相邻 config/event 回归 **58P + 21P**；
+- 新增 6 passed；相邻 config/event 回归 **58P + 21P**；
 - 全量 unit（`-m "not slow"`）**8600 passed / 12 skipped / 14 deselected /
   3498 subtests**；e2e+integration **287P/4S**；plaita-ai
   **241P/14S/12 subtests**；console **1039P/13S**（本地 stale `frontend/dist`
