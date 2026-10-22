@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery } from '@tanstack/react-query'
 import { Inbox, ChevronDown, ChevronUp } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../services/api'
@@ -53,11 +53,33 @@ function QueueCard({
   isExpanded: boolean
   onToggle: () => void
 }) {
-  const { data: detailData, isLoading } = useQuery({
+  // A2R55-01：truncated/next_start_id 必须可消费——深队列（含 DLQ 死信）
+  // 不能静默截在前 20 条。Stream 队列用排他游标 start_id 续读，list 队列
+  // 按索引切片（start=已取条数）。
+  const {
+    data: detailData,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ['queue', queue.name],
-    queryFn: () => api.getQueueDetail(queue.name),
+    queryFn: ({ pageParam }) => api.getQueueDetail(queue.name, pageParam || undefined),
+    initialPageParam: undefined as { start?: number; startId?: string } | undefined,
+    getNextPageParam: (last, allPages) => {
+      if (!last.truncated) return undefined
+      if (last.next_start_id) return { startId: last.next_start_id }
+      return { start: allPages.reduce((n, p) => n + p.tasks.length, 0) }
+    },
     enabled: isExpanded,
   })
+
+  const detailPages = detailData?.pages ?? []
+  // stream 游标续读的 task.index 每页都从 0 计，拼上页号做稳定 key
+  const detailTasks = detailPages.flatMap((page, pi) =>
+    page.tasks.map((task) => ({ task, rowKey: `${pi}-${task.index}` }))
+  )
+  const totalInQueue = detailPages[0]?.length ?? 0
 
   // 积压语义：0 空 / <10 正常 / ≥10 需要关注
   const getLengthColor = (length: number) => {
@@ -97,15 +119,17 @@ function QueueCard({
         <div className="border-t border-line p-4">
           {isLoading ? (
             <div className="text-center text-ink-muted py-4 text-caption">加载中…</div>
-          ) : detailData?.tasks.length === 0 ? (
+          ) : detailTasks.length === 0 ? (
             <div className="text-center text-ink-muted py-4 text-caption">队列为空</div>
           ) : (
             <div className="space-y-2">
               <p className="text-caption text-ink-muted mb-3">
-                显示前 <span className="font-mono tabular-nums">{detailData?.tasks.length}</span> 个任务
+                已显示 <span className="font-mono tabular-nums">{detailTasks.length}</span> /{' '}
+                <span className="font-mono tabular-nums">{totalInQueue}</span> 个任务
+                {hasNextPage && <span className="text-status-warning">（仅前几页，可加载更多）</span>}
               </p>
-              {detailData?.tasks.map((task) => (
-                <div key={task.index} className="bg-inset border border-line rounded-lg p-3 font-mono text-data-sm">
+              {detailTasks.map(({ task, rowKey }) => (
+                <div key={rowKey} className="bg-inset border border-line rounded-lg p-3 font-mono text-data-sm">
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-ink-faint tabular-nums">#{task.index}</span>
                     {!!task.data.type && (
@@ -119,6 +143,17 @@ function QueueCard({
                   </pre>
                 </div>
               ))}
+              {hasNextPage && (
+                <button
+                  onClick={() => fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                  className="mt-2 w-full py-2 rounded-md border border-line text-caption text-plaita-400 hover:bg-elevated/60 transition-colors disabled:text-ink-faint"
+                >
+                  {isFetchingNextPage
+                    ? '加载中…'
+                    : `加载更多（已显示 ${detailTasks.length} / 共 ${totalInQueue} 个）`}
+                </button>
+              )}
             </div>
           )}
         </div>

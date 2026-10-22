@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Plus,
   RefreshCw,
@@ -360,21 +360,37 @@ function ScheduleDialog({
       }
       const payload = {
         name: name.trim(),
-        flow_id: flowId,
         version: version || defaultVersion || undefined,
         cron,
         params,
       }
       if (editing) {
-        return api.updateSchedule(editing.schedule_id, payload)
+        // A2R55-02：带打开对话框时行的 updated_at 作乐观锁基准，并发编辑由
+        // 后端 409 schedule_stale 拒绝（不再静默 last-write-wins）。
+        // flow_id 只进 create——update 模型 extra=forbid 不吃该字段，此前把
+        // 共用 payload 直塞 PUT 必 422 extra_forbidden（r86 探针 F1 实证）。
+        return api.updateSchedule(editing.schedule_id, {
+          ...payload,
+          ...(editing.updated_at ? { expected_updated_at: editing.updated_at } : {}),
+        })
       }
-      return api.createSchedule(payload)
+      return api.createSchedule({ ...payload, flow_id: flowId })
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['schedules'] })
       onClose()
     },
-    onError: (e: Error) => setSubmitError(e.message),
+    onError: (e: Error) => {
+      const detail = (e as Error & { detail?: { conflict?: string } }).detail
+      if (detail?.conflict === 'schedule_stale') {
+        // A2R55-02：具名提示并发冲突，让用户重读最新配置再改
+        setSubmitError(
+          '并发冲突：该触发器已被其他编辑更新，本次保存未生效。请关闭对话框后重新打开（自动加载最新配置）再保存'
+        )
+      } else {
+        setSubmitError(e.message)
+      }
+    },
   })
 
   const paramsValid = (() => {
@@ -560,11 +576,23 @@ function ScheduleDialog({
 // ============ 触发历史对话框 ============
 
 function HistoryDialog({ schedule, onClose }: { schedule: ScheduleInfo; onClose: () => void }) {
-  const { data, isLoading } = useQuery({
+  // A2R55-01：truncated/next_offset 必须可消费——第 21 条起的触发史不再不可达
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ['schedule-history', schedule.schedule_id],
-    queryFn: () => api.getScheduleHistory(schedule.schedule_id, 20),
+    queryFn: ({ pageParam }) => api.getScheduleHistory(schedule.schedule_id, 20, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (last) =>
+      last.truncated && last.next_offset != null ? last.next_offset : undefined,
   })
-  const records: ScheduleFireRecord[] = data?.records || []
+  const pages = data?.pages ?? []
+  const records: ScheduleFireRecord[] = pages.flatMap((p) => p.records)
+  const total = pages[0]?.total ?? 0
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade">
@@ -592,6 +620,12 @@ function HistoryDialog({ schedule, onClose }: { schedule: ScheduleInfo; onClose:
             <EmptyState icon={<Clock size={20} />} message="还没有触发记录" />
           ) : (
             <div className="space-y-1.5">
+              {pages.length > 1 && (
+                <p className="text-caption text-ink-muted">
+                  已显示 <span className="font-mono tabular-nums">{records.length}</span> /{' '}
+                  <span className="font-mono tabular-nums">{total}</span> 条
+                </p>
+              )}
               {records.map((r, i) => (
                 <div key={i} className="flex items-center gap-3 px-3 py-2 bg-inset border border-line rounded-md">
                   <span className="font-mono text-data-sm text-ink-secondary tabular-nums">
@@ -617,6 +651,17 @@ function HistoryDialog({ schedule, onClose }: { schedule: ScheduleInfo; onClose:
                   </span>
                 </div>
               ))}
+              {hasNextPage && (
+                <button
+                  onClick={() => fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                  className="mt-2 w-full py-2 rounded-md border border-line text-caption text-plaita-400 hover:bg-elevated/60 transition-colors disabled:text-ink-faint"
+                >
+                  {isFetchingNextPage
+                    ? '加载中…'
+                    : `加载更多（已显示 ${records.length} / 共 ${total} 条）`}
+                </button>
+              )}
             </div>
           )}
         </div>
