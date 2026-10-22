@@ -8,6 +8,11 @@ import {
 } from 'lucide-react'
 import { api } from '../../services/api'
 import { useFlowEditor } from '../../stores/flowEditor'
+import {
+  GO_ENGINE,
+  poolSupportedNodeTypes,
+  unsupportedNodeTypes,
+} from '../../services/nodePool'
 import { resolveNodeTypeConfig } from './nodeTypes'
 
 // 分类展示顺序（对齐后端 _CATEGORY_MAP 的分类命名）：常用类别置顶，
@@ -25,12 +30,37 @@ interface NodeDesc {
 }
 
 // 节点面板：拖拽创建节点。手风琴分组 + 整体可收起 + 节点 hover 说明。
-export default function NodePalette() {
+// plaita#300 需求4：go runtime 下面板按池内能力清单灰置不支持的节点
+// （Python 家族），清单缺失兜底全量 + 提示——不让作者选出 Go 跑不了的
+// 节点后到发布/启动才被 422。
+export default function NodePalette({ runtime = 'python' }: { runtime?: 'go' | 'python' }) {
   const { data, isLoading } = useQuery({
     queryKey: ['nodes'],
     queryFn: () => api.getNodes(),
   })
-  const nodes = data?.nodes || []
+  const nodes = useMemo(() => data?.nodes || [], [data])
+
+  // go 池能力清单（services 读面的 capability_manifest 投影）；python 池
+  // 不过滤——console 注册表（含自定义节点）就是 python 进程的权威面。
+  const servicesQuery = useQuery({
+    queryKey: ['services', 'flow_worker'],
+    queryFn: () => api.getServices('flow_worker'),
+    enabled: runtime === 'go',
+  })
+  const goSupported = useMemo(
+    () =>
+      runtime === 'go'
+        ? poolSupportedNodeTypes(
+            (servicesQuery.data?.services || []).map((s) => s.capability_manifest),
+            GO_ENGINE
+          )
+        : null,
+    [runtime, servicesQuery.data]
+  )
+  const unsupported = useMemo(
+    () => unsupportedNodeTypes(nodes, goSupported),
+    [nodes, goSupported]
+  )
 
   const [collapsed, setCollapsed] = useState(
     () => localStorage.getItem(COLLAPSE_KEY) === '1'
@@ -142,6 +172,16 @@ export default function NodePalette() {
         </button>
       </div>
       {isLoading && <p className="text-caption text-ink-muted">加载中…</p>}
+      {runtime === 'go' && goSupported === null && (
+        <p className="mb-3 rounded-md border border-line bg-elevated px-2 py-1.5 text-[11px] leading-[1.6] text-ink-muted">
+          go 池无能力清单（无 go worker 或旧 build）：展示全量节点，发布/启动由能力门判定
+        </p>
+      )}
+      {runtime === 'go' && goSupported !== null && unsupported.size > 0 && (
+        <p className="mb-3 rounded-md border border-line bg-elevated px-2 py-1.5 text-[11px] leading-[1.6] text-ink-muted">
+          go 池：{unsupported.size} 个节点不支持（灰置，仅 Python 可执行）
+        </p>
+      )}
       {groups.map(([cat, list]) => {
         const open = !folded.has(cat)
         return (
@@ -158,14 +198,27 @@ export default function NodePalette() {
               <div className="space-y-1">
                 {list.map((n) => {
                   const cfg = resolveNodeTypeConfig(n.node_type)
+                  // plaita#300：go 池清单判明不支持 → 灰置禁用（保留可见性，
+                  // 不隐藏——节点在控制台确实存在，只是目标池跑不了）
+                  const blocked = unsupported.has(n.node_type)
                   return (
                     <div
                       key={n.node_type}
-                      draggable
+                      draggable={!blocked}
                       onDragStart={(e) => onDragStart(e, n.node_type, n.node_name || n.node_type)}
-                      onClick={() => onAddClick(n.node_type, n.node_name || n.node_type)}
-                      className="group relative flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface hover:bg-elevated cursor-grab border border-line overflow-hidden transition-colors duration-150 active:cursor-grabbing"
-                      title={`${n.node_type}（拖拽到画布，或点击添加到视口中心）`}
+                      onClick={() => {
+                        if (!blocked) onAddClick(n.node_type, n.node_name || n.node_type)
+                      }}
+                      className={`group relative flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface border border-line overflow-hidden transition-colors duration-150 ${
+                        blocked
+                          ? 'opacity-40 cursor-not-allowed'
+                          : 'hover:bg-elevated cursor-grab active:cursor-grabbing'
+                      }`}
+                      title={
+                        blocked
+                          ? `${n.node_type}——go runtime 不支持（仅 Python 池可执行）`
+                          : `${n.node_type}（拖拽到画布，或点击添加到视口中心）`
+                      }
                     >
                       {/* 族别左色条（与画布节点同款配色） */}
                       <FamilyBar color={cfg.color} />
@@ -173,9 +226,14 @@ export default function NodePalette() {
                       <span className="truncate text-caption text-ink-secondary">
                         {n.node_name || n.node_type}
                       </span>
+                      {blocked && (
+                        <span className="ml-auto shrink-0 rounded bg-dark-700 px-1 py-px text-[9px] text-ink-faint">
+                          仅Py
+                        </span>
+                      )}
                       {/* hover 说明触发区（阻断冒泡，? 不触发点击添加） */}
                       <span
-                        className="ml-auto shrink-0 w-4 h-4 flex items-center justify-center rounded-full border border-line text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 hover:text-ink-primary hover:border-ink-muted cursor-help transition-opacity"
+                        className={`${blocked ? '' : 'ml-auto'} shrink-0 w-4 h-4 flex items-center justify-center rounded-full border border-line text-[9px] text-ink-faint opacity-0 group-hover:opacity-100 hover:text-ink-primary hover:border-ink-muted cursor-help transition-opacity`}
                         onMouseEnter={(e) => openInfo(n, e.currentTarget)}
                         onMouseLeave={closeInfo}
                         onClick={(e) => e.stopPropagation()}

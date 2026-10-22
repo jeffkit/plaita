@@ -13,6 +13,10 @@ import {
   startRetryDelayMs,
   startRetryWindowError,
 } from './transport'
+// plaita#300：清单结构单源在 nodePool（纯判定模块，check 负控同源消费）
+import type { CapabilityManifest } from './nodePool'
+
+export type { CapabilityManifest }
 
 export {
   API_TIMEOUTS,
@@ -271,6 +275,9 @@ export interface ServiceInfo {
   metadata: Record<string, unknown>
   active_tasks: number
   last_heartbeat?: string
+  /** plaita#300：worker 能力清单（metadata.capability_manifest 投影；
+   * 无清单条目（旧 build）为 null——节点面板据此兜底全量 + 提示 */
+  capability_manifest?: CapabilityManifest | null
 }
 
 export interface ServiceListResponse {
@@ -824,6 +831,9 @@ export const api = {
       definition: string
       layout: string
       created_by?: string
+      /** plaita#300：目标 runtime pool；缺省 = 不改（新建为 python）。
+       * 编辑器显式传当前选择——go 版本另存新草稿不再静默降级 python */
+      runtime?: 'go' | 'python'
       /** C5-1 乐观锁基准：所基于版本的 updated_at；不一致服务端返回 409 */
       base_updated_at?: string | null
       /** 强制覆盖（绕过乐观锁检查） */
@@ -1155,6 +1165,8 @@ export interface FlowListResponse {
 export interface FlowVersionSummary {
   version: string
   status: string
+  /** plaita#300：目标 runtime pool（go/python）——节点面板按池过滤 */
+  runtime: 'go' | 'python'
   created_at?: string | null
   published_at?: string | null
 }
@@ -1172,6 +1184,8 @@ export interface VersionView {
   status: string
   definition: string
   layout: string
+  /** plaita#300：目标 runtime pool（go/python）——面板过滤/能力门/池路由的共同依据 */
+  runtime: 'go' | 'python'
   created_at?: string | null
   published_at?: string | null
   created_by: string

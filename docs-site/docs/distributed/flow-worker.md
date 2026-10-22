@@ -52,6 +52,19 @@ queue/redis/group/dlq/预算/安全开关，并计算三个**互不替代**的�
 （旧 build worker）时门 fail-open 放行并打 WARNING——发布/启动行为与上线前
 一致，混池能力升级完成后建议尽快让全部 worker 升到带清单的 build。
 
+**调度触发面同池路由（#300）**：runtime→队列解析的单源真值在
+`plaita/server/runtime_queues.py`（console 的 `services/runtime_pools.py` 是
+再导出，不存在第二份映射）。cron 调度循环是独立 plaita server 进程、读不到
+console 的 flow_versions 表，跨进程选池靠**调度行冗余 runtime**：console 在
+调度 create / update（version 变化）/ enable 时按 start 同源的版本行解析把
+`runtime` 盖进行；`fire_schedule` 的队列解析优先级为显式参 > 行 `runtime` >
+历史派发链（旧行无 runtime 键零行为变化；行 runtime 非法打具名 WARNING 后
+回落，降级可观测）。manual「立即触发」与手动 POST /executions 同语义：先过
+能力门（不支持即 422 结构化拒绝、零入队零占位行），再按版本行 runtime 选池。
+图编辑器侧：节点面板按当前版本 runtime 消费 services 读面清单——go 池内清单
+**交集**之外的节点灰置禁用（不隐藏），池内无清单兜底全量 + 面板提示；
+python 池全量（console 注册表即 python 权威面）。
+
 **消费规则**：
 
 1. 首投与 reclaim 同判：两端都非 `legacy` 且 `config_family` 不同 → 不执行；

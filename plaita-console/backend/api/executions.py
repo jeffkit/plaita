@@ -402,6 +402,50 @@ def _resolve_start_version(flow_id: str, version: Optional[str],
         return None
 
 
+def _admission_version_row(redis: Optional[Redis], flow_id: Any,
+                           version: Any, tenant: Optional[str]):
+    """start 与调度触发**共用**的受理前闸（plaita#300）。
+
+    版本行解析（显式 version；``None`` 走 latest published）+ 能力门：目标
+    池清单判明节点不支持时直接抛 422 结构化拒绝——start 在幂等认领/配额/
+    queued 占位行/入队之前、调度触发在 fire_schedule 之前，绝产生不了
+    「queued 行 + 永不执行」。返回版本行；``None`` = latest 语义解析不到
+    published、或存储不可达的 fail-open（存量行为，门与路由都跳过）；
+    显式 version 不存在/未发布则 ``StartVersionNotStartable``（#304）原样
+    穿透——调用方按表面分流：start 转 404 具名拒绝（交互调用方可即时
+    纠正），调度触发（schedules.trigger_now）捕获降级 fail-open 落默认
+    队列 + WARNING（与 cron 同语义，A2R24 触发契约不破）。两闸次序：
+    版本行可启动性判定先于能力门——行不可启动时无 definition 可判
+    节点集。池内无清单的兜底放行由 ``gate_flow_nodes`` 负责
+    （fail-open + 具名 WARNING，降级可观测）。
+    """
+    version_row = _resolve_start_version(str(flow_id),
+                                         str(version) if version else None,
+                                         tenant)
+    if version_row is not None and redis is not None:
+        try:
+            gate_flow_nodes(
+                redis, getattr(version_row, "runtime", None) or "python",
+                version_row.definition,
+                flow_id=str(flow_id), version=version_row.version,
+            )
+        except UnsupportedNodeTypesError as e:
+            detail = dict(e.detail)
+            raise HTTPException(
+                status_code=422,
+                detail=error_detail(
+                    "unsupported_node_types",
+                    (
+                        f"流程 {flow_id}@{version_row.version} 含目标 "
+                        f"runtime {detail.get('runtime')} 不支持的节点类型: "
+                        f"{', '.join(detail.get('unsupported') or [])}"
+                    ),
+                    **detail,
+                ),
+            ) from e
+    return version_row
+
+
 def _runtime_queue_for_flow(flow_id: Any, version: Any,
                             tenant: Optional[str]) -> Optional[str]:
     """执行行携带的 flow_id+version → 该 flow 的池队列（#300 池路由）。
@@ -2172,13 +2216,19 @@ async def start_execution(
     # plaita#300：publish/start 能力门 + 池路由。在幂等认领/配额占用/queued
     # 占位行/入队**之前**——不支持的节点集在此结构化拒绝（422），绝不产生
     # 「queued 行 + 永不执行」。version=None 时按 worker 的 latest 语义
-    # （引擎存储取最高 semver published）解析出版本行再判。
+    # （引擎存储取最高 semver published）解析出版本行再判。闸与调度触发面
+    # 共用（_admission_version_row，schedules.py 同源）。
     # plaita#304：显式 version 不存在/未发布是可判定路径，结构化拒绝
     # （404）——照单入队只会造出 worker 侧必败的幽灵 queued 行并占住
     # 配额名额。存储不可用仍 fail-open（返回 None 走存量入队）。
+    # 合并次序语义（#300×#304×#303 理清）：#304 版本行可启动性判定（404）
+    # 在 #300 能力门（422）**之前**——行不存在/未发布时无 definition 可判
+    # 节点集；两闸都在幂等认领/占位行/池路由/入队之前（池路由判定先于
+    # 入队）。与删投同步（#303）正交：准入闸只决定「本次 start/触发受理
+    # 与否」，#303 只管已删版本的 outbox 行生命周期（pending 打回/墓碑）。
     try:
-        version_row = _resolve_start_version(
-            request.flow_id, request.version, tenant
+        version_row = _admission_version_row(
+            redis, request.flow_id, request.version, tenant
         )
     except StartVersionNotStartable as e:
         raise HTTPException(
@@ -2193,27 +2243,6 @@ async def start_execution(
                 exists=e.exists,
             ),
         ) from e
-    if version_row is not None and redis is not None:
-        try:
-            gate_flow_nodes(
-                redis, getattr(version_row, "runtime", None) or "python",
-                version_row.definition,
-                flow_id=request.flow_id, version=version_row.version,
-            )
-        except UnsupportedNodeTypesError as e:
-            detail = dict(e.detail)
-            raise HTTPException(
-                status_code=422,
-                detail=error_detail(
-                    "unsupported_node_types",
-                    (
-                        f"流程 {request.flow_id}@{version_row.version} 含目标 "
-                        f"runtime {detail.get('runtime')} 不支持的节点类型: "
-                        f"{', '.join(detail.get('unsupported') or [])}"
-                    ),
-                    **detail,
-                ),
-            ) from e
     start_queue: Optional[str] = None
     if version_row is not None:
         try:

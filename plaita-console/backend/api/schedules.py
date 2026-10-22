@@ -22,6 +22,7 @@
 - GET    /api/schedules/{schedule_id}/history 最近触发记录
 """
 import json
+import logging
 from datetime import datetime
 from typing import List, Literal, Optional
 
@@ -66,7 +67,28 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
 # get_redis / 队列名与 executions 同源：队列名用 _task_queue_name() 在**使用点**
 # 解析（env PLAITA_CONSOLE_TASK_QUEUE > 默认值），不得导入模块级静态别名——
 # 静态值在导入时求值，env 切换/新旧并行验证时触发消息会落错队列（A56-02）
-from .executions import get_redis_or_none, _task_queue_name
+# plaita#300：调度触发面与手动 start 同源——受理闸（能力门）与版本行解析
+# 共用 executions 的单一实现；池队列按版本行 runtime 解析。
+from .executions import (
+    _admission_version_row,
+    _resolve_start_version,
+    _task_queue_name,
+    get_redis_or_none,
+    StartVersionNotStartable,
+)
+
+try:
+    from ..services.runtime_pools import (
+        DEFAULT_RUNTIME,
+        normalize_runtime,
+        resolve_runtime_queue,
+    )
+except ImportError:  # 平铺布局（cwd=backend）运行时
+    from services.runtime_pools import (  # type: ignore
+        DEFAULT_RUNTIME,
+        normalize_runtime,
+        resolve_runtime_queue,
+    )
 
 try:
     from ..auth import tenant_scope
@@ -79,6 +101,7 @@ except ImportError:
     from error_contract import error_detail  # type: ignore
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 #: A2R24-05：触发历史 offset 上限（与 executions page≤10000 同量级）。
 #: 历史记录本身由 schedule_service 的 ``LTRIM`` 限制在最近 N 条，这里只防
@@ -242,6 +265,8 @@ def _view(schedule: dict) -> dict:
     """API 视图：统一给前端的结构（补计算字段）。"""
     out = dict(schedule)
     out["status"] = "running" if schedule.get("enabled") else "paused"
+    # plaita#300：调度行的目标池（旧行无该键 = 历史默认池 python，读面如实）
+    out["runtime"] = schedule.get("runtime") or DEFAULT_RUNTIME
     return out
 
 
@@ -270,6 +295,8 @@ def _schedule_detail(schedule: dict) -> dict:
         "version": schedule.get("version"),
         "cron": schedule.get("cron"),
         "enabled": bool(schedule.get("enabled")),
+        # plaita#300：目标池随审计留痕（旧行/本地档为默认 python）
+        "runtime": schedule.get("runtime") or DEFAULT_RUNTIME,
     }
 
 
@@ -299,6 +326,45 @@ def _schedule_from_req(req: ScheduleCreateRequest, tenant_id: str) -> dict:
         # 服务自愈兜底，但创建时就给明确值，避免首扫竞态
         "next_run_at": str(next_run_after(req.cron)) if req.enabled else "",
     }
+
+
+def _resolve_flow_runtime(flow_id: str, version: Optional[str],
+                          tenant_id: Optional[str]) -> str:
+    """调度行冗余 runtime 的盖章值（plaita#300 触发面池路由）。
+
+    cron 派发在独立 plaita server 进程里发生，读不到 console 的
+    flow_versions.runtime——触发面要与手动 POST /executions 同池就必须把
+    runtime 冗余进调度行。解析与 start 同源（``_resolve_start_version``：
+    显式 version → 该版本行；``None`` → latest published）。解析不到时落
+    默认 ``python``（与历史派发链的池语义一致）：version=None 且尚无已发布
+    版本是合法态（静默，等于旧行为）；**钉了 version 却解析不到**不可能是
+    正常路径（create/update 已验版本存在），打 WARNING 留痕——降级可观测。
+    """
+    try:
+        row = _resolve_start_version(str(flow_id),
+                                     str(version) if version else None,
+                                     tenant_id)
+    except Exception as exc:  # noqa: BLE001 — 版本库读失败按默认池并留痕
+        logger.warning(
+            "调度行 runtime 解析失败 flow=%s@%s（落默认 %s）: %s",
+            flow_id, version, DEFAULT_RUNTIME, exc,
+        )
+        return DEFAULT_RUNTIME
+    if row is None:
+        if version:
+            logger.warning(
+                "调度行 runtime 解析不到版本行 flow=%s@%s（落默认 %s）",
+                flow_id, version, DEFAULT_RUNTIME,
+            )
+        return DEFAULT_RUNTIME
+    try:
+        return normalize_runtime(getattr(row, "runtime", None))
+    except ValueError:
+        logger.warning(
+            "调度行 runtime 非法 flow=%s@%s runtime=%r（落默认 %s）",
+            flow_id, version, getattr(row, "runtime", None), DEFAULT_RUNTIME,
+        )
+        return DEFAULT_RUNTIME
 
 
 # ============ 端点 ============
@@ -331,6 +397,11 @@ def create(req: ScheduleCreateRequest, request: Request, redis: Redis = Depends(
         raise HTTPException(status_code=422, detail=f"非法 cron 表达式: {req.cron}")
     _validate_flow(req.flow_id, req.version, tenant_id=tenant)
     schedule = _schedule_from_req(req, tenant)
+    # plaita#300 触发面池路由：runtime 冗余进调度行——cron 派发进程读不到
+    # console store，跨进程选池只能靠行上盖章（start 同源的版本行解析）。
+    schedule["runtime"] = _resolve_flow_runtime(
+        req.flow_id, req.version or None, tenant
+    )
 
     if (local := _get_local(request)) is not None:
         schedule = local.create_schedule(flow_store.get_flow_store(), schedule)
@@ -393,6 +464,14 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
     if req.cron is not None and not validate_cron(req.cron):
         raise HTTPException(status_code=422, detail=f"非法 cron 表达式: {req.cron}")
 
+    # plaita#300 触发面池路由：version 变化即重盖章 runtime。解析涉及
+    # 版本库读，提前到 CAS mutate 之外算好（mutate 只做纯字段赋值）。
+    new_runtime = (
+        _resolve_flow_runtime(schedule["flow_id"], req.version or None, tenant)
+        if req.version is not None
+        else None
+    )
+
     # #198：乐观锁基准 = 本次读取的 updated_at。请求显式带 expected_updated_at
     # 时先做一次 409 早判；真正的写回由下面 CAS/WATCH 再做一次（防读后写前
     # 被并发编辑抢先）。
@@ -406,6 +485,8 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
             current["name"] = req.name.strip()
         if req.version is not None:
             current["version"] = req.version or None
+            # plaita#300：随版本重盖章目标池（上面已按新 version 现算）
+            current["runtime"] = new_runtime
         if req.cron is not None:
             current["cron"] = req.cron
         if req.params is not None:
@@ -486,6 +567,10 @@ def enable(schedule_id: str, request: Request,
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         schedule["enabled"] = True
         schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
+        # plaita#300：启用即重盖章 runtime（本地档执行在进程内，字段惰性）
+        schedule["runtime"] = _resolve_flow_runtime(
+            schedule["flow_id"], schedule.get("version"), tenant
+        )
         result = local.update_schedule(store, schedule_id, schedule, tenant_id=tenant)
         _audit(request, "schedule.enable", schedule_id,
                _schedule_detail(result), tenant_id=tenant or "")
@@ -494,6 +579,11 @@ def enable(schedule_id: str, request: Request,
     schedule["enabled"] = True
     schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
     schedule["updated_at"] = _now_iso()
+    # plaita#300：启用即重盖章 runtime——version=None 的调度按 latest
+    # published 现算，新发布版本换池后重启用即校正 cron 路由。
+    schedule["runtime"] = _resolve_flow_runtime(
+        schedule["flow_id"], schedule.get("version"), tenant
+    )
     _save_schedule(redis, schedule)
     _audit(request, "schedule.enable", schedule_id,
            _schedule_detail(schedule), tenant_id=tenant or "")
@@ -557,8 +647,37 @@ def trigger_now(schedule_id: str, request: Request,
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     if not _tenant_is_active(request, schedule.get("tenant_id")):
         raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
+    # plaita#300 触发面：与手动 POST /executions 同一受理语义——先过能力门
+    # （不支持即 422 结构化拒绝，零入队零占位行），再按版本行 runtime 选池
+    # 队列（此前恒落默认 python 队列，go-runtime flow 的调度会串池）。
+    # #304×#300 合并口径：start 面对显式不可启动版本（不存在/draft）具名 404
+    # ——交互调用方可即时纠正；触发面与 cron（schedule_service）同语义
+    # fail-open——版本行缺失/未发布时按存量落默认队列，worker 以
+    # flow_definition_missing 具名终态收场（降级留 WARNING 痕，不静默）。
+    try:
+        version_row = _admission_version_row(
+            redis, schedule["flow_id"], schedule.get("version"), tenant
+        )
+    except StartVersionNotStartable as e:
+        logger.warning(
+            "调度触发受理降级（版本行不可启动，fail-open 落默认队列）: "
+            "schedule=%s flow=%s@%s: %s",
+            schedule_id, schedule.get("flow_id"), schedule.get("version"), e,
+        )
+        version_row = None
+    trigger_queue: Optional[str] = None
+    if version_row is not None:
+        try:
+            trigger_queue = resolve_runtime_queue(
+                getattr(version_row, "runtime", None)
+            )
+        except ValueError:
+            trigger_queue = None
     # 与手动「启动流程」同源：写任务队列 Stream（队列名在调用点解析 env）
-    msg_id = fire_schedule(redis, schedule, _task_queue_name(), trigger_kind="manual")
+    msg_id = fire_schedule(
+        redis, schedule, trigger_queue or _task_queue_name(),
+        trigger_kind="manual",
+    )
     if msg_id is None:
         raise HTTPException(status_code=502, detail="入队失败，请检查 Redis 与任务队列配置")
     detail = _schedule_detail(schedule)
