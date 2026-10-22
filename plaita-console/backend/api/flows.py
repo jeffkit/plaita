@@ -1203,6 +1203,7 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
         )
 
     flow_id, version = result["flow_id"], result["version"]
+    schedules_restamped = 0
     if req.publish:
         # A2R25-03：发布前再校验一次存储定义——导入链路不因 publish=true
         # 绕过正常保存/发布已有的 Flow schema 闸。
@@ -1235,6 +1236,13 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
                 ),
             )
         sync_flow_to_engine(redis, flow_id, out.version, out.definition, tenant_id=tenant)
+        # A2R57-01：import publish=true 与普通 publish 同为 runtime 变更入口
+        #（晋升包 runtime 随包落版本行）——发布后同调重章，否则 version=None
+        # 调度行留旧章，cron 按旧章错池、与 manual 按版本行现值分裂（A2R50-03
+        # 原害从 import 门原样重开，且无 WARNING/审计痕迹）。
+        schedules_restamped = _restamp_schedules_for_publish(
+            redis, tenant, flow_id, out.version, getattr(out, "runtime", None)
+        )
         try:
             from ..config import get_settings
         except ImportError:
@@ -1260,6 +1268,8 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
                 "previous_status": result.get("previous_status"),
                 "previous_definition_hash": result.get("previous_definition_hash"),
                 "definition_hash": result.get("definition_hash"),
+                # A2R57-01：与普通 publish 审计同字段，import 直发的重章留痕
+                "schedules_restamped": schedules_restamped,
             },
             tenant_id=tenant,
         )

@@ -1,0 +1,41 @@
+........                                                                 [100%]
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 68 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 12 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:703: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 34 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:865: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_02f_local_force_delete_pauses
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/local_scheduler.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03a_import_publish_leaves_stale_stamp
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03b_normal_publish_restamps_control
+  /Users/kong/.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py:156: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    rd.setex("plaita:registry:flow_worker:go-1", 30,
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03a_import_publish_leaves_stale_stamp
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:189: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "exported_at": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+8 passed, 141 warnings in 3.01s

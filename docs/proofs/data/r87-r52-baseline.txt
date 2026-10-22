@@ -1,0 +1,166 @@
+.FFF...                                                                  [100%]
+=================================== FAILURES ===================================
+_________________ test_r52_01a_update_pins_nonexistent_version _________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=f3261b267db446beb304b669d477164b,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_r52_01a_update_pins_nonexistent_version(redis):
+        client = _client(redis)
+        _seed_flow(client)
+        r = _mk_sched(client, version=VER_PUB)
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+        # PUT 钉一个不存在的版本——期望与 create 同口 422；实际 200 即红
+        r2 = client.put(f"/api/schedules/{sid}", json={"version": "9.9.9"},
+                        headers=_headers())
+        print(f"[R52-01a] PUT version=9.9.9 → {r2.status_code} (应 422 与 create 同口)")
+        assert r2.status_code == 422, (
+            f"update 不验版本存在：钉不存在版本返回 {r2.status_code}——"
+            "create 422 / update 200 双标，cron 将按钉死版本触发直至 worker 终态失败"
+        )
+        got = client.get(f"/api/schedules/{sid}", headers=_headers()).json()
+        print(f"[R52-01a] 调度行落库 version={got.get('version')} "
+              f"runtime={got.get('runtime')}（钉死不存在版本已生效）")
+>       assert got.get("version") == "9.9.9", "不存在版本已写入调度行"
+E       AssertionError: 不存在版本已写入调度行
+E       assert '1.0.0' == '9.9.9'
+E         
+E         - 9.9.9
+E         + 1.0.0
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py:156: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01a] PUT version=9.9.9 → 422 (应 422 与 create 同口)
+[R52-01a] 调度行落库 version=1.0.0 runtime=python（钉死不存在版本已生效）
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+______________ test_r52_01b_delete_draft_orphans_pinned_schedule _______________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=89f2fe7fdbdb4450bf0db0cde59c0bc3,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_r52_01b_delete_draft_orphans_pinned_schedule(redis):
+        client = _client(redis)
+        _seed_flow(client, with_draft=True)
+        r = _mk_sched(client, version=VER_DRAFT, name="pinned")
+        print(f"\n[R52-01b] create 钉 draft {VER_DRAFT} → {r.status_code}（list_versions "
+              f"不过滤 status，draft 可钉）")
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+    
+        # draft 删除无需 force；守卫只扫非终态执行，无 schedule 触点
+        r2 = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER_DRAFT}",
+                           headers=_headers())
+        print(f"[R52-01b] DELETE draft（被调度钉住）→ {r2.status_code} "
+              f"(正确行为应 409 version_pinned_by_schedule)")
+        assert r2.status_code == 409, (
+            f"删除守卫对 schedule 引用零感知：被钉版本删除返回 {r2.status_code}——"
+            "调度孤儿化无任何 CRUD 级信号"
+        )
+    
+        got = client.get(f"/api/schedules/{sid}", headers=_headers()).json()
+        print(f"[R52-01b] 删除后调度行：enabled={got.get('enabled')} "
+              f"version={got.get('version')}（孤儿调度原样保留）")
+>       assert got.get("enabled") is False, "孤儿调度应至少被暂停/标注"
+E       AssertionError: 孤儿调度应至少被暂停/标注
+E       assert True is False
+E        +  where True = <built-in method get of dict object at 0x1124d8c00>('enabled')
+E        +    where <built-in method get of dict object at 0x1124d8c00> = {'schedule_id': 'sched-20261023041651873-96bef8', 'tenant_id': 'default', 'name': 'pinned', 'flow_id': 'sched-flow', ...}.get
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py:183: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+[R52-01b] create 钉 draft 2.0.0 → 200（list_versions 不过滤 status，draft 可钉）
+[R52-01b] DELETE draft（被调度钉住）→ 409 (正确行为应 409 version_pinned_by_schedule)
+[R52-01b] 删除后调度行：enabled=True version=2.0.0（孤儿调度原样保留）
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  api.schedules:schedules.py:363 调度行 runtime 解析失败 flow=sched-flow@2.0.0（落默认 python）: 流程 sched-flow@2.0.0 未发布（draft 不能直接 start，请先 publish）
+_________________ test_r52_01c_same_ms_create_silent_overwrite _________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=4ade96676a2a44319016eb4b775a4543,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x11247df20>
+
+    def test_r52_01c_same_ms_create_silent_overwrite(redis, monkeypatch):
+        client = _client(redis)
+        _seed_flow(client)
+        monkeypatch.setattr(schedules_api, "datetime", _FrozenDatetime)
+        r1 = _mk_sched(client, version=VER_PUB, name="first")
+        r2 = _mk_sched(client, version=VER_PUB, name="second")
+        print(f"\n[R52-01c] 同毫秒两连 create → id1={r1.json().get('schedule_id')} "
+              f"id2={r2.json().get('schedule_id')} "
+              f"rc={r1.status_code}/{r2.status_code}")
+        assert r1.status_code == 200 and r2.status_code == 200
+>       assert (r1.json()["schedule_id"] == r2.json()["schedule_id"]), (
+            "同毫秒 id 不同（无碰撞）——需复核前提"
+        )
+E       AssertionError: 同毫秒 id 不同（无碰撞）——需复核前提
+E       assert 'sched-202610...000123-f61505' == 'sched-202610...000123-87922e'
+E         
+E         - sched-20261022120000123-87922e
+E         ?                         ^^^^^^
+E         + sched-20261022120000123-f61505
+E         ?                         ^^^^^^
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py:216: AssertionError
+----------------------------- Captured stdout call -----------------------------
+
+[R52-01c] 同毫秒两连 create → id1=sched-20261022120000123-f61505 id2=sched-20261022120000123-87922e rc=200/200
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py: 54 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_control_create_rejects_nonexistent_version
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01a_update_pins_nonexistent_version
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01c_same_ms_create_silent_overwrite
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_local_manual_trigger_paused_is_502
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:703: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py: 22 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_control_create_rejects_nonexistent_version
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01a_update_pins_nonexistent_version
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01c_same_ms_create_silent_overwrite
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_local_manual_trigger_paused_is_502
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:865: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_control_create_rejects_nonexistent_version
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01a_update_pins_nonexistent_version
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01c_same_ms_create_silent_overwrite
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_local_manual_trigger_paused_is_502
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01d_local_manual_trigger_paused_is_502
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/local_scheduler.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01a_update_pins_nonexistent_version
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r52_axis1_wt.py::test_r52_01c_same_ms_create_silent_overwrite
+3 failed, 4 passed, 100 warnings in 1.50s
