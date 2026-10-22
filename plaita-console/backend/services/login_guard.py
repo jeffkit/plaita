@@ -139,7 +139,8 @@ class LoginThrottle:
         self._ip_entries: Dict[str, _Entry] = {}
         self._account_ips: Dict[str, Dict[str, float]] = {}
         self._account_locks: Dict[str, _Entry] = {}
-        self._saturated_until = 0.0
+        # 饱和只作用于触发它的新键：key -> until（不全局施加，见 #296）
+        self._saturated_keys: Dict[Tuple[str, str], float] = {}
         self._saturation_warned = False
         self._lock = threading.Lock()
 
@@ -160,13 +161,15 @@ class LoginThrottle:
         with self._lock:
             user = _username(username)
             self._account_recent(user, now)
+            key = _key(client_ip, username)
             waits = [
-                self._entries.get(_key(client_ip, username)),
+                self._entries.get(key),
                 self._ip_entries.get(bucket_ip(client_ip)),
                 self._account_locks.get(user),
             ]
-            if self._saturated_until > now:
-                waits.append(_Entry(locked_until=self._saturated_until))
+            saturated_until = self._saturated_keys.get(key, 0.0)
+            if saturated_until > now:
+                waits.append(_Entry(locked_until=saturated_until))
             return max(
                 (max(0, math.ceil(e.locked_until - now)) for e in waits if e),
                 default=0,
@@ -188,16 +191,21 @@ class LoginThrottle:
                         now, self.max_failures, self.lockout_seconds,
                     )
                 )
-            elif self._saturated_until <= now:
-                self._saturated_until = now + SATURATION_SECONDS
-                waits.append(int(SATURATION_SECONDS))
-                if not self._saturation_warned:
-                    self._saturation_warned = True
-                    logger.warning(
-                        "login_guard MAX_TRACKED=%s 已满且无过期条目：新键拒绝跟踪 "
-                        "%.0fs（具名饱和，不静默放行）",
-                        self.max_tracked, SATURATION_SECONDS,
-                    )
+            else:
+                # #296：饱和只绑定「触发它的新键」，既有键 retry_after 不受影响。
+                saturated_until = self._saturated_keys.get(key, 0.0)
+                if saturated_until > now:
+                    waits.append(max(1, math.ceil(saturated_until - now)))
+                else:
+                    self._saturated_keys[key] = now + SATURATION_SECONDS
+                    waits.append(int(SATURATION_SECONDS))
+                    if not self._saturation_warned:
+                        self._saturation_warned = True
+                        logger.warning(
+                            "login_guard MAX_TRACKED=%s 已满且无过期条目：新键 %s "
+                            "拒绝跟踪 %.0fs（具名饱和，不静默放行；既有键不受影响）",
+                            self.max_tracked, key, SATURATION_SECONDS,
+                        )
             if bucket in self._ip_entries or len(self._ip_entries) < self.max_tracked:
                 waits.append(
                     self._hit(
@@ -243,6 +251,7 @@ class LoginThrottle:
         user = _username(username)
         with self._lock:
             self._entries.pop((ip, user), None)
+            self._saturated_keys.pop((ip, user), None)
             self._ip_entries.pop(bucket_ip(client_ip), None)
             self._account_ips.pop(user, None)
             self._account_locks.pop(user, None)
@@ -253,7 +262,7 @@ class LoginThrottle:
             self._ip_entries.clear()
             self._account_ips.clear()
             self._account_locks.clear()
-            self._saturated_until = 0.0
+            self._saturated_keys.clear()
 
     def _prune(self, now: float) -> None:
         """清过期条目；活动锁永不驱逐（#293/L10）。
@@ -282,6 +291,10 @@ class LoginThrottle:
             ]
             for key in stale:
                 del store[key]
+        for key in [
+            k for k, until in self._saturated_keys.items() if until <= now
+        ]:
+            self._saturated_keys.pop(key, None)
         for user in list(self._account_ips):
             self._account_recent(user, now)
 

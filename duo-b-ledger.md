@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十八轮，2026-10-22）：**#296 MAX_TRACKED 饱和收窄（基线 `cc7abfe`）**——规格是「仅新键 60s」，实现却把全局 `_saturated_until` 放进所有键的 `retry_after`，任一新键触发后既有未锁键（含 admin）也 429，且每 60s 新键可续期全局阻断。修法：改为按新键记录 `_saturated_keys{(canonical_ip,user): until}`；只有该键 `retry_after` 返回剩余秒数，既有键/活动锁不受影响；prune/reset 清理过期饱和。ops-runbook 明确「仅新键；既有键 retry_after 恒 0；不全局施加」。测试 `test_296_*` **3P**（direct/HTTP/重复新键），既有 B112-02 保持；负控 pre/post：既有 admin retry 60→0、HTTP admin 正确 429→200/Retry-After 60→null、新键仍 60；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1201P/13S**；`landing_gate.py ci` rc=0（`cc7abfe` CI + Console E2E）。#296 关单回执另附。
+
 > 一行摘要（第六十七轮，2026-10-22）：**login_guard 设计级收口 #293/#294/#295 + B112-01/02（基线 `b2906c2`）**——① IP canonical 化（IPv4-mapped→IPv4/压缩展开）+ IPv6 /64 聚合；account 桶 IP 集合按 300s 窗口滑动（进程 dict / Redis ZSET），同 /64 多地址只算 1、旧 IP 锁过期后不续锁；② break-glass 不再是用户名列表即绕过：用户名白名单 + 来源 IP 白名单 + 一次性 HMAC token（`bg1.<exp>.<nonce>.<hmac>`，短 TTL，Redis SET NX 跨副本），失败照常计数，每次尝试独立 `auth.login_break_glass` 审计（break_glass=true）；③ Redis throttle 全部用 `redis.call('TIME')`/`redis.time()`，禁止进程 monotonic 入共享键；④ `0.0.0.0/0`/`::/0` 全 trust 配置具名拒绝、IPv4-mapped 参与 CIDR 匹配；⑤ MAX_TRACKED 满表新键 60s 具名饱和（不静默放行、不驱逐活动锁）。桶/窗口语义表入 ops-runbook（文档即规格）。测试 console `test_issue293_294_295_login_guard_v2.py` **14P** + A112 **12P** + #208 **8P**；负控 pre/post（A1 r113 探针 + post 探针）；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1198P/13S**；`landing_gate.py ci` rc=0（`b2906c2` CI + Console E2E 绿）。#293/#294/#295 关单回执另附。
 
 > 一行摘要（第六十六轮，2026-10-22）：**login_guard 硬化 A112-01/02 + B112-01/02（基线 `3c9d1a0`）**——① 三桶限速：per-key `(ip,user)` 5 次/300s、账号桶（失败来自 ≥3 个不同 IP）、IP 桶（单 IP fan-out ≥10，锁 5m 减少 NAT 影响），锁内正确/错误都 429、再次触发翻倍封顶 24h；② 反枚举：missing 跑固定 dummy PBKDF2、disabled 跑真实 hash（计时比 16×→1.0×）；③ 可信代理：`PLAITA_TRUSTED_PROXIES` allowlist，peer 可信时 XFF 从右向左取首个 untrusted，否则忽略 XFF；④ 多 worker：`RedisLoginThrottle`（Lua 原子共享 key/IP/account），无 Redis 本地档退回进程内并文档化；⑤ break-glass env 绕过限速（仍校验口令）；⑥ MAX_TRACKED 不再驱逐活动锁。测试 console `test_issue_a112_login_hardening.py` **12P** + #208 **8P**；NC-L1~L11 pre/post（端点探针 + timing/eviction 探针）；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1184P/13S**；`landing_gate.py ci` rc=0（`3c9d1a0` CI + Console E2E 绿）。
@@ -634,4 +636,28 @@
   subtests**；e2e+integration **287P/4S**；console **1198P/13S**；
   `landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit 关闭 #293/#294/#295；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十八轮 · #296（MAX_TRACKED 饱和仅新键，2026-10-22，B1 修复席）
+
+- 基线：`origin/main` `cc7abfe`；落地门 `cc7abfe` CI + Console E2E 绿。
+- **#296（P1）**：r65 的 `retry_after` 对任何键都追加全局
+  `_saturated_until`；任一新键触发饱和后既有未锁键（含 admin）也 60s 429，
+  且每 60s 新键可续期形成全局登录面阻断，与规格「仅新键」不符。
+  修法：饱和按新键记录 `_saturated_keys{(canonical_ip,user): until}`；只有
+  触发饱和的键 `retry_after` 返回剩余秒数，既有键/活动锁不受影响；prune/reset
+  清理过期饱和；ops-runbook 明确「仅新键；既有键 retry_after 恒 0；不全局
+  施加」。
+- 测试：`test_296_saturation_binds_only_the_new_key`、
+  `test_296_existing_key_not_blocked_over_http`、
+  `test_296_repeated_new_keys_cannot_block_existing_key` **3P**；既有
+  `test_b112_02_max_tracked_saturation_not_silent` 保持。
+- 负控：pre `/tmp/plaita-r114-tree` vs post（A1 probe）：既有 admin
+  retry 60→0；HTTP admin 正确 429→200、Retry-After 60→null；新键仍 60；
+  重复新键不阻断既有键。证据
+  `docs/proofs/data/r66-saturation-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
+  subtests**；e2e+integration **287P/4S**；console **1201P/13S**；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit 关闭 #296；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

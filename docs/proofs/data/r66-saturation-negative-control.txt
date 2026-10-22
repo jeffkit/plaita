@@ -1,0 +1,33 @@
+=== 负控 r66：#296 MAX_TRACKED 饱和仅新键 ===
+
+pre = /tmp/plaita-r114-tree（cc7abfe）；post = 主工作树。
+探针 /tmp/r114_saturation_breach.py（post 适配内部字段 _saturated_keys）。
+
+pre:
+  direct.admin_entry_exists       true
+  direct.admin_retry_after        60      ← 既有未锁键被全局饱和
+  direct.saturated_until          1060
+  r1 admin wrong                  401
+  r2 newbie wrong（新键触发）      401
+  r3 admin correct                429     ← 既有 admin 被 429
+  r3 Retry-After                  60
+post:
+  direct.admin_entry_exists       true
+  direct.admin_retry_after        0       ← 既有键不受影响
+  direct.saturated_until          1060（仅新键）
+  r1 admin wrong                  401
+  r2 newbie wrong（新键触发）      401
+  r3 admin correct                200     ← 既有 admin 正常
+  r3 Retry-After                  null
+
+单测（test_issue293_294_295_login_guard_v2.py 新增 3P）：
+- test_296_saturation_binds_only_the_new_key：
+  max_tracked=1，admin 既有键 retry 0；newbie 新键 60；newbie retry 60。
+- test_296_existing_key_not_blocked_over_http：
+  admin 错误（既有）→ newbie 新键触发饱和 → admin 正确 200 且无 Retry-After；
+  newbie 后续 429 + Retry-After=60。
+- test_296_repeated_new_keys_cannot_block_existing_key：
+  连续 5 个新键触发/续期饱和，admin 既有键 retry 恒 0（无法全局阻断登录面）。
+
+规格同步：ops-runbook MAX_TRACKED 条目明确「仅新键；既有键 retry_after 恒 0、
+活动锁不驱逐；不得施加到全局登录面」。

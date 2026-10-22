@@ -133,6 +133,55 @@ def test_293_redis_account_window_and_bucket_aggregation():
     assert throttle.retry_after("2001:db8:0:1::1", "admin") == 0
 
 
+# ---- #296 ---------------------------------------------------------------
+
+def test_296_saturation_binds_only_the_new_key():
+    throttle = login_guard.LoginThrottle(max_tracked=1)
+    now = 1000.0
+    throttle.record_failure("203.0.113.1", "admin", now=now)   # 既有键，未锁
+    assert throttle.record_failure(
+        "203.0.113.2", "newbie", now=now
+    ) == int(login_guard.SATURATION_SECONDS)
+    assert throttle.retry_after("203.0.113.1", "admin", now=now) == 0
+    assert throttle.retry_after("203.0.113.2", "newbie", now=now) == int(
+        login_guard.SATURATION_SECONDS
+    )
+
+
+def test_296_existing_key_not_blocked_over_http(tmp_path, monkeypatch):
+    app, _store = _app(tmp_path)
+    monkeypatch.setattr(
+        login_guard, "_throttle", login_guard.LoginThrottle(max_tracked=1)
+    )
+    admin = _client(app, "203.0.113.1")
+    assert admin.post("/api/auth/login", json=WRONG).status_code == 401
+    newbie = _client(app, "203.0.113.2")
+    assert newbie.post(
+        "/api/auth/login", json={"username": "newbie", "password": "nope"}
+    ).status_code == 401
+    # 新键触发饱和后，既有 admin 键不受影响
+    ok = admin.post("/api/auth/login", json=RIGHT)
+    assert ok.status_code == 200, ok.text
+    assert ok.headers.get("Retry-After") is None
+    # 新键自身 429
+    blocked = newbie.post(
+        "/api/auth/login", json={"username": "newbie", "password": "nope"}
+    )
+    assert blocked.status_code == 429
+    assert blocked.headers.get("Retry-After") == str(
+        int(login_guard.SATURATION_SECONDS)
+    )
+
+
+def test_296_repeated_new_keys_cannot_block_existing_key():
+    throttle = login_guard.LoginThrottle(max_tracked=1)
+    now = 1000.0
+    throttle.record_failure("203.0.113.1", "admin", now=now)
+    for i in range(5):
+        throttle.record_failure(f"203.0.113.{20+i}", f"new{i}", now=now)
+    assert throttle.retry_after("203.0.113.1", "admin", now=now) == 0
+
+
 # ---- #295 ---------------------------------------------------------------
 
 def test_295_redis_uses_server_time_not_process_clocks(monkeypatch):

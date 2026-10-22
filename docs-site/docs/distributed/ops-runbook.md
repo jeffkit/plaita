@@ -751,8 +751,9 @@ redis-cli KEYS 'plaita:execution:lease:*'
 - **时间源**：RedisLoginThrottle 的窗口/锁定全部用 `redis.call('TIME')` /
   `redis.time()` 的 UTC 时间，不写进程 monotonic；多副本/重启后锁语义一致。
   无 Redis 的本地档退回进程内计数（单 worker 语义）。
-- **MAX_TRACKED**：表满且无过期条目时，新键进入 60s 具名饱和（429/Retry-After），
-  不静默放行，也不驱逐活动锁。
+- **MAX_TRACKED**：表满且无过期条目时，**仅触发饱和的新键**进入 60s 具名饱和
+  （429/Retry-After）；既有键的 retry_after 保持 0、活动锁不驱逐。不静默放行，
+  也绝不把饱和施加到全局登录面（#296）。
 - **break-glass（#294）**：必须同时满足
   `PLAITA_LOGIN_BREAK_GLASS_USERS` 用户名白名单、
   `PLAITA_LOGIN_BREAK_GLASS_ALLOWED_IPS` 来源白名单（默认回环）、
