@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 try:
     from ..models.flow import DEFAULT_TENANT_ID, SessionToken, Tenant, TenantMember, User
@@ -120,6 +121,10 @@ def ensure_bootstrap_user(store) -> Optional[str]:
                 platform_admin=True,
             )
         )
+        # #308：先落 users 行再挂 membership——UOW 只对 relationship() 保证
+        # 跨表插入顺序，裸 FK 列不保证（同 flush 曾靠表名字母序侥幸通过，
+        # SQLite 外键强制后 tenant_members 按字母序先于 users 插入即炸）。
+        session.flush()
         session.add(
             TenantMember(username="admin", tenant_id=DEFAULT_TENANT_ID, role="admin")
         )
@@ -494,6 +499,8 @@ def create_user(
                 platform_admin=platform_admin,
             )
         )
+        # #308：同 ensure_bootstrap_user——先落 users 行再挂 membership。
+        session.flush()
         for m in memberships or []:
             tenant_id, m_role = m.get("tenant_id", ""), m.get("role", role)
             if m_role not in ROLES:
@@ -610,7 +617,14 @@ def add_member(store, tenant_id: str, username: str, role: str) -> None:
         if _is_member(session, username, tenant_id):
             raise UserError(f"{username} 已是租户 {tenant_id} 的成员")
         session.add(TenantMember(username=username, tenant_id=tenant_id, role=role))
-        session.flush()
+        try:
+            session.flush()
+        except IntegrityError:
+            # #308：SQLite 外键强制后，并发 delete 已提交时插入先于世代复核
+            # 撞 tenants FK——A50-02 契约是「迟到加入被守卫具名拒绝」，转译
+            # 回 UserError，不让裸 IntegrityError 漏成 500。
+            session.rollback()
+            raise UserError(f"租户不存在: {tenant_id}")
         # A50-02：flush 取得写串行化点后在同一事务内复核租户世代。并发
         # delete 已提交 ⇒ None；delete+同名 create 已提交 ⇒ 新 token。两种
         # 情况成员行都随事务回滚；尚未提交 ⇒ 删除侧等本事务结束后会显式

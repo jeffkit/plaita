@@ -9,13 +9,15 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
-    Column, DateTime, and_, create_engine, delete, or_, select, text, tuple_, update,
+    Column, DateTime, and_, create_engine, delete, event, or_, select, text,
+    tuple_, update,
 )
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError
@@ -396,7 +398,14 @@ class FlowStore:
             return record
 
     def delete_flow(self, flow_id: str, tenant_id: Optional[str] = None) -> bool:
-        """删除 flow 及其全部版本（级联）。不存在抛 LookupError。"""
+        """删除 flow 及其全部版本（级联）。不存在抛 LookupError。
+
+        #308：版本行级联显式删除（不靠 DB 级 FK 声明）。相邻面裁量：
+        ``local_schedules``（被删 flow 的 cron 定义）**不在本单级联**——
+        schedule 行与 flows 间本无 FK 声明（从未承诺过级联），且集群档
+        schedule 在 Redis、生命周期另有闸；收口语义（含触发中/审计面）
+        另立单处理（台账 B123-03，P3）。
+        """
         with self._session_local() as session:
             record = session.scalars(
                 select(FlowRecord).where(
@@ -406,6 +415,17 @@ class FlowStore:
             ).first()
             if record is None:
                 raise LookupError(f"流程不存在: {flow_id}")
+            # #308：显式级联删版本行——级联语义不能只靠 FK ondelete=CASCADE 的
+            # DB 级声明（SQLite 默认不强制外键，而默认部署面恰是 SQLite；残留
+            # published 版本会让 start 幽灵入队、同 id 重建撞 409）。先删子行
+            # 再删父行、同一事务（与 #303 删除协议同事务语义），PG/MySQL 同样
+            # 生效，不依赖连接层 PRAGMA 是否到位。
+            session.execute(
+                delete(FlowVersion).where(
+                    FlowVersion.tenant_id == (record.tenant_id or ""),
+                    FlowVersion.flow_id == flow_id,
+                )
+            )
             session.delete(record)
             # #299：级联删版本的同时清掉发布 outbox，防对账重投已删流程。
             # 租户以行内为准（全量视角删除时入参 tenant_id 可能为 None）。
@@ -1481,6 +1501,16 @@ _TENANT_REBUILD_TABLES = (
     "node_descriptors",
     "property_types",
 )
+# #308：重建回填顺序——父表先于子表。DROP 侧沿上面元组序（子表
+# flow_versions 先于 flows 删，FK 强制下父行被引用时不可删）；回填反向：
+# 子行先插会撞 ``fk_flow_versions_flow``。两序都不可倒置。
+_TENANT_REBUILD_COPYBACK_ORDER = (
+    "flows",
+    "flow_versions",
+    "credentials",
+    "node_descriptors",
+    "property_types",
+)
 
 
 def _secure_sqlite_db_permissions(db_url: str) -> None:
@@ -1521,6 +1551,25 @@ def _secure_sqlite_db_permissions(db_url: str) -> None:
         logger.warning("无法创建/收紧 SQLite DB 文件权限（%s）: %s", path, e)
 
 
+def _sqlite_fk_enforce(dbapi_connection, *args) -> None:
+    """#308：console 引擎每次 checkout 拨 ``PRAGMA foreign_keys=ON``（幂等）。
+
+    SQLite 默认不强制外键，``flows → flow_versions`` 的 ``ondelete=CASCADE``
+    声明形同虚设。挂 **checkout** 而非 connect：池化连接被上一任使用者
+    （迁移会话、维护脚本）显式 ``PRAGMA foreign_keys=OFF`` 后归还，下一次
+    checkout 仍被强制拨回，不存在「带 OFF 复用」窗口；首次连接也会先触发
+    checkout，覆盖面等同 connect。``*args`` 兼容 pysqlite 方言给 checkout
+    监听器附加的游标列表参数。非 SQLite 连接直接跳过（PG/MySQL 自带强制）。
+    """
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
+
+
 def init_engine(db_url: str) -> Engine:
     """创建/替换全局引擎并对齐 schema。返回引擎实例。
 
@@ -1544,6 +1593,10 @@ def init_engine(db_url: str) -> Engine:
     # create_all/迁移期间以 0644 落盘并被同机其他用户读到。
     _secure_sqlite_db_permissions(db_url)
     _engine = create_engine(db_url, **engine_kwargs)
+    # #308：SQLite 每次 checkout 强制外键（见 _sqlite_fk_enforce；迁移会话
+    # 在 migrations/env.py 反向显式 OFF，与存量孤儿行共存）。
+    if make_url(db_url).get_backend_name() == "sqlite":
+        event.listen(_engine, "checkout", _sqlite_fk_enforce)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
     logger.info(
         "FlowStore 引擎参数: %s（%s）",
@@ -1640,7 +1693,10 @@ def _migrate_tenant_schema() -> None:
         if rebuild:
             # 重建出的表由 create_all 补齐索引/约束
             Base.metadata.create_all(_engine)
-            for table in rebuild:
+            # #308：回填按父表先于子表（flows 先于 flow_versions）——运行期
+            # 连接已强制外键，子行先插撞 fk_flow_versions_flow。
+            for table in (t for t in _TENANT_REBUILD_COPYBACK_ORDER
+                          if t in rebuild):
                 old = f"{table}_mig_old"
                 cols = _sqlite_columns(conn, old)
                 col_list = ", ".join(cols)
@@ -1721,6 +1777,13 @@ def ensure_tenant_bootstrap() -> None:
                             f"WHERE tenant_id = ''"
                         )
                     )
+
+        if default_missing:
+            # #308：租户行先于 membership 回填落库——UOW 对无 relationship
+            # 的表不保证插入顺序，FK 强制后子行先插即撞 tenants FK。flush
+            # 必须放在上方嵌套 engine.begin() 之后：session 持写锁期间再开
+            # 第二条写连接 = SQLite 单写者死锁。
+            session.flush()
 
         # 成员回填（先于平台管理员提升：legacy admin 也要拿到 default 成员资格）
         users = session.query(User).all()

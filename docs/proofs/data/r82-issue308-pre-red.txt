@@ -1,0 +1,236 @@
+# r82 #308 负控 pre-fix（origin/main 20eaeac + 仅新增测试文件）
+# 2026-10-22 23:59:22 +0800  python=Python 3.13.3
+
+============================= test session starts ==============================
+platform darwin -- Python 3.13.3, pytest-9.1.1, pluggy-1.7.0 -- /Users/kong/projects/infra4agent/plaita-wt2/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/kong/projects/infra4agent/plaita-wt2
+configfile: pyproject.toml
+plugins: cov-7.1.0, timeout-2.4.0, asyncio-1.4.0, platformdirs-4.13.4, anyio-4.15.1
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 10 items
+tests/console/test_issue308_delete_cascade.py::test_delete_flow_clears_version_rows FAILED [ 10%]
+tests/console/test_issue308_delete_cascade.py::test_delete_flow_clears_published_version_rows FAILED [ 20%]
+tests/console/test_issue308_delete_cascade.py::test_start_explicit_on_deleted_flow_404 FAILED [ 30%]
+tests/console/test_issue308_delete_cascade.py::test_start_latest_on_deleted_flow_404 FAILED [ 40%]
+tests/console/test_issue308_delete_cascade.py::test_rebuild_same_id_put_1_0_0_ok FAILED [ 50%]
+tests/console/test_issue308_delete_cascade.py::test_force_escape_on_legacy_orphan_form PASSED [ 60%]
+tests/console/test_issue308_delete_cascade.py::test_sqlite_fk_enforced_per_checkout FAILED [ 70%]
+tests/console/test_issue308_delete_cascade.py::test_delete_flow_cascade_without_fk_pragma FAILED [ 80%]
+tests/console/test_issue308_delete_cascade.py::test_legacy_multitenant_rebuild_with_fk_on FAILED [ 90%]
+tests/console/test_issue308_delete_cascade.py::test_latest_start_flow_exists_without_published_keeps_200_warning PASSED [100%]
+=================================== FAILURES ===================================
+_____________________ test_delete_flow_clears_version_rows _____________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=ea9d87df7fed4cc2ac136e73239c59b5,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+db_url = 'sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_delete_flow_clears_versio0/issue308.db'
+    def test_delete_flow_clears_version_rows(redis, db_url):
+        """删 flow 后版本行清零（draft-only；issue RED ①的上半）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        r = client.delete("/api/flows/cascade-flow", headers=_headers())
+        assert r.status_code == 200, r.text
+        engine = flow_store.get_init_engine()
+>       assert _version_count(engine) == 0, (
+            "delete_flow 后版本行必须清零（SQLite FK CASCADE 未强制，不能只靠 DB 声明）"
+        )
+E       AssertionError: delete_flow 后版本行必须清零（SQLite FK CASCADE 未强制，不能只靠 DB 声明）
+E       assert 1 == 0
+E        +  where 1 = _version_count(Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_delete_flow_clears_versio0/issue308.db))
+tests/console/test_issue308_delete_cascade.py:148: AssertionError
+________________ test_delete_flow_clears_published_version_rows ________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=55ab5f689860412f9908120266af35a9,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_delete_flow_clears_published_version_rows(redis):
+        """删 flow（含 published，走 force 逃生）后版本行清零（issue RED ①的下半）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        _publish(client)
+        r = client.delete("/api/flows/cascade-flow?force=true", headers=_headers())
+        assert r.status_code == 200, r.text
+        engine = flow_store.get_init_engine()
+>       assert _version_count(engine) == 0
+E       assert 1 == 0
+E        +  where 1 = _version_count(Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_delete_flow_clears_publis0/issue308.db))
+tests/console/test_issue308_delete_cascade.py:162: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=cascade-flow@1.0.0）——旧 build worker 部署请尽快升级
+___________________ test_start_explicit_on_deleted_flow_404 ____________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=dd4f03ed5ce74734b10d49d3776aa3f0,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_start_explicit_on_deleted_flow_404(redis):
+        """已删 flow 显式版本 start → 404 version_not_found（issue RED ②）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        _publish(client)
+        assert client.delete(
+            "/api/flows/cascade-flow?force=true", headers=_headers()
+        ).status_code == 200
+        r = client.post("/api/executions",
+                        json={"flow_id": "cascade-flow", "version": "1.0.0"},
+                        headers=_headers())
+>       assert r.status_code == 404, r.text
+E       AssertionError: {"status":"queued","flow_id":"cascade-flow","execution_id":"42a74c35ee5c4508aa1347945cd15483","message":"流程启动请求已加入队列","version":"1.0.0"}
+E       assert 200 == 404
+E        +  where 200 = <Response [200 OK]>.status_code
+tests/console/test_issue308_delete_cascade.py:177: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=cascade-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=cascade-flow@1.0.0）——旧 build worker 部署请尽快升级
+____________________ test_start_latest_on_deleted_flow_404 _____________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=f808d1a9ca7f4ee8a3356ea9bf574b23,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_start_latest_on_deleted_flow_404(redis):
+        """已删 flow latest start → 404 version_not_found（issue RED ③）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        _publish(client)
+        assert client.delete(
+            "/api/flows/cascade-flow?force=true", headers=_headers()
+        ).status_code == 200
+        r = client.post("/api/executions", json={"flow_id": "cascade-flow"},
+                        headers=_headers())
+>       assert r.status_code == 404, r.text
+E       AssertionError: {"status":"queued","flow_id":"cascade-flow","execution_id":"190edbb41d684d9399cd55e189e713a0","message":"流程启动请求已加入队列","version":"1.0.0"}
+E       assert 200 == 404
+E        +  where 200 = <Response [200 OK]>.status_code
+tests/console/test_issue308_delete_cascade.py:194: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=cascade-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=cascade-flow@1.0.0）——旧 build worker 部署请尽快升级
+______________________ test_rebuild_same_id_put_1_0_0_ok _______________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=bd33e7e7e0824d7994ceacb2a0ad6d99,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_rebuild_same_id_put_1_0_0_ok(redis):
+        """同 id 重建后 PUT 1.0.0 正常（issue RED ④：孤儿 published 撞 409）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        _publish(client)
+        assert client.delete(
+            "/api/flows/cascade-flow?force=true", headers=_headers()
+        ).status_code == 200
+        # 同 id 重建：flow 行 + PUT 同版本号
+        r = client.post("/api/flows", json={"flow_id": "cascade-flow"},
+                        headers=_headers())
+        assert r.status_code == 200, r.text
+        r = client.put("/api/flows/cascade-flow/versions/1.0.0",
+                       json={"definition": FLOW_DEF}, headers=_headers())
+>       assert r.status_code == 200, r.text
+E       AssertionError: {"detail":{"code":"version_conflict","message":"版本 cascade-flow@1.0.0 已发布，不可覆盖"}}
+E       assert 409 == 200
+E        +  where 409 = <Response [409 Conflict]>.status_code
+tests/console/test_issue308_delete_cascade.py:214: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=cascade-flow@1.0.0）——旧 build worker 部署请尽快升级
+_____________________ test_sqlite_fk_enforced_per_checkout _____________________
+db_url = 'sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_sqlite_fk_enforced_per_ch0/issue308.db'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x11563e050>
+    def test_sqlite_fk_enforced_per_checkout(db_url, monkeypatch):
+        """console 引擎每次 checkout 都见 foreign_keys=ON；孤儿版本行插入被拒。
+        池复用面：显式 OFF 后归还的连接，下一次 checkout 必须被拨回 ON
+        （这是挂 checkout 而非 connect 的原因）。
+        """
+        monkeypatch.setattr("config.get_settings", lambda: _settings())
+        monkeypatch.setattr("auth.get_settings", lambda: _settings())
+        engine = flow_store.init_engine(db_url)
+        # 第一次 checkout：FK ON
+        with engine.connect() as conn:
+>           assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+E           AssertionError: assert 0 == 1
+E            +  where 0 = scalar()
+E            +    where scalar = <sqlalchemy.engine.cursor.CursorResult object at 0x1157f6970>.scalar
+E            +      where <sqlalchemy.engine.cursor.CursorResult object at 0x1157f6970> = exec_driver_sql('PRAGMA foreign_keys')
+E            +        where exec_driver_sql = <sqlalchemy.engine.base.Connection object at 0x1158e7f50>.exec_driver_sql
+tests/console/test_issue308_delete_cascade.py:278: AssertionError
+__________________ test_delete_flow_cascade_without_fk_pragma __________________
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_delete_flow_cascade_witho0')
+    def test_delete_flow_cascade_without_fk_pragma(tmp_path):
+        """显式级联层独立成立：无 PRAGMA 的裸引擎上 delete_flow 仍清版本行。
+        防「只靠 DB 声明」回归——PG/MySQL 或任何未拨 PRAGMA 的引擎同样清零。
+        """
+        engine = create_engine(f"sqlite:///{tmp_path / 'bare.db'}", future=True)
+        flow_store.Base.metadata.create_all(engine)
+        store = flow_store.FlowStore(sessionmaker(bind=engine, expire_on_commit=False))
+        record = store.create_flow("bare-flow")
+        store.save_flow_definition(flow_id="bare-flow", version="1.0.0",
+                                   definition=FLOW_DEF, tenant_id=record.tenant_id)
+        assert _version_count(engine, "bare-flow") == 1
+        assert store.delete_flow("bare-flow") is True
+>       assert _version_count(engine, "bare-flow") == 0
+E       AssertionError: assert 1 == 0
+E        +  where 1 = _version_count(Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_delete_flow_cascade_witho0/bare.db), 'bare-flow')
+tests/console/test_issue308_delete_cascade.py:309: AssertionError
+__________________ test_legacy_multitenant_rebuild_with_fk_on __________________
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_legacy_multitenant_rebuil0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x11596dc70>
+    def test_legacy_multitenant_rebuild_with_fk_on(tmp_path, monkeypatch):
+        """旧库（无 tenant_id 列）+ FK 强制连接：多租户重建照常，回填父先子后。
+        flow_versions 必须先删（子）、flows 后删（父），回填反向父先子后——
+        FK 强制下任何一侧倒序都会撞约束、启动即崩。
+        """
+        db_file = tmp_path / "legacy.db"
+        engine = create_engine(f"sqlite:///{db_file}", future=True)
+        # 旧形态：无 tenant_id、无 FK（历史 create_all 产物）；带存量数据。
+        # 列集对齐历史 flow_versions（含 created_by——新表 NOT NULL 且无
+        # server_default，回填缺它必炸）。
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " flow_id VARCHAR(128) NOT NULL, author VARCHAR(128) NOT NULL,"
+                " \"desc\" TEXT NOT NULL, created_at DATETIME, updated_at DATETIME)"
+            ))
+            conn.execute(text(
+                "CREATE TABLE flow_versions (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " flow_id VARCHAR(128) NOT NULL, version VARCHAR(64) NOT NULL,"
+                " status VARCHAR(16) NOT NULL, definition TEXT NOT NULL,"
+                " layout TEXT NOT NULL, created_at DATETIME, published_at DATETIME,"
+                " created_by VARCHAR(128) NOT NULL)"
+            ))
+            conn.execute(text(
+                "INSERT INTO flows (flow_id, author, \"desc\", created_at, updated_at)"
+                " VALUES ('legacy-flow', '', '', datetime('now'), datetime('now'))"
+            ))
+            conn.execute(text(
+                "INSERT INTO flow_versions (flow_id, version, status, definition,"
+                " layout, created_at, created_by)"
+                " VALUES ('legacy-flow', '0.1.0', 'draft', '', '', datetime('now'), '')"
+            ))
+        engine.dispose()
+        monkeypatch.setattr("config.get_settings", lambda: _settings())
+        monkeypatch.setattr("auth.get_settings", lambda: _settings())
+        engine2 = flow_store.init_engine(f"sqlite:///{db_file}")
+        with engine2.connect() as conn:
+            flow_row = conn.execute(text(
+                "SELECT tenant_id, flow_id FROM flows WHERE flow_id='legacy-flow'"
+            )).fetchone()
+            ver_rows = conn.execute(text(
+                "SELECT tenant_id, flow_id, version FROM flow_versions"
+            )).fetchall()
+>           assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+E           AssertionError: assert 0 == 1
+E            +  where 0 = scalar()
+E            +    where scalar = <sqlalchemy.engine.cursor.CursorResult object at 0x115ba44b0>.scalar
+E            +      where <sqlalchemy.engine.cursor.CursorResult object at 0x115ba44b0> = exec_driver_sql('PRAGMA foreign_keys')
+E            +        where exec_driver_sql = <sqlalchemy.engine.base.Connection object at 0x11581d010>.exec_driver_sql
+tests/console/test_issue308_delete_cascade.py:359: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.flow_store:flow_store.py:1517 SQLite DB 文件权限过宽（0o644），已收紧为 0600: /private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-886/test_legacy_multitenant_rebuil0/legacy.db
+=========================== short test summary info ============================
+FAILED tests/console/test_issue308_delete_cascade.py::test_delete_flow_clears_version_rows
+FAILED tests/console/test_issue308_delete_cascade.py::test_delete_flow_clears_published_version_rows
+FAILED tests/console/test_issue308_delete_cascade.py::test_start_explicit_on_deleted_flow_404
+FAILED tests/console/test_issue308_delete_cascade.py::test_start_latest_on_deleted_flow_404
+FAILED tests/console/test_issue308_delete_cascade.py::test_rebuild_same_id_put_1_0_0_ok
+FAILED tests/console/test_issue308_delete_cascade.py::test_sqlite_fk_enforced_per_checkout
+FAILED tests/console/test_issue308_delete_cascade.py::test_delete_flow_cascade_without_fk_pragma
+FAILED tests/console/test_issue308_delete_cascade.py::test_legacy_multitenant_rebuild_with_fk_on
+========================= 8 failed, 2 passed in 2.35s ==========================
+RC=
+
+----
+# 演进注记（B2 r82 落笔时补）
+# 上面 pre 跑的是本文件初版（10 用例）。其中 test_start_latest_on_deleted_flow_404
+# 后改名 test_start_latest_on_deleted_flow_observable_degradation：issue 验收
+# 要求「已删 flow latest start 404」，实测与 #300/#304 存量 latest fail-open
+# 契约冲突（39 个既有用例踩在其上、console 一无所知的直部署 flow 同形态），
+# 按裁决先例改为「具名 warning 点名无 flow 记录 + 状态仍 200」，404 化留
+# owner 拍板。该用例 pre-fix 红因 = 删除级联缺失下 latest 解析到孤儿
+# published（200 + 版本回声），修后同场景无版本回声 + 具名 warning。

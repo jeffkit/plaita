@@ -2578,12 +2578,36 @@ async def start_execution(
     # plaita#304：响应面可观测——latest 实际解析到哪个版本（删新版后改靶
     # 旧版时调用方可在响应里直接看到）+ 无 published 时的入队警告
     # （不阻断：worker 侧将以 flow_definition_missing 具名终态收场）。
+    # plaita#308：flow 记录不存在（已删除或从未在 console 注册）时点名降级
+    # 形态——latest fail-open 契约不动（CLI/worker 直部署的 flow 没有
+    # console 记录，start 照常受理；「已删」与「从未注册」在 DB 态不可
+    # 区分，任何基于 flow 记录的 404 都会一并拒掉合法的直部署面），但两种
+    # 降级必须可区分（任何降级必须可观测）。已删 flow 的权威防线是删除
+    # 级联（版本行清零，latest 不再解析到孤儿 published）+ 显式版本 start
+    # 的 #304 具名 404。
     start_warnings: List[str] = []
     if request.version is None and version_row is None:
-        start_warnings.append(
-            f"流程 {request.flow_id} 无已发布版本，latest 语义无法解析；"
-            "本次入队将由 worker 以 flow_definition_missing 具名终态收场"
-        )
+        flow_record_missing = False
+        try:
+            _store = flow_store.get_flow_store()
+            flow_record_missing = (
+                _store.get_flow_record(request.flow_id, tenant_id=tenant) is None
+                and (tenant != "default"
+                     or _store.get_flow_record(request.flow_id, tenant_id="") is None)
+            )
+        except Exception:  # noqa: BLE001 — 可观测性查询失败不影响受理
+            flow_record_missing = False
+        if flow_record_missing:
+            start_warnings.append(
+                f"流程 {request.flow_id} 在 console 无 flow 记录（已删除或从未注册）；"
+                "latest 语义按存量契约受理，本次入队将由 worker 以 "
+                "flow_definition_missing 具名终态收场"
+            )
+        else:
+            start_warnings.append(
+                f"流程 {request.flow_id} 无已发布版本，latest 语义无法解析；"
+                "本次入队将由 worker 以 flow_definition_missing 具名终态收场"
+            )
     response: Dict[str, Any] = {
         "status": "queued",
         "flow_id": request.flow_id,

@@ -1,0 +1,42 @@
+# r82 #308 负控 post-fix（fix/issue308-delete-cascade，wt2）
+# 2026-10-23 01:19:39 +0800  python=Python 3.13.3
+
+=== 1) #308 负控全绿（12 用例） ===
+tests/console/test_issue308_delete_cascade.py::test_delete_flow_clears_version_rows PASSED [  8%]
+tests/console/test_issue308_delete_cascade.py::test_delete_flow_clears_published_version_rows PASSED [ 16%]
+tests/console/test_issue308_delete_cascade.py::test_start_explicit_on_deleted_flow_404 PASSED [ 25%]
+tests/console/test_issue308_delete_cascade.py::test_start_latest_on_deleted_flow_observable_degradation PASSED [ 33%]
+tests/console/test_issue308_delete_cascade.py::test_rebuild_same_id_put_1_0_0_ok PASSED [ 41%]
+tests/console/test_issue308_delete_cascade.py::test_force_escape_on_legacy_orphan_form PASSED [ 50%]
+tests/console/test_issue308_delete_cascade.py::test_sqlite_fk_enforced_per_checkout PASSED [ 58%]
+tests/console/test_issue308_delete_cascade.py::test_delete_flow_cascade_without_fk_pragma PASSED [ 66%]
+tests/console/test_issue308_delete_cascade.py::test_alembic_upgrade_with_orphan_rows_succeeds PASSED [ 75%]
+tests/console/test_issue308_delete_cascade.py::test_legacy_multitenant_rebuild_with_fk_on PASSED [ 83%]
+tests/console/test_issue308_delete_cascade.py::test_latest_start_flow_exists_without_published_keeps_200_warning PASSED [ 91%]
+tests/console/test_issue308_delete_cascade.py::test_latest_start_unregistered_flow_keeps_fail_open_with_named_warning PASSED [100%]
+============================== 12 passed in 1.46s ==============================
+
+=== 2) NC：去 env.py 迁移会话 FK OFF → 迁移共存用例红 ===
+E       AssertionError: 迁移会话 FK 未关闭（fk=1）——recreate 型 batch 迁移会被存量孤儿行卡死（env.py 防御被移除？）
+============================== 1 failed in 0.83s ===============================
+
+=== 3) NC：去 ensure_bootstrap_user 的父行先落 flush → headless bootstrap 红（IntegrityError） ===
+E       sqlite3.IntegrityError: FOREIGN KEY constraint failed
+E       sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) FOREIGN KEY constraint failed
+
+=== 4) NC：去 add_member 的 IntegrityError→UserError 转译 → 竞态用例红 ===
+E       AssertionError: {'result': "IntegrityError: (sqlite3.IntegrityError) FOREIGN KEY constraint failed
+E        +    where <built-in method startswith of str object at 0x1229e8180> = "IntegrityError: (sqlite3.IntegrityError) FOREIGN KEY constraint failed\n[SQL: INSERT INTO tenant_members (username, t... ('bob', 'acme', 'admin', '2026-10-22 17:19:44.913760')]\n(Background on this error at: https://sqlalche.me/e/21/gkpj)".startswith
+
+=== 5) 恢复后：本单相关四文件全绿 ===
+============================== 56 passed in 6.72s ==============================
+
+=== 6) console 全量（守恒面） ===
+1376 passed, 18 skipped in 162.84s (0:02:42)
+
+=== 7) sha 校验：NC 后源文件与修复版逐字一致 ===
+b70c8fa462a4ed4ed7f7c79a06e19c45d0e084a99798e650754e05e72cd34432  migrations/env.py
+1ac294fe36e61dbc897f074ecdfbcb4e3a3b935b02175386904eafb8fe2c0d65  services/users_svc.py
+ plaita-console/backend/services/users_svc.py       | 16 +++++-
+ .../console/test_issue304_version_delete_guard.py  | 10 +++-
+ 5 files changed, 123 insertions(+), 8 deletions(-)

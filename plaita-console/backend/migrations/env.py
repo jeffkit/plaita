@@ -78,6 +78,19 @@ def run_migrations_online() -> None:
             section, prefix="sqlalchemy.", poolclass=pool.NullPool
         )
     with connectable.connect() as connection:
+        if connection.dialect.name == "sqlite":
+            # #308：运行期连接每次 checkout 强制外键（flow_store 引擎监听），
+            # 迁移会话反向关闭——recreate 型 batch 表重建/拷贝必须与存量孤儿
+            # 行共存（老版本 delete_flow 残留的版本行不该卡死升级）。必须经
+            # DBAPI 连接直拨（PRAGMA 需在事务外执行）：走 Connection 层的
+            # exec_driver_sql 会触发 autobegin，alembic 随后的
+            # begin_transaction 在已开事务的连接上直接炸、init_engine 被迫
+            # 走 create_all-fallback。连接归还后下一次 checkout 会被运行期
+            # 监听拨回 ON。
+            dbapi_conn = connection.connection.dbapi_connection
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=OFF")
+            cursor.close()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
