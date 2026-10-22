@@ -825,3 +825,33 @@
   env 表 2 行（inf/nan 拦截）+ 非法值矩阵行；DOC_CODE_MAP 行 26。
 - 单 commit 关闭 #301/#302（c117-06/b117-04/b117-03 顺带收）；未触碰
   他席 duo-a-ledger/duo-a2-ledger/duo-b3-ledger/duo-b4-ledger。
+
+## 第七十四轮 · CI 红修复（迁移图双 head 线性化，2026-10-22，B1 修复席；任务书标称第六十八轮续作——74 为本文件下一个空闲编号）
+
+> 一行摘要：**main CI 三连红根因=迁移图双 head（真 bug，非测试竞态）**——#299
+> 的 `0003_flow_publish_outbox` 与 #300 的 `0003_flow_version_runtime` 并发落地
+> 各自以 `0002_audit_identity` 为父，head 集={0003_flow_version_runtime,
+> 0004_outbox_drift_count}；二次启动 `run_migrations` 走 `upgrade` 分支
+> `command.upgrade(cfg, "head")` 抛 `MultipleHeads`，被 `init_engine`
+> 兜底（非连接类错误）降级 `create_all-fallback`（schema 停止补列/推进，
+> `flow_store.py:1535-1537`）。CI 39739418521 chunk B 三 attempts 同断言
+> `assert 'create_all-fallback' == 'upgrade'`，与本机基线 8d715f7 临时
+> worktree 复现逐字吻合（4F/7P，四失败同根因：second_boot/idempotent_
+> many/stamped_db_upgrades_outbox/stamped_0003_upgrades_drift）。
+> **修法=线性化**：`0003_flow_version_runtime` 改挂 `0003_flow_publish_outbox`、
+> `0004` 改挂 `0003_flow_version_runtime`（0001→0002→0003p→0003v→0004 单链）；
+> 两迁移均幂等 ADD COLUMN（列/表存在性守卫 + server_default），对已 stamp
+> 任意版本的库（含双 head 期间停在 0001/0003p/0004 的生产库）重挂安全收敛。
+> 新增回归 `test_migration_graph_has_single_head`：分叉在图层面拦下，
+> 不等启动路径出 fallback 谜语。**负控**：基线（双 head）+ 新测试 = 5F/7P
+> 精确红（新测试报双 head，原 CI 红面全数复现）；修复树 12P。证据
+> `docs/proofs/data/r74-ci-red-negative-control-{pre,post}.txt`。
+> 验收：console 全量 **1272P/13S**；unit **8847P/13S/14 deselected/3501
+> subtests**（pytest_rc=0 无管道判定）；integration+e2e **287P/4S**（CI
+> 同参 --timeout=150）；ruff 改动文件零告警。**环境注记（既有、非本轮）**：
+> 本机 .venv 未装真实 mcp 时 `pytest plaita-ai/tests` 全目录跑出 1F
+> （test_mcp_stdio_smoke 握手）——`test_mcp_integration` 的 `_inject_stub_mcp`
+> 向 sys.modules 注 stub 污染 smoke 文件的 `_REAL_MCP` 探测（子进程真导入
+> 必炸）；基线 8d715f7 同样 1F，CI（装真包）success——测试隔离缺陷候选单，
+> 未提报待拍板。**教训复踩警示**：`pytest | tail; echo $?` 取的是 tail 的
+> 退出码，第一遍 unit 判定无效、以输出落文件读 `pytest_rc` 重跑纠正。

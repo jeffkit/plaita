@@ -1,0 +1,12 @@
+plaita-console/backend/tests/console/test_schema_migrations.py::TestMigrationBootstrap::test_empty_db_is_created_and_stamped
+  /private/tmp/plaita-r68ci/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_schema_migrations.py::TestMigrationBootstrap::test_migration_graph_has_single_head
+FAILED tests/console/test_schema_migrations.py::TestMigrationBootstrap::test_second_boot_upgrades_cleanly
+FAILED tests/console/test_schema_migrations.py::TestMigrationBootstrap::test_bootstrap_is_idempotent_many_times
+FAILED tests/console/test_schema_migrations.py::TestFlowPublishOutboxMigration::test_stamped_db_upgrades_outbox_table
+FAILED tests/console/test_schema_migrations.py::TestOutboxDriftCountMigration::test_stamped_0003_db_upgrades_drift_count
+5 failed, 7 passed, 1 warning in 2.22s

@@ -22,14 +22,19 @@ from services import flow_store as fs  # noqa: E402
 from services import schema_migrations as sm  # noqa: E402
 
 
-def _head_revision() -> str:
-    """当前迁移 head（避免每加一条 revision 都改测试里的硬编码）。"""
+def _head_config():
     from alembic.config import Config
-    from alembic.script import ScriptDirectory
 
     cfg = Config()
     cfg.set_main_option("script_location", str(sm._MIGRATIONS_DIR))
-    return ScriptDirectory.from_config(cfg).get_current_head()
+    return cfg
+
+
+def _head_revision() -> str:
+    """当前迁移 head（避免每加一条 revision 都改测试里的硬编码）。"""
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(_head_config()).get_current_head()
 
 
 def _tables(db: Path) -> set:
@@ -73,6 +78,22 @@ def _make_legacy_db(db: Path) -> None:
 
 
 class TestMigrationBootstrap:
+    def test_migration_graph_has_single_head(self):
+        """迁移图必须收敛到唯一 head。
+
+        回归：#299 与 #300 并发落地各自以 0002 为父，图分叉双 head——
+        二次启动 `upgrade head` 抛 MultipleHeads，被 init_engine 兜底降级
+        create_all-fallback（表不再补列，CI 三连红）。分叉必须在图层面拦下，
+        而不是等启动路径给出一行 fallback 谜语。
+        """
+        from alembic.script import ScriptDirectory
+
+        heads = ScriptDirectory.from_config(_head_config()).get_heads()
+        assert len(heads) == 1, (
+            f"迁移图分叉（heads={heads}）：新迁移必须挂在当前 head 上，"
+            f"否则 upgrade head 崩、启动降级 create_all-fallback"
+        )
+
     def test_empty_db_is_created_and_stamped(self, tmp_path):
         db = tmp_path / "fresh.db"
         engine = fs.init_engine(f"sqlite:///{db}")

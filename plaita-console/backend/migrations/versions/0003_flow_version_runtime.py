@@ -6,14 +6,19 @@
 不变（旧 flow 无 runtime 字段的默认策略，#300 验收⑥）。
 
 Revision ID: 0003_flow_version_runtime
-Revises: 0002_audit_identity
+Revises: 0003_flow_publish_outbox
 Create Date: 2026-10-22
+
+注：本迁移原以 0002_audit_identity 为父，与 #299 的 0003_flow_publish_outbox
+并发落地造成迁移图双 head（upgrade head 抛 MultipleHeads，二次启动降级
+create_all-fallback，CI 三连红）。改挂 0003_flow_publish_outbox 线性化；
+纯 ADD COLUMN 且幂等，重挂对已 stamp 任意版本的库都安全。
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "0003_flow_version_runtime"
-down_revision = "0002_audit_identity"
+down_revision = "0003_flow_publish_outbox"
 branch_labels = None
 depends_on = None
 

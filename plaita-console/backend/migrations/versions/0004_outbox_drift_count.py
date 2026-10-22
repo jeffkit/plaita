@@ -9,14 +9,14 @@
 ``drift_total`` 聚合全表。
 
 Revision ID: 0004_outbox_drift_count
-Revises: 0003_flow_publish_outbox
+Revises: 0003_flow_version_runtime
 Create Date: 2026-10-22
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "0004_outbox_drift_count"
-down_revision = "0003_flow_publish_outbox"
+down_revision = "0003_flow_version_runtime"
 branch_labels = None
 depends_on = None
 
