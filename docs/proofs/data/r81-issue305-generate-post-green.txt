@@ -1,0 +1,22 @@
+== r81 #305 Phase 2 post（1920f06 + 本轮实现，2026-10-23）==
+-- 新文件 tests/console/test_issue305_graph_generate.py：23P/0F --
+23 passed, 56 warnings in 2.00s
+
+-- 守恒：#305 Phase 1（43）+ #309（16）= 59P/0F --
+59 passed, 235 warnings in 4.08s
+
+-- console 全量（CI 同参 --timeout=150 -m 'not slow' --timeout-method=thread）--
+1412 passed, 13 skipped, 13070 warnings in 175.85s (0:02:55)
+   基线同参 collect-only=1425；现树 1412P+13S=1425 全等（零回归，+23 全为本轮）
+
+-- 根仓 unit（--timeout=150 -m 'not slow' --timeout-method=thread）--
+8861 passed, 13 skipped, 14 deselected, 197 warnings, 3501 subtests passed in 653.13s (0:10:53)
+
+-- 根仓 integration+e2e（CI 同参）--
+287 passed, 4 skipped, 5 warnings in 39.78s
+
+-- ruff（4 改动文件）--
+All checks passed!
+
+-- mkdocs --strict（docs-site/）--
+rc=0

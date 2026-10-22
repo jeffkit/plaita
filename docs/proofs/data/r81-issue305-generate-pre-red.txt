@@ -1,0 +1,33 @@
+== r81 #305 Phase 2 负控 pre-A（1920f06 基线树直跑：服务模块不存在，2026-10-23）==
+-- pytest tests/console/test_issue305_graph_generate.py → rc=2（收集期 ImportError）--
+ImportError while importing test module '/Users/kong/projects/infra4agent/plaita/plaita-console/backend/tests/console/test_issue305_graph_generate.py'.
+E   ImportError: cannot import name 'graph_generation' from 'services' (/Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/__init__.py). Did you mean: 'graph_validation'?
+1 warning, 1 error in 0.74s
+
+== r81 #305 Phase 2 负控 pre-B（1920f06 基线 worktree + 空桩模块，终版夹具，端点不存在）==
+-- 23 用例全部 404 断言红：23 failed / 0 passed --
+FAILED tests/console/test_issue305_graph_generate.py::TestContract::test_valid_generation_200
+FAILED tests/console/test_issue305_graph_generate.py::TestContract::test_empty_prompt_422
+FAILED tests/console/test_issue305_graph_generate.py::TestContract::test_invalid_runtime_422
+FAILED tests/console/test_issue305_graph_generate.py::TestContract::test_unknown_request_field_422
+FAILED tests/console/test_issue305_graph_generate.py::TestContract::test_generation_is_pure_function_no_flow_written
+FAILED tests/console/test_issue305_graph_generate.py::TestContract::test_default_model_not_touched_when_stubbed
+FAILED tests/console/test_issue305_graph_generate.py::TestGenerateValidateLoop::test_self_correction_second_attempt_converges
+FAILED tests/console/test_issue305_graph_generate.py::TestGenerateValidateLoop::test_invalid_after_retries_errors_returned_verbatim
+FAILED tests/console/test_issue305_graph_generate.py::TestGenerateValidateLoop::test_capability_error_shape_preserved
+FAILED tests/console/test_issue305_graph_generate.py::TestGenerateValidateLoop::test_unparseable_output_retried_then_converges
+FAILED tests/console/test_issue305_graph_generate.py::TestGenerateValidateLoop::test_permanently_unparseable_reports_generation_error
+FAILED tests/console/test_issue305_graph_generate.py::TestGenerateValidateLoop::test_warning_does_not_block
+FAILED tests/console/test_issue305_graph_generate.py::TestA12801SelfCheck::test_fake_projection_named_500_no_draft
+FAILED tests/console/test_issue305_graph_generate.py::TestA12801SelfCheck::test_twin_missing_from_childflow_named_500
+FAILED tests/console/test_issue305_graph_generate.py::TestA12801SelfCheck::test_twin_field_divergence_named_500
+FAILED tests/console/test_issue305_graph_generate.py::TestA12801SelfCheck::test_non_container_host_with_projection_named_500
+FAILED tests/console/test_issue305_graph_generate.py::TestA12801SelfCheck::test_faithful_expanded_form_passes
+FAILED tests/console/test_issue305_graph_generate.py::TestA12801SelfCheck::test_owner_without_childflow_not_selfcheck_domain
+FAILED tests/console/test_issue305_graph_generate.py::TestTenantAndAuth::test_requires_auth
+FAILED tests/console/test_issue305_graph_generate.py::TestTenantAndAuth::test_viewer_forbidden_by_editor_gate
+FAILED tests/console/test_issue305_graph_generate.py::TestTenantAndAuth::test_reference_resolves_within_request_tenant
+FAILED tests/console/test_issue305_graph_generate.py::TestTenantAndAuth::test_hints_injected_into_model_prompt
+FAILED tests/console/test_issue305_graph_generate.py::TestTenantAndAuth::test_client_construction_failure_named_503
+
+rc=1（23F/0P）——生成端点与服务模块在基线均不存在，断言非空转

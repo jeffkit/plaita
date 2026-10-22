@@ -238,6 +238,166 @@ def shape_errors(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# A128-01：容器投影子节点的内容级抽查（generate 等非编辑器产源的自检面）
+# ---------------------------------------------------------------------------
+
+#: 可承载 childFlow 子流程的容器类宿主（_CHILD_FLOW_REQUIRED ∪ parallel——
+#: parallel 的分支子图载体是 branches[].flow）。
+_CONTAINER_HOST_TYPES = frozenset(_CHILD_FLOW_REQUIRED) | {"parallel"}
+
+
+def _childflow_twin_nodes(host_data: Dict[str, Any],
+                          host_fields: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """宿主已双写的子流程节点列表；无任何子流程载体时返回 ``None``。
+
+    载体 = childFlow.nodes（容器类）或 branches[].flow.nodes（parallel）。
+    childFlow 为字符串时按 JSON 解析（与折叠/校验面同宽容度）。
+    """
+    if host_data.get("type") == "parallel":
+        found = False
+        branch_nodes: List[Dict[str, Any]] = []
+        for b in host_fields.get("branches") or []:
+            if isinstance(b, dict) and isinstance(b.get("flow"), dict):
+                found = True
+                branch_nodes.extend(
+                    x for x in (b["flow"].get("nodes") or [])
+                    if isinstance(x, dict))
+        return branch_nodes if found else None
+    cf = (host_fields.get("childFlow") or host_fields.get("child_flow")
+          or host_data.get("childFlow") or host_data.get("child_flow"))
+    if isinstance(cf, (str, bytes)):
+        try:
+            cf = json.loads(cf)
+        except Exception:  # noqa: BLE001 — 非法 JSON 交 field_errors 报
+            return None
+    if not isinstance(cf, dict) or not isinstance(cf.get("nodes"), list):
+        return None
+    return [x for x in cf["nodes"] if isinstance(x, dict)]
+
+
+def _match_twin(node_id: Any,
+                twins: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """投影节点在双写副本中的对应节点：id 全等或编辑器命名空间
+    ``<owner路径>::<id>`` 后缀匹配（flowConverter jsonToFlow 递归展开时给
+    子节点 id 加 owner 前缀）。"""
+    for t in twins:
+        if t.get("id") == node_id:
+            return t
+    if isinstance(node_id, str):
+        for t in twins:
+            tid = t.get("id")
+            if isinstance(tid, str) and node_id.endswith("::" + tid):
+                return t
+    return None
+
+
+def _strip_branch_next(branches: Any) -> List[Any]:
+    """branches 剥 next（分支连线由 childFlow 拓扑承载，投影侧不携带）。"""
+    out = []
+    for b in branches if isinstance(branches, list) else []:
+        if isinstance(b, dict):
+            out.append({k: v for k, v in b.items() if k != "next"})
+        else:
+            out.append(b)
+    return out
+
+
+def childflow_double_write_errors(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """容器投影子节点的内容级抽查（A128-01 豁免类标记信任缝）。
+
+    ``graph_to_definition`` 折叠豁免子节点（parentId+isContainerChild 双
+    标记、宿主在图）时不核内容确已双写进 owner.childFlow——非编辑器客户端
+    手造全豁免节点可 validate ``valid=true`` 且镜像 definition 静默丢节点
+    （#309 堵掉的「无声消失」在豁免类的形状不可证残余）。validate 面保持
+    限级；**generate 等非编辑器 GraphDTO 产源**在出草稿前调本函数自检。
+
+    返回违规项列表（``{node_id, owner_id, message}``），空列表 = 通过：
+
+    - 投影宿主不是容器类节点（无 childFlow 义务、无双写载体）→ 投影必是
+      伪造（validate 不会报：投影被静默剔除、宿主自身合法）；
+    - 宿主有 childFlow/branches 载体但找不到对应 id（含 ``owner::id``
+      命名空间）的双写副本 → 投影内容会被静默丢弃；
+    - 双写副本的 type / 共享字段值 / branches 内容与投影不一致 → 所见非所存。
+
+    宿主是容器类但**根本没有** childFlow 载体的形态不在此报：validate 会
+    具名 ``node.child_flow_missing``（非静默缝）。
+    """
+    errors: List[Dict[str, Any]] = []
+    nodes = [n for n in graph.get("nodes") or [] if isinstance(n, dict)]
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for n in nodes:
+        nid = n.get("id")
+        if isinstance(nid, str) and nid:
+            by_id.setdefault(nid, n)
+
+    for n in nodes:
+        data = n.get("data") if isinstance(n.get("data"), dict) else {}
+        parent = n.get("parentId")
+        if not parent or not _is_container_child(n, data):
+            continue
+        host = by_id.get(parent)
+        if host is None:
+            continue  # 陈旧 ownerId：shape_errors 具名
+        host_data = host.get("data") if isinstance(host.get("data"), dict) else {}
+        host_fields = (host_data.get("fields")
+                       if isinstance(host_data.get("fields"), dict) else {})
+        nid = n.get("id") if isinstance(n.get("id"), str) else "(无 id)"
+        twins = _childflow_twin_nodes(host_data, host_fields)
+        if twins is None:
+            if host_data.get("type") not in _CONTAINER_HOST_TYPES:
+                errors.append({
+                    "node_id": nid, "owner_id": parent,
+                    "message": f"节点 {nid!r} 标记为容器子节点，但宿主 "
+                               f"{parent!r}（{host_data.get('type')!r}）不是容器类"
+                               "节点：没有可双写的 childFlow，投影内容会被静默丢弃",
+                })
+            continue
+        twin = _match_twin(nid, twins)
+        if twin is None:
+            errors.append({
+                "node_id": nid, "owner_id": parent,
+                "message": f"节点 {nid!r} 的内容未双写进宿主 {parent!r} 的 "
+                           "childFlow（找不到对应 id 的副本）：折叠只保留 "
+                           "childFlow，投影内容静默丢失",
+            })
+            continue
+        if data.get("type") != twin.get("type"):
+            errors.append({
+                "node_id": nid, "owner_id": parent,
+                "message": f"节点 {nid!r} 投影 type {data.get('type')!r} 与双写"
+                           f"副本 {twin.get('type')!r} 不一致（所见非所存）",
+            })
+            continue
+        fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+        for k, v in fields.items():
+            if v is None:
+                continue
+            if k == "branches":
+                twin_branches = twin.get("branches")
+                if _strip_branch_next(v) != _strip_branch_next(twin_branches):
+                    errors.append({
+                        "node_id": nid, "owner_id": parent,
+                        "message": f"节点 {nid!r} 投影 branches 与双写副本不一致"
+                                   "（剥 next 后仍不相等；所见非所存）",
+                    })
+                continue
+            if k not in twin:
+                errors.append({
+                    "node_id": nid, "owner_id": parent,
+                    "message": f"节点 {nid!r} 投影声称字段 {k!r}，但双写副本没有"
+                               "该键：折叠后该字段静默丢失",
+                })
+                continue
+            if twin[k] != v:
+                errors.append({
+                    "node_id": nid, "owner_id": parent,
+                    "message": f"节点 {nid!r} 投影字段 {k!r} 的值与双写副本不一致"
+                               "（所见非所存）",
+                })
+    return errors
+
+
 def graph_to_definition(graph: Dict[str, Any]) -> Dict[str, Any]:
     """GraphDTO → Flow 定义 dict（flowToJson 折叠规则的服务端镜像）。
 
@@ -984,6 +1144,7 @@ __all__ = [
     "SEVERITY_ERROR",
     "SEVERITY_WARNING",
     "capability_errors",
+    "childflow_double_write_errors",
     "edge_errors",
     "field_errors",
     "graph_to_definition",
