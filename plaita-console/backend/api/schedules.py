@@ -74,6 +74,7 @@ from .executions import (
     _resolve_start_version,
     _task_queue_name,
     get_redis_or_none,
+    StartVersionNotStartable,
 )
 
 try:
@@ -649,9 +650,21 @@ def trigger_now(schedule_id: str, request: Request,
     # plaita#300 触发面：与手动 POST /executions 同一受理语义——先过能力门
     # （不支持即 422 结构化拒绝，零入队零占位行），再按版本行 runtime 选池
     # 队列（此前恒落默认 python 队列，go-runtime flow 的调度会串池）。
-    version_row = _admission_version_row(
-        redis, schedule["flow_id"], schedule.get("version"), tenant
-    )
+    # #304×#300 合并口径：start 面对显式不可启动版本（不存在/draft）具名 404
+    # ——交互调用方可即时纠正；触发面与 cron（schedule_service）同语义
+    # fail-open——版本行缺失/未发布时按存量落默认队列，worker 以
+    # flow_definition_missing 具名终态收场（降级留 WARNING 痕，不静默）。
+    try:
+        version_row = _admission_version_row(
+            redis, schedule["flow_id"], schedule.get("version"), tenant
+        )
+    except StartVersionNotStartable as e:
+        logger.warning(
+            "调度触发受理降级（版本行不可启动，fail-open 落默认队列）: "
+            "schedule=%s flow=%s@%s: %s",
+            schedule_id, schedule.get("flow_id"), schedule.get("version"), e,
+        )
+        version_row = None
     trigger_queue: Optional[str] = None
     if version_row is not None:
         try:

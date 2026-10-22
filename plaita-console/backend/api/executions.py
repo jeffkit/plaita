@@ -412,9 +412,12 @@ def _admission_version_row(redis: Optional[Redis], flow_id: Any,
     「queued 行 + 永不执行」。返回版本行；``None`` = latest 语义解析不到
     published、或存储不可达的 fail-open（存量行为，门与路由都跳过）；
     显式 version 不存在/未发布则 ``StartVersionNotStartable``（#304）原样
-    穿透，调用方转 404。两闸次序：版本行可启动性判定先于能力门——
-    行不可启动时无 definition 可判节点集。池内无清单的兜底放行由
-    ``gate_flow_nodes`` 负责（fail-open + 具名 WARNING，降级可观测）。
+    穿透——调用方按表面分流：start 转 404 具名拒绝（交互调用方可即时
+    纠正），调度触发（schedules.trigger_now）捕获降级 fail-open 落默认
+    队列 + WARNING（与 cron 同语义，A2R24 触发契约不破）。两闸次序：
+    版本行可启动性判定先于能力门——行不可启动时无 definition 可判
+    节点集。池内无清单的兜底放行由 ``gate_flow_nodes`` 负责
+    （fail-open + 具名 WARNING，降级可观测）。
     """
     version_row = _resolve_start_version(str(flow_id),
                                          str(version) if version else None,
