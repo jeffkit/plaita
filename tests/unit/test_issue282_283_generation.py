@@ -85,11 +85,14 @@ class TestReclaimTenantRejection:
 
         _seed(fake, status="disabled", generation="gen-1")
         # 超投递 reclaim：tenant 写闸拒绝必须在 dead_letter_if_allowed 内被吸收。
+        # A125-01：拒绝后不再留 pending 永久滞留——收容终局（隔离流 + ack）。
         assert queue.read(block_ms=1) is None
-        assert fake.xlen(DLQ) == 0
+        assert fake.xlen(DLQ) == 0, "平台 DLQ 纯净性不变（#277）"
         assert queue.stats()["tenant_write_rejected"] >= 1
+        assert queue.stats()["tenant_quarantined"] == 1
         pending = fake.xpending_range(STREAM, "g", "-", "+", 10)
-        assert pending and pending[0]["times_delivered"] >= 2
+        assert not pending, "原消息已收容 ack（终局），不再永滞 PEL"
+        assert int(fake.xlen(f"{DLQ}:quarantine:{TENANT}")) == 1
 
 
 class _LoopHost:

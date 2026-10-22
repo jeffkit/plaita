@@ -4,12 +4,15 @@ Real ``tenants_svc.create_tenant`` / ``delete_tenant`` with fakeredis:
 1. create acme ⇒ Redis status active + generation meta published;
 2. capture the generation an in-flight worker would have (old gen);
 3. delete acme ⇒ disabled tombstone + purge;
-4. the old carrier's dead-letter write is rejected and the DLQ stays empty;
+4. the old carrier's dead-letter write is rejected by the platform-DLQ gate
+   (DLQ stays empty); A125-01/02 (r83) 起拒绝后**收容终局**——信封进租户隔离
+   流 ``{dlq}:quarantine:{tenant}`` 并 ack，不再永久滞留 pending；
 5. recreate acme (new generation) ⇒ old generation still rejected; a new
-   generation carrier can dead-letter normally.
+   generation carrier can dead-letter normally (main DLQ, not quarantine).
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -78,14 +81,24 @@ def test_delete_then_inflight_dlq_write_rejected(env):
 
     assert tenants_svc.delete_tenant(store, TENANT, redis_client=fake) is True
     queue = _queue(fake)
-    assert queue.dead_letter_if_allowed(_task(old_generation), reason="inflight") is False
+    # A125：写闸仍拒（平台 DLQ 不复活），调用面收容终局（隔离流 + ack）。
+    assert queue.dead_letter_if_allowed(_task(old_generation), reason="inflight") is True
     assert fake.xlen(DLQ) == 0, "已删租户的在途死信不得复活 DLQ"
+    assert int(fake.xlen(f"{DLQ}:quarantine:{TENANT}")) == 1
+    quarantined = json.loads(
+        fake.xrange(f"{DLQ}:quarantine:{TENANT}")[0][1]["payload"]
+    )
+    assert quarantined["tenant_write_rejected"] == "tenant_disabled"
+    assert quarantined["tenant_generation"] == old_generation
+    assert quarantined["payload"]["params"]["secret"] == "OLD-SECRET"
 
-    # 同名重建：新世代，旧世代仍拒绝；新世代载体可正常死信。
+    # 同名重建：新世代，旧世代仍拒绝（收容）；新世代载体可正常死信（主 DLQ）。
     tenants_svc.create_tenant(store, TENANT, redis_client=fake)
     new_generation = read_tenant_generation(fake, TENANT)
     assert new_generation and new_generation != old_generation
-    assert queue.dead_letter_if_allowed(_task(old_generation), reason="inflight") is False
+    assert queue.dead_letter_if_allowed(_task(old_generation), reason="inflight") is True
     assert fake.xlen(DLQ) == 0
+    assert int(fake.xlen(f"{DLQ}:quarantine:{TENANT}")) == 2
     assert queue.dead_letter_if_allowed(_task(new_generation), reason="new") is True
     assert fake.xlen(DLQ) == 1
+    assert int(fake.xlen(f"{DLQ}:quarantine:{TENANT}")) == 2

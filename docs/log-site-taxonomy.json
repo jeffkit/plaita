@@ -3,16 +3,16 @@
   "issue": "plaita#168",
   "coverage_grep": "grep -rn \"logger\\.(info|warning|error|debug)\" plaita/",
   "counts": {
-   "grep_hit_lines": 806,
-   "ast_associated_calls": 790,
-   "interpolated_sites": 641,
+   "grep_hit_lines": 812,
+   "ast_associated_calls": 796,
+   "interpolated_sites": 647,
    "constant_message_sites": 149,
    "grep_false_hits": 16
   },
   "class_distribution": {
-   "A": 244,
+   "A": 246,
    "B": 85,
-   "C": 312,
+   "C": 316,
    "N/A": 165
   },
   "note": "site = 文件:行（验收 grep 命中行）；class ∈ A/B/C/D/N/A；判据=docs/log-site-taxonomy.md §3 与 scripts/log_site_taxonomy.py 规则表（一一对应）"
@@ -7990,6 +7990,79 @@
     "OPT_OUT_ENV"
    ],
    "rationale": "component ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; root ⇒ B（基础设施标量/文件系统路径/对象句柄）; OPT_OUT_ENV ⇒ B（引擎常量（数值/键名/env 变量名/具名原因串））"
+  },
+  {
+   "site": "plaita/server/task_queue.py:1342",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "quarantine_key",
+    "self.dlq_max_len",
+    "_scrub_url_text(exc)"
+   ],
+   "rationale": "quarantine_key ⇒ A（队列/存储/回调实体键（定位数据实体））; self.dlq_max_len ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; _scrub_url_text(exc) ⇒ C（异常对象/异常文本：str(exc) 属诊断出口）"
+  },
+  {
+   "site": "plaita/server/task_queue.py:1353",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "tenant_id",
+    "quarantine_key",
+    "_scrub_url_text(exc)"
+   ],
+   "rationale": "tenant_id ⇒ A（流程/运行实体标识（跨日志可回查））; quarantine_key ⇒ A（队列/存储/回调实体键（定位数据实体））; _scrub_url_text(exc) ⇒ C（异常对象/异常文本：str(exc) 属诊断出口）"
+  },
+  {
+   "site": "plaita/server/task_queue.py:1363",
+   "method": "error",
+   "interp": true,
+   "class": "A",
+   "exprs": [
+    "task.message_id",
+    "quarantine_key",
+    "_decode(quarantined_id)",
+    "tenant_id",
+    "reject_reason",
+    "reason"
+   ],
+   "rationale": "task.message_id ⇒ A（流程/运行实体标识（跨日志可回查））; quarantine_key ⇒ A（队列/存储/回调实体键（定位数据实体））; _decode(quarantined_id) ⇒ A（流程/运行实体标识（跨日志可回查））; tenant_id ⇒ A（流程/运行实体标识（跨日志可回查））; reject_reason ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; reason ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））"
+  },
+  {
+   "site": "plaita/server/task_queue.py:1393",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "_scrub_url_text(exc)"
+   ],
+   "rationale": "_scrub_url_text(exc) ⇒ C（异常对象/异常文本：str(exc) 属诊断出口）"
+  },
+  {
+   "site": "plaita/server/task_queue.py:1399",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "_decode(quarantined_id)",
+    "task.message_id",
+    "_scrub_url_text(exc)"
+   ],
+   "rationale": "_decode(quarantined_id) ⇒ A（流程/运行实体标识（跨日志可回查））; task.message_id ⇒ A（流程/运行实体标识（跨日志可回查））; _scrub_url_text(exc) ⇒ C（异常对象/异常文本：str(exc) 属诊断出口）"
+  },
+  {
+   "site": "plaita/server/flow_worker.py:5422",
+   "method": "warning",
+   "interp": true,
+   "class": "A",
+   "exprs": [
+    "body.get(\"tenant_id\")",
+    "gate_reason",
+    "getattr(task, \"message_id\", \"?\")"
+   ],
+   "rationale": "body.get(\"tenant_id\") ⇒ A（流程/运行实体标识（跨日志可回查））; gate_reason ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; getattr(task, \"message_id\", \"?\") ⇒ A（流程/运行实体标识（跨日志可回查））"
   }
  ]
 }

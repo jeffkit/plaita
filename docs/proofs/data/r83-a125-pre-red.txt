@@ -1,0 +1,365 @@
+FF.F.FF.FF.FFFF                                                          [100%]
+=================================== FAILURES ===================================
+________ TestFourQuadrants.test_r1_disabled_tenant_contained_not_pumped ________
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestFourQuadrants object at 0x1073ed590>
+
+    def test_r1_disabled_tenant_contained_not_pumped(self):
+        """R1：停用租户×running×超投递——收容 ack，不泵副本（先红后绿主格）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-r1", _running_state("exec-r1"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker)
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+    
+        mid = _to_pel(fake, _body("exec-r1", "acme"))
+        task = StreamTask(message_id=mid, body=_body("exec-r1", "acme"),
+                          delivery_count=5)
+    
+>       assert queue.dead_letter_if_allowed(task, reason="max_deliveries=5") is True
+E       AssertionError: assert False is True
+E        +  where False = dead_letter_if_allowed(StreamTask(message_id='1792696762643-0', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-r1', 'resume_t...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation=None), reason='max_deliveries=5')
+E        +    where dead_letter_if_allowed = <plaita.server.task_queue.RedisStreamTaskQueue object at 0x1074c0d70>.dead_letter_if_allowed
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:163: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-r1 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1792696762643-0
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762643-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762643-0——不 ack、留 pending
+___________ TestFourQuadrants.test_r1_pump_loop_extinct_via_reclaim ____________
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestFourQuadrants object at 0x1073edd10>
+
+    def test_r1_pump_loop_extinct_via_reclaim(self):
+        """R1 端到端：真实 reclaim 机器上泵循环熄灭——一轮收容后 PEL 恒空。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-loop", _running_state("exec-loop"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker, max_deliveries=1)
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+        queue.ensure_group()
+    
+        enqueue_task(fake, QUEUE, _body("exec-loop", "acme"))
+        assert queue.read(block_ms=1) is not None  # 首投 → PEL
+    
+        # 修前：每轮 reclaim 泵 1 条副本 + 拒绝留 pending（A1 探针 R1 泵循环）。
+        # 修后：第 2 轮 reclaim 命中守卫写闸关闭 → 不泵副本 → 收容 ack。
+>       assert queue.read(block_ms=1) is None
+E       AssertionError: assert StreamTask(message_id='1792696762679-0', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-loop', 'resume...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation=None) is None
+E        +  where StreamTask(message_id='1792696762679-0', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-loop', 'resume...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation=None) = read(block_ms=1)
+E        +    where read = <plaita.server.task_queue.RedisStreamTaskQueue object at 0x1074bcb90>.read
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:188: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-loop 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1792696762677-0
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762677-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762677-0——不 ack、留 pending
+_ TestFourQuadrants.test_r2_legacy_carrier_dead_letter_reachable_even_terminal _
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestFourQuadrants object at 0x1073d90f0>
+
+    def test_r2_legacy_carrier_dead_letter_reachable_even_terminal(self):
+        """R2：legacy 载体×已发布世代×终态执行——死信经收容可达（原永滞 PEL）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-r2", _terminal_state("exec-r2"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker)
+        fake.hset(TENANT_STATUS_KEY, "beta", "active")
+        fake.hset(TENANT_STATUS_META_KEY, "beta",
+                  json.dumps({"tenant_generation": "g2"}))
+    
+        body = _body("exec-r2", "beta")  # 无 tenant_generation = legacy
+        mid = _to_pel(fake, body)
+        task = StreamTask(message_id=mid, body=dict(body), delivery_count=5)
+    
+        # 修前：每轮 allowed=False、DLQ=0、PEL 恒 1（A1 探针 R2 永不可达）。
+        # 修后：一轮即收容终局；ack 后 reclaim 不再见到该消息（多轮语义由
+        # test_r1_pump_loop_extinct_via_reclaim 端到端覆盖）。
+>       assert queue.dead_letter_if_allowed(task, reason="max_deliveries=5") is True
+E       AssertionError: assert False is True
+E        +  where False = dead_letter_if_allowed(StreamTask(message_id='1792696762688-0', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-r2', 'resume_t...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation=None), reason='max_deliveries=5')
+E        +    where dead_letter_if_allowed = <plaita.server.task_queue.RedisStreamTaskQueue object at 0x1075503e0>.dead_letter_if_allowed
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:233: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（generation_missing）：tenant=beta message=1792696762688-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（generation_missing）：tenant=beta message=1792696762688-0——不 ack、留 pending
+____________ TestGuardNoPump.test_guard_skips_pump_when_gate_closed ____________
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestGuardNoPump object at 0x1073edbd0>
+
+    def test_guard_skips_pump_when_gate_closed(self):
+        """守卫直格：写闸关闭（停用）⇒ True 且不入流任何副本（B125-01 组合）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-guard", _running_state("exec-guard"))
+        worker = _worker(fake, storage)
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+    
+        task = StreamTask(message_id="1-1", body=_body("exec-guard", "acme"),
+                          delivery_count=5)
+        assert worker._dead_letter_guard(task) is True
+>       assert fake.xlen(QUEUE) == 0, "写闸关闭不得克隆恢复副本"
+E       AssertionError: 写闸关闭不得克隆恢复副本
+E       assert 1 == 0
+E        +  where 1 = xlen('test:a125:tasks')
+E        +    where xlen = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=f7c640c062e049f8bf4033eeb82f84f5,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>.xlen
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:278: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-guard 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1-1
+__ TestGuardNoPump.test_guard_skips_pump_for_legacy_when_generation_published __
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestGuardNoPump object at 0x1073ede50>
+
+    def test_guard_skips_pump_for_legacy_when_generation_published(self):
+        """守卫直格：legacy×已发布世代（generation_missing）同样不泵副本。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-legacy", _running_state("exec-legacy"))
+        worker = _worker(fake, storage)
+        fake.hset(TENANT_STATUS_KEY, "beta", "active")
+        fake.hset(TENANT_STATUS_META_KEY, "beta",
+                  json.dumps({"tenant_generation": "g2"}))
+    
+        task = StreamTask(message_id="1-2", body=_body("exec-legacy", "beta"),
+                          delivery_count=5)  # 无世代
+        assert worker._dead_letter_guard(task) is True
+>       assert fake.xlen(QUEUE) == 0
+E       AssertionError: assert 1 == 0
+E        +  where 1 = xlen('test:a125:tasks')
+E        +    where xlen = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=6ddd508ea4534cfb87d0fb2eff845151,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>.xlen
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:293: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-legacy 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1-2
+____________ TestContainmentContract.test_quarantine_envelope_shape ____________
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestContainmentContract object at 0x1073edf90>
+
+    def test_quarantine_envelope_shape(self):
+        """收容信封与 dead_letter 同形 + 拒绝原因/收容标记，源代际全保留。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-env", _terminal_state("exec-env"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker)
+        fake.hset(TENANT_STATUS_KEY, "beta", "active")
+        fake.hset(TENANT_STATUS_META_KEY, "beta",
+                  json.dumps({"tenant_generation": "g2"}))
+    
+        body = _body("exec-env", "beta")
+        mid = _to_pel(fake, body)
+        task = StreamTask(message_id=mid, body=dict(body), delivery_count=5)
+    
+        queue.dead_letter_if_allowed(task, reason="probe-reason")
+>       (_id, fields), = _quarantine_entries(fake, "beta")
+        ^^^^^^^^^^^^^^
+E       ValueError: not enough values to unpack (expected 1, got 0)
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:328: ValueError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（generation_missing）：tenant=beta message=1792696762717-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（generation_missing）：tenant=beta message=1792696762717-0——不 ack、留 pending
+__________ TestContainmentContract.test_platform_dlq_purity_preserved __________
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestContainmentContract object at 0x1073ee0d0>
+
+    def test_platform_dlq_purity_preserved(self):
+        """#277 核心不变量锁定：收容语义下平台 DLQ 仍不收旧 payload。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-pure", _running_state("exec-pure"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker)
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+    
+        body = _body("exec-pure", "acme")
+        body["params"] = {"secret": "OLD-SECRET"}
+        mid = _to_pel(fake, body)
+        task = StreamTask(message_id=mid, body=dict(body), delivery_count=5)
+        queue.dead_letter_if_allowed(task, reason="max_deliveries=5")
+    
+        for _eid, fields in (fake.xrange(DLQ) or []):
+            assert "OLD-SECRET" not in str(fields)
+>       quarantined = json.loads(_quarantine_entries(fake, "acme")[0][1][PAYLOAD_FIELD])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:357: IndexError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-pure 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1792696762724-0
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762724-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762724-0——不 ack、留 pending
+_____ TestContainmentContract.test_quarantine_write_failure_leaves_pending _____
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestContainmentContract object at 0x1073da060>
+
+    def test_quarantine_write_failure_leaves_pending(self):
+        """收容写失败（Redis 故障族）⇒ False + 留 pending，绝不静默丢消息。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-fail", _running_state("exec-fail"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker)
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+    
+        body = _body("exec-fail", "acme")
+        mid = _to_pel(fake, body)
+        task = StreamTask(message_id=mid, body=dict(body), delivery_count=5)
+    
+        original_xadd = fake.xadd
+    
+        def boom(key, *a, **k):
+            if "quarantine" in str(key):
+                raise ConnectionError("redis down")
+            return original_xadd(key, *a, **k)
+    
+        fake.xadd = boom  # type: ignore[method-assign]
+        assert queue.dead_letter_if_allowed(task, reason="max_deliveries=5") is False
+        assert int(fake.xpending(QUEUE, GROUP)["pending"]) == 1
+>       assert queue.stats()["tenant_quarantine_failures"] == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'tenant_quarantine_failures'
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:401: KeyError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-fail 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1792696762732-0
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762732-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762732-0——不 ack、留 pending
+___ TestContainmentContract.test_ack_failure_returns_false_and_stays_pending ___
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestContainmentContract object at 0x1074c9370>
+
+    def test_ack_failure_returns_false_and_stays_pending(self):
+        """收容落盘后 ack 失败 ⇒ False + 留 pending（at-least-once，可重复收容）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-ack", _running_state("exec-ack"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker)
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+    
+        body = _body("exec-ack", "acme")
+        mid = _to_pel(fake, body)
+        task = StreamTask(message_id=mid, body=dict(body), delivery_count=5)
+    
+        def boom(_mid):
+            raise ConnectionError("ack failed")
+    
+        queue.ack = boom  # type: ignore[method-assign]
+        assert queue.dead_letter_if_allowed(task, reason="max_deliveries=5") is False
+        assert int(fake.xpending(QUEUE, GROUP)["pending"]) == 1
+>       assert _quarantine_len(fake, "acme") == 1, "收容条目已落盘（at-least-once）"
+E       AssertionError: 收容条目已落盘（at-least-once）
+E       assert 0 == 1
+E        +  where 0 = _quarantine_len(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=426db970954243bfbc6990cf0d7c28fb,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>, 'acme')
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:422: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:5415 执行 exec-ack 非终态且租约已空（持有者已死），原消息 delivery 已超限：已重新入队恢复路径，放行原消息死信: 1792696762740-0
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762740-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（tenant_disabled）：tenant=acme message=1792696762740-0——不 ack、留 pending
+_ TestContainmentContract.test_on_dead_letter_hook_fires_with_quarantine_marker _
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestContainmentContract object at 0x1073e9590>
+
+    def test_on_dead_letter_hook_fires_with_quarantine_marker(self):
+        """收容走 #26 告警钩子：quarantined/reject_reason 字段可与 DLQ 事件区分。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-hook", _terminal_state("exec-hook"))
+        fs = MemoryFlowStorage()
+        fs.save_flow(FLOW_DEF)
+        worker = RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name=QUEUE,
+            execution_storage=storage,
+            flow_storage=fs,
+            redis_client=fake,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+        events = []
+        queue = RedisStreamTaskQueue(
+            fake,
+            QUEUE,
+            group_name=GROUP,
+            consumer_name="c1",
+            max_deliveries=5,
+            dlq_key=DLQ,
+            claim_min_idle_ms=0,
+            dead_letter_guard=worker._dead_letter_guard,
+            on_dead_letter=events.append,
+        )
+        fake.hset(TENANT_STATUS_KEY, "beta", "active")
+        fake.hset(TENANT_STATUS_META_KEY, "beta",
+                  json.dumps({"tenant_generation": "g2"}))
+    
+        body = _body("exec-hook", "beta")
+        mid = _to_pel(fake, body)
+        task = StreamTask(message_id=mid, body=dict(body), delivery_count=5)
+        queue.dead_letter_if_allowed(task, reason="probe")
+    
+>       (event,) = events
+        ^^^^^^^^
+E       ValueError: not enough values to unpack (expected 1, got 0)
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:462: ValueError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（generation_missing）：tenant=beta message=1792696762748-0——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（generation_missing）：tenant=beta message=1792696762748-0——不 ack、留 pending
+________ TestContainmentContract.test_quarantine_trimmed_to_dlq_max_len ________
+
+self = <tests.unit.test_a125_dlq_tenant_gate_terminal_exit.TestContainmentContract object at 0x1073e9d00>
+
+    def test_quarantine_trimmed_to_dlq_max_len(self):
+        """收容流按键裁剪同 dlq_max_len——收容不是无界增长的新口子。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = _worker(fake, MemoryExecutionStorage())
+        queue = RedisStreamTaskQueue(
+            fake,
+            QUEUE,
+            group_name=GROUP,
+            consumer_name="c1",
+            max_deliveries=5,
+            dlq_key=DLQ,
+            claim_min_idle_ms=0,
+            dlq_max_len=3,
+            dead_letter_guard=worker._dead_letter_guard,
+        )
+        fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
+    
+        for i in range(6):
+            task = StreamTask(
+                message_id=f"{i + 1}-1",
+                body=_body(f"exec-trim-{i}", "acme"),
+                delivery_count=5,
+            )
+>           assert queue.dead_letter_if_allowed(
+                task, reason="max_deliveries=5"
+            ) is True
+E           AssertionError: assert False is True
+E            +  where False = dead_letter_if_allowed(StreamTask(message_id='1-1', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-trim-0', 'resume_type': 'c...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation=None), reason='max_deliveries=5')
+E            +    where dead_letter_if_allowed = <plaita.server.task_queue.RedisStreamTaskQueue object at 0x107576f90>.dead_letter_if_allowed
+
+tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py:491: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:1293 死信写入拒绝（tenant_disabled）：tenant=acme message=1-1——旧世代/已删租户，不写 DLQ、不 ack
+WARNING  plaita.server.task_queue:task_queue.py:1257 死信写入拒绝（tenant_disabled）：tenant=acme message=1-1——不 ack、留 pending
+=========================== short test summary info ============================
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestFourQuadrants::test_r1_disabled_tenant_contained_not_pumped
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestFourQuadrants::test_r1_pump_loop_extinct_via_reclaim
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestFourQuadrants::test_r2_legacy_carrier_dead_letter_reachable_even_terminal
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestGuardNoPump::test_guard_skips_pump_when_gate_closed
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestGuardNoPump::test_guard_skips_pump_for_legacy_when_generation_published
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestContainmentContract::test_quarantine_envelope_shape
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestContainmentContract::test_platform_dlq_purity_preserved
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestContainmentContract::test_quarantine_write_failure_leaves_pending
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestContainmentContract::test_ack_failure_returns_false_and_stays_pending
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestContainmentContract::test_on_dead_letter_hook_fires_with_quarantine_marker
+FAILED tests/unit/test_a125_dlq_tenant_gate_terminal_exit.py::TestContainmentContract::test_quarantine_trimmed_to_dlq_max_len
+11 failed, 4 passed in 0.66s

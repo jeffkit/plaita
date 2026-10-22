@@ -638,6 +638,9 @@ class RedisStreamTaskQueue:
             "config_budget_stale": 0,
             # plaita#277：旧世代/已删租户的 DLQ 迟到写拒绝计数。
             "tenant_write_rejected": 0,
+            # A125-01/02：写闸拒绝后的收容终局计数（含收容写失败）。
+            "tenant_quarantined": 0,
+            "tenant_quarantine_failures": 0,
         }
         self._last_family_warning_at = 0.0
         # 启动预检只在首次 read（组已建立）后跑一次。
@@ -1225,9 +1228,11 @@ class RedisStreamTaskQueue:
         任何调用方在决定死信前都必须走这里，判定与 ``_read_once`` /
         ``_reclaim_one`` 完全一致：
 
-        - 返回 ``True``：已死信（payload 进 DLQ，原消息已 ack）；
+        - 返回 ``True``：已死信（payload 进 DLQ，原消息已 ack）；租户写闸
+          拒绝时为**已收容终局**（信封进租户隔离流，原消息已 ack，见下）；
         - 返回 ``False``：守卫拒绝或抛异常（``dlq_guard_skipped`` 已计数），
-          消息**留在 pending**，调用方不得 ack，等下一轮处置；
+          消息**留在 pending**，调用方不得 ack，等下一轮处置；或收容写失败
+          （Redis 故障，同样留 pending 重试）；
         - 守卫为 ``None``（默认）：恒放行——存量行为零变化。
 
         覆盖 ``payload``/``extra`` 只给畸形消息信封用（原始串 + raw_fields）；
@@ -1237,6 +1242,11 @@ class RedisStreamTaskQueue:
         ``dead_letter``，在瞬态故障/活租约场景把唯一恢复载体 ack 出 PEL。
         信封版本拒收（A42-05）与畸形 payload（B44-05）是同一契约下的另两处
         历史旁路：现在都经由本方法。
+
+        A125-01/02：租户写闸（#277）拒绝不再是「留 pending 永久滞留」——
+        那让超投递原消息永无终局（每轮 reclaim×拒绝 churn；守卫恢复分支还
+        会每轮泵 1 条注定被派发闸丢弃的副本）。现在改收容语义：信封写**租
+        户隔离流** + ack 原消息（终局出口），平台 DLQ 纯净性不变。
         """
         if not self._guard_allows_dead_letter(task):
             return False
@@ -1250,15 +1260,147 @@ class RedisStreamTaskQueue:
         try:
             self.dead_letter(task, reason=reason, **overrides)
         except TenantWriteRejected as rejected:
-            # plaita#277：旧世代/已删租户的迟到死信写被拒——不 ack、不入 DLQ，
-            # 消息留 pending（安全方向）；调用方据此保持原状。
-            reject_reason = str(rejected.reason or "unknown")
-            rejected_tenant = str(rejected.tenant_id or "?")
+            # plaita#277：旧世代/已删租户的迟到死信写被拒——平台 DLQ 不收。
+            # A125-01/02：拒绝后不无限留 pending，收容到租户隔离流并 ack
+            # （终局）；收容失败（Redis 故障）才留 pending 等下一轮。
+            return self._quarantine_rejected_dead_letter(
+                task, rejected, reason=reason, overrides=overrides
+            )
+        return True
+
+    def _quarantine_rejected_dead_letter(
+        self,
+        task: StreamTask,
+        rejected: TenantWriteRejected,
+        *,
+        reason: str,
+        overrides: Dict[str, Any],
+    ) -> bool:
+        """租户写闸拒绝后的收容终局（A125-01/02）。
+
+        #277 把平台 DLQ 设为 fail-closed 写闸（旧世代/已删租户的 payload
+        不得回流平台级键），但「拒绝后留 pending」让原消息永无终局出口
+        （A125-02：legacy 载体「执行得到、死不掉」；A125-01：停用租户的
+        超投递载体每轮被守卫泵 1 条垃圾副本）。收容语义补齐终局：
+
+        - 信封（与 ``dead_letter`` 同形 + ``tenant_write_rejected`` /
+          ``quarantined``）写**租户隔离流** ``{dlq_key}:quarantine:{tenant}``
+          ——按键隔离，同名重建租户的 worker 不读此流；按 ``dlq_max_len``
+          裁剪防无界；条目可观察（XLEN/XRANGE）、可救（租户恢复后按信封内
+          源世代/信封版本人工重放，与 DLQ replay 同思路）。刻意不随租户
+          删除清理（证据保全；键数以租户数为上界）。
+        - 原消息 ack 出 PEL（终局）。ack 失败返回 False 留 pending 重试
+          ——收容条目可能重复，at-least-once，与 DLQ ack 失败同语义。
+
+        返回 ``True`` = 已收容终局；``False`` = 无法收容（无 Redis/写失败/
+        ack 失败），消息留 pending 等下一轮（存量语义）。
+        """
+        if self.redis is None:
+            return False
+        tenant_id = str(rejected.tenant_id or "?")
+        reject_reason = str(rejected.reason or "unknown")
+        quarantine_key = f"{self.dlq_key}:quarantine:{tenant_id}"
+        envelope = {
+            "reason": reason,
+            "source_stream": self.stream_key,
+            "source_id": task.message_id,
+            "delivery_count": task.delivery_count,
+            "dead_lettered_at": time.time(),
+            "schema_version": task.schema_version,
+            # B2R31-01/#283：保留源代际证据，replay 不猜来源。
+            "config_family": task.config_family,
+            "config_generation": task.config_generation,
+            "budget_generation": task.budget_generation,
+            "config_effective_at": task.config_effective_at,
+            "tenant_generation": task.tenant_generation,
+            # A125：写闸拒绝的具名原因（tenant_disabled / generation_missing
+            # / generation_changed / status_read_failed）。
+            "tenant_write_rejected": reject_reason,
+            "quarantined": True,
+            "payload": task.body,
+        }
+        if "payload" in overrides:
+            envelope["payload"] = overrides["payload"]
+        extra = overrides.get("extra")
+        if extra:
+            envelope.update(extra)
+        try:
+            quarantined_id = self.redis.xadd(
+                quarantine_key,
+                {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
+            )
+            try:
+                trimmed = int(
+                    self.redis.xtrim(
+                        quarantine_key, maxlen=self.dlq_max_len, approximate=False
+                    )
+                    or 0
+                )
+            except Exception as exc:  # noqa: BLE001 — 裁剪失败降级：计数+WARNING
+                self._metrics["dlq_trim_failures"] += 1
+                logger.warning(
+                    "收容流 xtrim(%s, maxlen=%s) failed（无界增长）: %s",
+                    quarantine_key,
+                    self.dlq_max_len,
+                    _scrub_url_text(exc),
+                )
+                trimmed = 0
+        except Exception as exc:  # noqa: BLE001 — 收容写失败：留 pending 重试
+            self._metrics["tenant_quarantine_failures"] = (
+                self._metrics.get("tenant_quarantine_failures", 0) + 1
+            )
             logger.warning(
-                "死信写入拒绝（%s）：tenant=%s message=%s——不 ack、留 pending",
-                reject_reason,
-                rejected_tenant,
-                getattr(task, "message_id", "?"),
+                "死信收容写失败（tenant=%s quarantine=%s）——消息留 pending: %s",
+                tenant_id,
+                quarantine_key,
+                _scrub_url_text(exc),
+            )
+            return False
+        self._metrics["tenant_quarantined"] += 1
+        if trimmed:
+            self._metrics["dlq_trimmed"] += trimmed
+        logger.error(
+            "Dead-letter quarantined task %s -> %s id=%s (tenant=%s rejected=%s, %s)",
+            task.message_id,
+            quarantine_key,
+            _decode(quarantined_id),
+            tenant_id,
+            reject_reason,
+            reason,
+        )
+        # A125：收容也走 #26 告警钩子——事件字段带 quarantined/reject_reason
+        # 与 DLQ 事件可区分；best-effort，与 dead_letter 同口径。
+        if self.on_dead_letter is not None:
+            try:
+                self.on_dead_letter({
+                    "event": "dead_letter",
+                    "queue": self.stream_key,
+                    "dlq_key": quarantine_key,
+                    "dlq_id": _decode(quarantined_id),
+                    "quarantined": True,
+                    "reject_reason": reject_reason,
+                    "tenant_id": tenant_id,
+                    "message_id": task.message_id,
+                    "delivery_count": task.delivery_count,
+                    "schema_version": task.schema_version,
+                    "config_family": task.config_family,
+                    "config_generation": task.config_generation,
+                    "budget_generation": task.budget_generation,
+                    "reason": reason,
+                    "ts": time.time(),
+                })
+            except Exception as exc:  # noqa: BLE001 - 告警旁路
+                logger.warning("收容告警钩子失败: %s", _scrub_url_text(exc))
+        try:
+            self.ack(task.message_id)
+        except Exception as exc:  # noqa: BLE001 — ack 失败：留 pending 重试
+            self._metrics["dlq_ack_failures"] += 1
+            logger.warning(
+                "收容后 ack 失败（quarantine_id=%s, message_id=%s）——消息留 "
+                "pending，重试将产生重复收容条目（at-least-once）: %s",
+                _decode(quarantined_id),
+                task.message_id,
+                _scrub_url_text(exc),
             )
             return False
         return True

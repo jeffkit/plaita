@@ -137,7 +137,11 @@ from plaita.tenant_context import (
     reset_current_tenant_generation,
     set_current_tenant_generation,
 )
-from plaita.server.tenant_status import read_tenant_generation, tenant_is_active
+from plaita.server.tenant_status import (
+    read_tenant_generation,
+    tenant_is_active,
+    tenant_write_allowed,
+)
 # plaita#28：每租户 start 准入配额（最小公平性原语）。console 入口超限 429、
 # worker 对无名额的外部生产方消息超限延迟重投；原语细节见 tenant_quota 模块。
 from plaita.server.tenant_quota import (
@@ -5401,6 +5405,27 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 return True
         finally:
             reset_current_tenant(token)
+
+        # A125-01：租户写闸关闭（停用墓碑/世代变更/legacy×已发布世代）时，
+        # 恢复副本注定过不了派发闸（tenant_is_active / #283 世代闸），克隆只
+        # 会形成「每轮泵 1 条垃圾副本」的泵循环（DLQ 写闸同闭 ⇒ 原消息留
+        # pending ⇒ 下轮再泵）。不克隆，放行死信——DLQ 写闸虽同样拒绝，队列
+        # 层会收容到租户隔离流并 ack 原消息（A125 终局出口）；执行态保持不
+        # 动，租户恢复后经 console resume / 隔离流按源世代重放可救。
+        gate_allowed, gate_reason = tenant_write_allowed(
+            self.redis_client,
+            body.get("tenant_id"),
+            getattr(task, "tenant_generation", None),
+        )
+        if not gate_allowed:
+            logger.warning(
+                "死信守卫：租户 %s 写闸关闭（%s），不克隆恢复副本（派发闸必丢），"
+                "放行死信交队列层收容终局: %s",
+                body.get("tenant_id") or "default",
+                gate_reason,
+                getattr(task, "message_id", "?"),
+            )
+            return True
 
         try:
             # A44-02：恢复副本继承源信封版本（混跑池里旧 worker 仍可接管）。

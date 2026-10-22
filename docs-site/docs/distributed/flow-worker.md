@@ -147,7 +147,11 @@ worker 的执行；调大到超过最长步骤耗时，可减少 `lease_conflict
 pending；执行仍非终态但**节点重试计数已达预算**（见下节）则终态化 error 后
 放行（不再重入队——重入队会让 delivery 归 1 再耗尽，无限循环）；租约/状态
 查询失败同样保守跳过；非终态且租约空（持有者已死）重入队一份 delivery 归 1
-的恢复消息后放行。
+的恢复消息后放行。**例外（A125-01）**：克隆前先过租户写闸
+`tenant_write_allowed`（带载体源世代）——停用墓碑/世代变更/legacy×已发布
+世代时写闸关闭，恢复副本注定被派发闸丢弃（克隆只会形成「每轮泵 1 条垃圾
+副本」的泵循环），守卫不克隆、放行死信交队列层收容终局（见下）；执行态
+不动，租户恢复后经 console resume 或隔离流按源世代重放可救。
 
 **死信路径收敛（#252）**：`run()` 兜底异常分支
 （`ExecutionStateLoadError` / `StatePersistError` 等瞬态失败的落点）、
@@ -156,7 +160,13 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 队列层 `dead_letter_if_allowed` 单一入口）：守卫拒绝/抛异常时**不 ack**，消息
 留 pending 等下一轮处置并推进 `dlq_guard_skipped`；守卫为 `None`（默认）恒
 放行，存量行为不变。DLQ 信封固定带 `schema_version`（畸形消息另带
-`raw_fields`），审计与重放不靠猜。
+`raw_fields`），审计与重放不靠猜。**租户写闸拒绝的收容终局（A125-01/02）**：
+`dead_letter_if_allowed` 捕获 `TenantWriteRejected` 后不再「留 pending 永久
+滞留」——信封（与 DLQ 同形，另带 `tenant_write_rejected` 具名原因与
+`quarantined` 标记）写**租户隔离流** `{dlq}:quarantine:{tenant}` 并 ack 原消息
+（终局出口）；平台 DLQ 纯净性不变，隔离流按键裁剪（同 `PLAITA_DLQ_MAX_LEN`）、
+刻意不随租户删除清理（证据保全），租户恢复后可按信封内源世代人工重放。
+`tenant_quarantined` / `tenant_quarantine_failures` 计数入 `/metrics` 快照。
 
 **超版本拒收不触发死信守卫的「克隆恢复」（A49-01）**：守卫在「执行非终态 +
 租约空」时会重入队一份恢复副本再放行原条死信，但该恢复路径对**版本拒收**不
