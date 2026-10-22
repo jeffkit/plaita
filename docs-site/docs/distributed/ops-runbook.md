@@ -795,13 +795,16 @@ WARNING + 回退默认（见下方非法值矩阵；`_POLL_SECONDS`/`_RECONCILE_
   （10000）= 结果可能是截断窗，仍按「无法核实」拒绝）；「无法核实」一律
   503 `version_in_use_scan_failed`（fail-closed，不带疑删除）——覆盖
   Redis 不可达，也覆盖探活通过后的批量读故障与索引回填降级（#307：
-  strict 读，部分索引不作「已核实」）。**503 文案按瞬态/持久分流**
-  （#307 追补 A126-02）：Redis 抖动等瞬态故障提示「稍后重试」；扫描遇
-  **损坏的执行状态行**（跨版本 schema 变更后存量行反序列化失败的现实面）
-  是持久缺陷，重试无效——503 detail 与 WARNING 日志均具名坏行
+  strict 读，部分索引不作「已核实」）。**503 文案按瞬态/持久分流三类**
+  （#307 追补 A126-02 + A133-01）：Redis 抖动等瞬态故障提示「稍后重试」；
+  扫描遇**损坏的执行状态行**（跨版本 schema 变更后存量行反序列化失败的
+  现实面）是持久缺陷，重试无效——503 detail 与 WARNING 日志均具名坏行
   （`state_key=plaita:execution:<id>` + 原因摘要，不含行值），处置程序见
-  下方「删除守卫 503 的坏行处置」。本地档（无 Redis）引用判据退化为
-  状态守卫，断链兜底交 worker 侧具名终态。
+  下方「删除守卫 503 的坏行处置」；**饱和触顶**（flow 执行数 ≥ 单次扫描
+  上限，具名子类 `VersionInUseScanSaturatedError`）同为持久——「重试无效，
+  调大 env `PLAITA_GUARD_SCAN_SINGLE_LIMIT`（默认 10000）后重启 console，
+  或先清理该 flow 终态执行」，处置程序见下方「删除守卫 503 的饱和处置」。
+  本地档（无 Redis）引用判据退化为状态守卫，断链兜底交 worker 侧具名终态。
 - 守卫通过后才发生：outbox 目标清理 → 删行 → 引擎定义键清理——**真源
   清理只在「确认无引用」之后**（#301/#303 的删除协议不变，串在其后）。
 - **删除快照钉扎**（A134-02，2026-10 起）：守卫判据与删行之间不再有
@@ -831,12 +834,29 @@ WARNING + 回退默认（见下方非法值矩阵；`_POLL_SECONDS`/`_RECONCILE_
 4. 「稍后重试」文案只对瞬态（Redis 抖动、批量读超时）成立；detail 里出现
    `state_key=` 字样即属持久类，重试无效。
 
+**删除守卫 503 的饱和处置**（A133-01）：症状是「大 flow 删除恒 503、
+message 以 `饱和=持久` 开头」——flow 执行数达到单次扫描上限
+`PLAITA_GUARD_SCAN_SINGLE_LIMIT`（默认 10000，env 可调），返回值可能是
+截断窗，守卫拒绝「不带疑删除」。这不是故障而是容量与配置的关系，重试
+无效。自助路径（按代价排序）：
+
+1. **清理终态执行**：该 flow 的 completed/error/cancelled 历史执行清到
+   上限以下（终态行不参与引用判据，清理不影响在途执行），重试 delete。
+2. **调大上限**：env `PLAITA_GUARD_SCAN_SINGLE_LIMIT` 设更大值后重启
+   console。注意上限越大，守卫单次扫描的内存/反序列化代价越大
+   （O(T) 整载租户索引）——按最大 flow 的执行数量级给值，不要无界放大。
+3. 非法 env 值（非整数/≤0）不静默生效：回落默认 10000 并打 WARNING，
+   不会因此拆掉 fail-closed 闸。
+
 **worker 兜底（具名终态）**：定义仍可能因竞窗/直写引擎存储/未发布版本而
 缺失——`start_flow`/`resume_flow` 取定义失败不再走裸 ValueError poison
 ack：执行被终态化 `error`（`error.error_type="flow_definition_missing"`，
 机器可判），start 准入名额同步释放（queued 幽灵行与名额泄漏一并收口）；
-版本恢复/重发后可 `resume_type=retry` 从断点唤醒（G1「error 态可反复
-唤醒」语义保留）。值守口径：**卡死 suspended/queued 行先查
+终态化前的**状态读盘瞬断**按「交还重投」处理（#310：抛非 ValueError
+瞬态 `StatePersistError`，消息留 pending 等 at-least-once 重投——修前
+裸 return 会随定义缺失异常被 poison ack，执行行永驻非终态）；版本恢复/
+重发后可 `resume_type=retry` 从断点唤醒（G1「error 态可反复唤醒」语义
+保留）。值守口径：**卡死 suspended/queued 行先查
 `error.error_type`**——本节生效后新产生的定义缺失执行必有终态与明细；
 历史陈尸行（修复前产生、无 error 字段）需人工 retry/取消收尸。
 

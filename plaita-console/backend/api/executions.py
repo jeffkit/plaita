@@ -480,7 +480,43 @@ def _runtime_queue_for_flow(flow_id: Any, version: Any,
 # 等价、代价回 O(T)。上限饱和 = 结果可能是截断窗 → 与「无法核实」同判据
 # fail-closed，不静默截断——大 limit 显式传参 ≠ 不传，#307 修前「默认
 # 参数当全量」的形态被显式传参与饱和检查双重拦住。
-_GUARD_SCAN_SINGLE_LIMIT = 10_000
+#
+# A133-01：上限具名 env 旋钮 ``PLAITA_GUARD_SCAN_SINGLE_LIMIT``——触顶租户
+# 原先对上限无自助面（大 flow 执行数天然 ≥ 10000 ⇒ delete 永久 503，唯一
+# 出路是改代码重发布）。默认 10000 不变；非法值（非整数/≤0）不静默生效，
+# 回落默认并 WARNING（配置面坏了不能顺手把 fail-closed 闸拆了）。
+_GUARD_SCAN_LIMIT_ENV = "PLAITA_GUARD_SCAN_SINGLE_LIMIT"
+_GUARD_SCAN_SINGLE_LIMIT_DEFAULT = 10_000
+
+
+def _guard_scan_limit_from_env(env=None) -> int:
+    """读 ``PLAITA_GUARD_SCAN_SINGLE_LIMIT``（A133-01 具名旋钮）。
+
+    ``env`` 缺省读 ``os.environ``（测试可直接喂 mapping，免 import-time
+    reload）。缺省/空 → 默认 10000；非整数或 ≤0 → 回落默认并 WARNING。
+    """
+    mapping = os.environ if env is None else env
+    raw = mapping.get(_GUARD_SCAN_LIMIT_ENV)
+    if not raw:
+        return _GUARD_SCAN_SINGLE_LIMIT_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "env %s=%r 不是整数，回落默认 %d（删除守卫扫描上限保持 fail-closed）",
+            _GUARD_SCAN_LIMIT_ENV, raw, _GUARD_SCAN_SINGLE_LIMIT_DEFAULT,
+        )
+        return _GUARD_SCAN_SINGLE_LIMIT_DEFAULT
+    if value <= 0:
+        logger.warning(
+            "env %s=%r 非正整数，回落默认 %d（删除守卫扫描上限保持 fail-closed）",
+            _GUARD_SCAN_LIMIT_ENV, raw, _GUARD_SCAN_SINGLE_LIMIT_DEFAULT,
+        )
+        return _GUARD_SCAN_SINGLE_LIMIT_DEFAULT
+    return value
+
+
+_GUARD_SCAN_SINGLE_LIMIT = _guard_scan_limit_from_env()
 
 
 class VersionInUseScanError(Exception):
@@ -488,6 +524,17 @@ class VersionInUseScanError(Exception):
 
     删除方收到后应拒绝删除（503）：「无法核实无引用」不等于「无引用」，
     带疑删除会复现 #304 的在途断链。
+    """
+
+
+class VersionInUseScanSaturatedError(VersionInUseScanError):
+    """删除守卫扫描触顶（flow 执行数 ≥ 单次扫描上限）——**持久** fail-closed。
+
+    与瞬态（Redis 不可达/读故障）的本质区别：触顶是数据量与上限配置的
+    关系，「稍后重试」永远不会自愈——大 flow 连删恒 503（A133-01：违
+    A126-02「持久拒绝不指引重试」）。删除守卫的 503 文案分流据此给第三类：
+    饱和 = 持久，具名当前上限与自助路径（调大
+    ``PLAITA_GUARD_SCAN_SINGLE_LIMIT`` 后重启 console，或先清理终态执行）。
     """
 
 
@@ -540,10 +587,14 @@ def find_flow_version_active_executions(
         ) from exc
     if len(scan) >= _GUARD_SCAN_SINGLE_LIMIT:
         # 饱和 = 返回值可能是截断窗，窗外可能仍有非终态引用——不静默当
-        # 「穷尽核实过」（与 #307 的 fail-closed 同判据）。
-        raise VersionInUseScanError(
+        # 「穷尽核实过」（与 #307 的 fail-closed 同判据）。具名子类
+        # （A133-01）：饱和是**持久**拒绝（数据量 vs 上限配置），删除守卫
+        # 的 503 文案分流据此给第三类（不落「稍后重试」），并把上限与
+        # 自助旋钮具名给到运维。
+        raise VersionInUseScanSaturatedError(
             f"在途执行引用扫描触顶（flow {flow_id} 执行数 ≥ 单次扫描上限 "
-            f"{_GUARD_SCAN_SINGLE_LIMIT}），结果可能是截断窗，删除守卫无法穷尽核实"
+            f"{_GUARD_SCAN_SINGLE_LIMIT}，env {_GUARD_SCAN_LIMIT_ENV} 可调），"
+            f"结果可能是截断窗，删除守卫无法穷尽核实"
         )
     matched = [
         s for s in scan

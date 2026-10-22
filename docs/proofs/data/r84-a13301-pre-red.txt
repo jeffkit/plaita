@@ -1,0 +1,10 @@
+# r84 单② A133-01 负控 pre-red（stash 修复后基线 d34701e 实测：4F/2P——①④⑤+具名身份红，②③守恒绿锁定）
+
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py::test_saturation_503_persistent_guidance_not_retry
+FAILED plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py::test_cap_hit_then_raise_knob_unlocks_delete
+FAILED plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py::test_env_knob_parsing
+FAILED plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py::test_saturated_subclass_identity
+4 failed, 2 passed, 29 warnings in 1.21s

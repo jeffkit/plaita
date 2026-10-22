@@ -50,11 +50,13 @@ except ImportError:
 try:  # plaita#304：版本删除守卫的在途引用扫描（执行域助手单点在 executions）
     from .executions import (
         VersionInUseScanError,
+        VersionInUseScanSaturatedError,
         find_flow_version_active_executions,
     )
 except ImportError:  # pragma: no cover - 平铺布局（cwd=backend）运行时
     from executions import (  # type: ignore
         VersionInUseScanError,
+        VersionInUseScanSaturatedError,
         find_flow_version_active_executions,
     )
 
@@ -661,7 +663,15 @@ def _enforce_version_delete_guard(
         # 「稍后重试」对它是错误指引（连删恒 503、非 strict 列表表面健康）；
         # ``str(e)`` 已含守卫透传的具名 state key / execution_id，运维据此
         # 直接定位，处置程序见 ops-runbook「删除守卫 503 的坏行处置」。
-        if isinstance(e.__cause__, ExecutionStateCorruptError):
+        # A133-01 追补第三类：饱和触顶同为**持久**（数据量 vs 上限配置，
+        # 「稍后重试」永不自愈）——具名当前上限与 env 旋钮自助路径。
+        if isinstance(e, VersionInUseScanSaturatedError):
+            guidance = (
+                "饱和=持久：flow 执行数已达删除守卫单次扫描上限（数值见本消息"
+                "末尾），重试无效——调大 env PLAITA_GUARD_SCAN_SINGLE_LIMIT 后"
+                "重启 console，或先清理该 flow 终态执行后再删"
+            )
+        elif isinstance(e.__cause__, ExecutionStateCorruptError):
             guidance = (
                 "执行状态索引存在损坏行（下方具名 state_key），重试无效——"
                 "按 ops-runbook「删除守卫 503 的坏行处置」核实并修复/清理该行后再删"

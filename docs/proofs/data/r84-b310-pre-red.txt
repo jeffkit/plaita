@@ -1,0 +1,42 @@
+# r84 单① #310 负控 pre-red（基线 d34701e，修复前）
+
+            worker.stop()
+    
+        queue.on_failed = on_failed
+        queue.on_poison = on_poison
+    
+        import threading
+    
+        thread = threading.Thread(target=worker.run, daemon=True)
+        thread.start()
+        thread.join(timeout=10.0)
+        assert not thread.is_alive(), "run() 未在交付二 poison 后退出"
+>       assert done["failed"], "交付一未走 note_failed（未触发瞬态不 ack 路径）"
+E       AssertionError: 交付一未走 note_failed（未触发瞬态不 ack 路径）
+E       assert False
+
+tests/unit/test_issue310_definition_missing_read_failure.py:245: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow_worker.py:2399 定义缺失终态化前读盘失败（交还重投，不终态化）: execution=exec-b310: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 3885, in resume_flow
+    flow = self.get_flow_definition(flow_id, version)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue310_definition_missing_read_failure.py", line 206, in missing_get_flow_definition
+    raise FlowDefinitionMissingError(
+        f"injected: flow {flow_id}@{version} missing (#310)"
+    )
+plaita.server.flow_worker.FlowDefinitionMissingError: injected: flow f1@1 missing (#310)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/flow_worker.py", line 2397, in _terminalize_definition_missing
+    state = self.execution_storage.load_execution_state(execution_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue310_definition_missing_read_failure.py", line 79, in gated_load
+    raise OSError("injected transient read failure (#310)")
+OSError: injected transient read failure (#310)
+
+ERROR    plaita:flow_worker.py:7275 丢弃无效任务 msg-310-d1: injected: flow f1@1 missing (#310)
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue310_definition_missing_read_failure.py::test_terminalize_read_failure_raises_transient_row_untouched
+FAILED tests/unit/test_issue310_definition_missing_read_failure.py::test_resume_read_failure_not_acked_redelivery_terminalizes
+2 failed in 0.49s

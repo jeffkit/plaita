@@ -1,0 +1,5 @@
+# r84 单② A133-01 负控 post-green（修法恢复后：6P）
+
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+6 passed, 30 warnings in 1.23s

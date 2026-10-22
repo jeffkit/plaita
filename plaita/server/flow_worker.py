@@ -2400,7 +2400,17 @@ class FlowWorker:
                     "定义缺失终态化前读盘失败（交还重投，不终态化）: "
                     "execution=%s: %s", execution_id, _scrub_exception_text(exc),
                 )
-                return
+                # #310：必须以非 ValueError 瞬态上抛——裸 return 会让调用方
+                # 原样 raise FlowDefinitionMissingError（⊂ValueError），run()
+                # 按 ValueError poison ack：消息被吃、重投从未发生，「交还
+                # 重投」注释成谎，执行行永驻非终态（start 名额等 24h TTL
+                # 兜底）。抛 StatePersistError（RuntimeError 族）让消息留
+                # pending 等 at-least-once 重投；重投后读盘恢复且定义仍缺失
+                # → 走上方正常终态化。
+                raise StatePersistError(
+                    f"定义缺失终态化前读盘失败（交还重投）: "
+                    f"execution={execution_id}"
+                ) from exc
             if state is None:
                 # 无状态行（未走 console 占位、就地铸造 id 的 start）：没有
                 # 可观测对象，poison ack 即终局，无幽灵行可言。
