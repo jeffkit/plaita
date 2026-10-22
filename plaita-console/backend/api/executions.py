@@ -471,9 +471,16 @@ def _runtime_queue_for_flow(flow_id: Any, version: Any,
 
 # ---- plaita#304：版本删除守卫的在途引用扫描 ----
 
-# 判据读面翻页页宽（#307）：与存储层默认页一致；判据语义是「穷尽」，页宽
-# 只影响往返次数不影响结果——收满 limit 条非终态或取到短页/空页即停。
-_GUARD_SCAN_PAGE_SIZE = 100
+# 判据读面单次扫描上限（#307 追补 A126-01）：存储层 query 分支对每页都
+# ``_index_slice(0, None)`` + mget **整载租户全索引**再内存过滤，``offset``
+# 只作用于过滤后切片——#307 的翻页穷尽因此是 O(pages×T)（实弹 T=1600/
+# flow 800 终态：9 页 = 9 次整载 / 14400 次反序列化 = 单次大 limit 对照
+# 9.0×、墙钟 ~24×；delete 端点 O(M/100×T) 无墙钟上限）。守卫改**单次大
+# limit 显式传参**一次取回该 flow 全部执行（终态+非终态），穷尽性与翻页
+# 等价、代价回 O(T)。上限饱和 = 结果可能是截断窗 → 与「无法核实」同判据
+# fail-closed，不静默截断——大 limit 显式传参 ≠ 不传，#307 修前「默认
+# 参数当全量」的形态被显式传参与饱和检查双重拦住。
+_GUARD_SCAN_SINGLE_LIMIT = 10_000
 
 
 class VersionInUseScanError(Exception):
@@ -500,15 +507,18 @@ def find_flow_version_active_executions(
 
     #307 两处判据读面失效的修口（都在本函数收口）：
 
-    - **翻页穷尽**：显式 limit+offset 循环取全量，不在存储层默认
-      ``limit=100``（升序、保最老）的窗口上截断——忙 flow 的尾部非终态
-      执行（审批/人工介入的挂起执行最典型）此前对守卫不可见，force
-      删除放行。收满 ``limit`` 条即提前停（判据只需证明「有引用」，
-      清单按 start_time 升序取前 limit 条语义不变）。
+    - **穷尽**：判据读面不得停在存储层默认 ``limit=100``（升序、保最老）
+      的窗口上截断——忙 flow 的尾部非终态执行（审批/人工介入的挂起执行
+      最典型）此前对守卫不可见，force 删除放行。#307 追补（A126-01）：
+      实现从翻页穷尽改**单次大 limit 显式传参**——query 分支每页整载
+      租户全索引，翻页 = O(pages×T) 反序列化，单次取回该 flow 全部执行
+      穷尽性等价、代价回 O(T)；返回仍按 ``limit`` 截断（判据只需证明
+      「有引用」，清单按 start_time 升序取前 limit 条语义不变）。
     - **fail-closed**：判据路径以 ``strict=True`` 读索引，批量读失败
       （mget/scan_iter 超时等，ping 探活拦不住的故障）与探活失败同样
       转具名 ``VersionInUseScanError`` → 503 ``version_in_use_scan_failed``，
-      不再被吞成空列表判「无引用」放行。
+      不再被吞成空列表判「无引用」放行；单次扫描上限饱和（该 flow 执行
+      数 ≥ ``_GUARD_SCAN_SINGLE_LIMIT``，结果可能是截断窗）同判据拒绝。
     """
     if redis is None:
         return []
@@ -519,28 +529,27 @@ def find_flow_version_active_executions(
             f"在途执行引用扫描失败（Redis 不可达），删除守卫无法核实: {exc}"
         ) from exc
     storage = RedisExecutionStorage(client=redis, namespace=tenant_namespace(tenant))
-    matched: List[ExecutionState] = []
-    offset = 0
     try:
-        while len(matched) < limit:
-            page = storage.list_executions(
-                query={"flow_id": flow_id},
-                limit=_GUARD_SCAN_PAGE_SIZE, offset=offset, strict=True,
-            )
-            if not page:
-                break
-            matched.extend(
-                s for s in page
-                if (version is None or getattr(s, "flow_version", None) == version)
-                and getattr(s, "status", None) not in TERMINAL_EXECUTION_STATUSES
-            )
-            if len(page) < _GUARD_SCAN_PAGE_SIZE:
-                break
-            offset += _GUARD_SCAN_PAGE_SIZE
+        scan = storage.list_executions(
+            query={"flow_id": flow_id},
+            limit=_GUARD_SCAN_SINGLE_LIMIT, offset=0, strict=True,
+        )
     except Exception as exc:  # noqa: BLE001 — 读不了即无法核实，交调用方拒绝
         raise VersionInUseScanError(
             f"在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: {exc}"
         ) from exc
+    if len(scan) >= _GUARD_SCAN_SINGLE_LIMIT:
+        # 饱和 = 返回值可能是截断窗，窗外可能仍有非终态引用——不静默当
+        # 「穷尽核实过」（与 #307 的 fail-closed 同判据）。
+        raise VersionInUseScanError(
+            f"在途执行引用扫描触顶（flow {flow_id} 执行数 ≥ 单次扫描上限 "
+            f"{_GUARD_SCAN_SINGLE_LIMIT}），结果可能是截断窗，删除守卫无法穷尽核实"
+        )
+    matched = [
+        s for s in scan
+        if (version is None or getattr(s, "flow_version", None) == version)
+        and getattr(s, "status", None) not in TERMINAL_EXECUTION_STATUSES
+    ]
     return matched[:limit]
 
 

@@ -62,6 +62,9 @@ try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
 except ImportError:
     from error_contract import error_detail, scrubbed_detail
 
+# A126-02：扫描 503 文案按瞬态/持久分流（持久 = 坏行具名，重试无效）
+from plaita.storage.redis import ExecutionStateCorruptError
+
 try:  # plaita#300：runtime 能力门 + 池路由取值域
     from ..services.capability_gate import UnsupportedNodeTypesError, gate_flow_nodes
     from ..services.runtime_pools import normalize_runtime
@@ -439,12 +442,22 @@ def _enforce_version_delete_guard(
             redis, tenant, flow_id, scan_version
         )
     except VersionInUseScanError as e:
+        # A126-02：文案按瞬态/持久分流。坏行（反序列化失败）是持久缺陷——
+        # 「稍后重试」对它是错误指引（连删恒 503、非 strict 列表表面健康）；
+        # ``str(e)`` 已含守卫透传的具名 state key / execution_id，运维据此
+        # 直接定位，处置程序见 ops-runbook「删除守卫 503 的坏行处置」。
+        if isinstance(e.__cause__, ExecutionStateCorruptError):
+            guidance = (
+                "执行状态索引存在损坏行（下方具名 state_key），重试无效——"
+                "按 ops-runbook「删除守卫 503 的坏行处置」核实并修复/清理该行后再删"
+            )
+        else:
+            guidance = "稍后重试"
         raise HTTPException(
             status_code=503,
             detail=error_detail(
                 "version_in_use_scan_failed",
-                "在途执行引用核实失败，拒绝删除（fail-closed）：稍后重试；"
-                f"{e}",
+                f"在途执行引用核实失败，拒绝删除（fail-closed）：{guidance}；{e}",
             ),
         ) from e
     if active:
