@@ -454,7 +454,7 @@ class RedisExecutionStorage(ExecutionStorage):
             return None
         return suffix
 
-    def _ensure_execution_index(self) -> None:
+    def _ensure_execution_index(self, strict: bool = False) -> None:
         """存量库懒回填：就绪标记缺失时把已有状态键补进索引一次。
 
         升级前写入的执行没有索引成员——不回填它们会从列表静默消失。
@@ -462,6 +462,10 @@ class RedisExecutionStorage(ExecutionStorage):
         此后列表全程走索引。单个键读不到或反序列化失败只跳过该键（本次
         退化为「部分索引」）；扫描/管道整体失败则整批丢弃、就绪标记不置位，
         下次 list 重试回填。
+
+        ``strict=True``（#307）：上述降级（整批失败、单键跳过）改为原样
+        上抛——部分索引对判据面意味着「无法核实」（被跳过的键可能正是
+        那条非终态执行），不得当「核实过无数据」。
         """
         ready_key = execution_index_ready_key(self.namespace)
         try:
@@ -480,6 +484,8 @@ class RedisExecutionStorage(ExecutionStorage):
                 except Exception as e:
                     # 单键不可读（类型不符/瞬断）不得作废整批回填。
                     logger.error("索引回填跳过不可读的状态键 %s: %s", key_str, _scrub_url_text(e))
+                    if strict:
+                        raise
                     continue
                 if not data:
                     continue
@@ -489,12 +495,16 @@ class RedisExecutionStorage(ExecutionStorage):
                     logger.error(
                         "索引回填跳过反序列化失败的状态 %s: %s", key_str, _scrub_url_text(e)
                     )
+                    if strict:
+                        raise
                     continue
                 pipe.zadd(index_key, {execution_id: execution_start_time_score(state_dict)})
             pipe.set(ready_key, "1")
             pipe.execute()
         except Exception as e:
             logger.error("索引回填失败（本次列表退化为零更新，待下次重试）: %s", _scrub_url_text(e))
+            if strict:
+                raise
 
     def _index_slice(self, reverse: bool, offset: int, limit: Optional[int]) -> List[str]:
         """按 start_time 从索引取一段 execution_id（offset/limit 下推到 ZSET）。"""
@@ -509,13 +519,16 @@ class RedisExecutionStorage(ExecutionStorage):
         members = fetch(self._execution_index_key(), start, stop)
         return [m if isinstance(m, str) else m.decode() for m in members]
 
-    def _load_indexed_states(self, execution_ids: List[str]) -> List[ExecutionState]:
+    def _load_indexed_states(self, execution_ids: List[str], strict: bool = False) -> List[ExecutionState]:
         """批量反序列化索引成员对应的状态；悬空成员顺带 ZREM 剪枝。
 
         悬空 = 状态键已被 TTL/外部删除——剪掉它（分页不再出现空格）。
         数据**读得到但反序列化失败**（跨版本 schema 变更等）只跳过、不剪：
         那行仍在库里，剪掉索引成员等于让它从列表永久消失，降级回旧版本也
         读不到；下次 list 会再跳过，代价只是本页少一条。
+
+        ``strict=True``（#307）：反序列化失败改为上抛——坏行可能是那条
+        非终态执行，判据面不得在缺行索引上宣称「核实过无引用」。
         """
         if not execution_ids:
             return []
@@ -530,6 +543,8 @@ class RedisExecutionStorage(ExecutionStorage):
                     continue
                 except Exception as e:
                     logger.error("Failed to process execution state: %s", _scrub_url_text(e))
+                    if strict:
+                        raise
                     continue
             stale.append(execution_id)
         if stale:
@@ -785,7 +800,7 @@ class RedisExecutionStorage(ExecutionStorage):
             )
         return payload
 
-    def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[ExecutionState]:
+    def list_executions(self, query: Optional[Any] = None, order_by: Optional[str] = None, limit: int = 100, offset: int = 0, strict: bool = False) -> List[ExecutionState]:
         """列出执行状态列表（走 ``{ns}:execution:index`` ZSET，不再全命名空间扫键）。
 
         索引 score=start_time（epoch 秒）、member=execution_id：
@@ -798,16 +813,23 @@ class RedisExecutionStorage(ExecutionStorage):
         存量库的成员由 ``_ensure_execution_index`` 懒回填；索引成员对应的
         状态键已过期时（终态 TTL 自清理）读时 ZREM 剪枝，并继续向后取页直到
         本页填满——头部悬空积压超过多页时也不会返回空列表/短页。
+
+        ``strict=True``（#307）：索引读取失败原样上抛、不吞成空列表——含
+        懒回填的整批失败/单键降级与坏行跳过（部分索引对判据面意味着
+        「无法核实」，被跳过的键可能正是那条非终态执行）——供「把空列表
+        当『核实过无数据』就出事」的判据面（删除守卫）区分「无数据」与
+        「无法核实」。默认维持吞异常返回空页（对外列表端点的既有契约，
+        #307 边界明确不动）。
         """
         try:
-            self._ensure_execution_index()
+            self._ensure_execution_index(strict=strict)
             field, reverse = _parse_order_by(order_by)
 
             if not query and field in (None, 'start_time'):
                 # 分页可下推：只反序列化本页。
                 ids = self._index_slice(reverse, offset, limit)
                 while True:
-                    states = self._load_indexed_states(ids)
+                    states = self._load_indexed_states(ids, strict=strict)
                     if len(states) == len(ids):
                         # 本页填满（或索引到此为止）。
                         return states
@@ -824,7 +846,7 @@ class RedisExecutionStorage(ExecutionStorage):
                         return states
                     ids = refetched
 
-            states = self._load_indexed_states(self._index_slice(reverse, 0, None))
+            states = self._load_indexed_states(self._index_slice(reverse, 0, None), strict=strict)
             if query:
                 states = [s for s in states if _matches_query(s, query)]
             if field not in (None, 'start_time'):
@@ -835,6 +857,8 @@ class RedisExecutionStorage(ExecutionStorage):
 
         except Exception as e:
             logger.error("Failed to list executions: %s", _scrub_url_text(e))
+            if strict:
+                raise
             return []
 
 

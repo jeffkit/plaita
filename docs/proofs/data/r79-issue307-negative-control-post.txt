@@ -1,0 +1,62 @@
+== r79 #307 负控 post（strict 穿透回填/坏行 + 判据翻页穷尽）==
+
+============================= test session starts ==============================
+collecting ... collected 9 items
+
+tests/console/test_issue307_delete_guard_scan_limits.py::test_scan_beyond_default_window_finds_tail_suspended PASSED [ 11%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409 PASSED [ 22%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409 PASSED [ 33%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409 PASSED [ 44%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409 PASSED [ 55%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_scan_error_raises_version_in_use_scan_error PASSED [ 66%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed PASSED [ 77%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_list_executions_strict_mode_raises PASSED [ 88%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok PASSED [100%]
+
+=============================== warnings summary ===============================
+config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 37 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:676: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:814: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 9 passed, 62 warnings in 1.49s ========================

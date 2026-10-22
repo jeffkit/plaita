@@ -471,6 +471,11 @@ def _runtime_queue_for_flow(flow_id: Any, version: Any,
 
 # ---- plaita#304：版本删除守卫的在途引用扫描 ----
 
+# 判据读面翻页页宽（#307）：与存储层默认页一致；判据语义是「穷尽」，页宽
+# 只影响往返次数不影响结果——收满 limit 条非终态或取到短页/空页即停。
+_GUARD_SCAN_PAGE_SIZE = 100
+
+
 class VersionInUseScanError(Exception):
     """删除守卫的在途引用扫描失败（Redis 不可达等）——fail-closed 信号。
 
@@ -493,8 +498,17 @@ def find_flow_version_active_executions(
     经 Redis 索引）→ 返回 []：引用判据退化为状态守卫，断链兜底交
     worker 侧具名终态。
 
-    Redis 探活失败抛 ``VersionInUseScanError``（fail-closed）；索引读取
-    本身的异常由 list_executions 吞为空列表，与既有列表语义一致。
+    #307 两处判据读面失效的修口（都在本函数收口）：
+
+    - **翻页穷尽**：显式 limit+offset 循环取全量，不在存储层默认
+      ``limit=100``（升序、保最老）的窗口上截断——忙 flow 的尾部非终态
+      执行（审批/人工介入的挂起执行最典型）此前对守卫不可见，force
+      删除放行。收满 ``limit`` 条即提前停（判据只需证明「有引用」，
+      清单按 start_time 升序取前 limit 条语义不变）。
+    - **fail-closed**：判据路径以 ``strict=True`` 读索引，批量读失败
+      （mget/scan_iter 超时等，ping 探活拦不住的故障）与探活失败同样
+      转具名 ``VersionInUseScanError`` → 503 ``version_in_use_scan_failed``，
+      不再被吞成空列表判「无引用」放行。
     """
     if redis is None:
         return []
@@ -505,12 +519,29 @@ def find_flow_version_active_executions(
             f"在途执行引用扫描失败（Redis 不可达），删除守卫无法核实: {exc}"
         ) from exc
     storage = RedisExecutionStorage(client=redis, namespace=tenant_namespace(tenant))
-    states = storage.list_executions(query={"flow_id": flow_id}) or []
-    return [
-        s for s in states
-        if (version is None or getattr(s, "flow_version", None) == version)
-        and getattr(s, "status", None) not in TERMINAL_EXECUTION_STATUSES
-    ][:limit]
+    matched: List[ExecutionState] = []
+    offset = 0
+    try:
+        while len(matched) < limit:
+            page = storage.list_executions(
+                query={"flow_id": flow_id},
+                limit=_GUARD_SCAN_PAGE_SIZE, offset=offset, strict=True,
+            )
+            if not page:
+                break
+            matched.extend(
+                s for s in page
+                if (version is None or getattr(s, "flow_version", None) == version)
+                and getattr(s, "status", None) not in TERMINAL_EXECUTION_STATUSES
+            )
+            if len(page) < _GUARD_SCAN_PAGE_SIZE:
+                break
+            offset += _GUARD_SCAN_PAGE_SIZE
+    except Exception as exc:  # noqa: BLE001 — 读不了即无法核实，交调用方拒绝
+        raise VersionInUseScanError(
+            f"在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: {exc}"
+        ) from exc
+    return matched[:limit]
 
 
 # ---- plaita#166：执行表示的读面脱敏 ----

@@ -1,0 +1,129 @@
+== r79 #307 中间态：仅外层 list_executions 加 strict（首版修复）——异常注入族仍 3F==
+== 红因=异常实际被更深一层 _ensure_execution_index 内部 catch-all 吞掉（回填降级），strict 须穿透 ==
+
+============================= test session starts ==============================
+collecting ... collected 9 items
+
+tests/console/test_issue307_delete_guard_scan_limits.py::test_scan_beyond_default_window_finds_tail_suspended PASSED [ 11%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409 PASSED [ 22%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409 PASSED [ 33%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409 PASSED [ 44%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409 PASSED [ 55%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_scan_error_raises_version_in_use_scan_error FAILED [ 66%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed FAILED [ 77%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_list_executions_strict_mode_raises FAILED [ 88%]
+tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok PASSED [100%]
+
+=================================== FAILURES ===================================
+_______________ test_scan_error_raises_version_in_use_scan_error _______________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=cd60e4c7f81a40898710b5f4f430ec56,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_scan_error_raises_version_in_use_scan_error(redis):
+        """判据直读：批量读失败 → 具名 VersionInUseScanError（不吞成空列表）。"""
+        _seed_exec(redis, "exec-susp-one", "suspended",
+                   datetime(2026, 10, 22, 12, 0, 0))
+        flaky = _PingOkBulkFail(decode_responses=True)
+        flaky.ping()  # 探活通过——守卫既有前置检查拦不住这一类故障
+    
+>       with pytest.raises(VersionInUseScanError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE VersionInUseScanError
+
+tests/console/test_issue307_delete_guard_scan_limits.py:237: Failed
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:redis.py:497 索引回填失败（本次列表退化为零更新，待下次重试）: simulated socket timeout
+_______________ test_delete_endpoint_scan_error_503_fail_closed ________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=516339fc8db04c5f846718776c7650ba,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_delete_endpoint_scan_error_503_fail_closed(redis):
+        """端到端：扫描故障 → 503 version_in_use_scan_failed（fail-closed）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        _seed_exec(redis, "exec-susp-one", "suspended",
+                   datetime(2026, 10, 22, 12, 0, 0))
+        client.app.state.redis = _PingOkBulkFail(decode_responses=True)
+    
+        r = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER}?force=true",
+                          headers=_headers())
+>       assert r.status_code == 503, r.text
+E       AssertionError: {"success":true,"flow_id":"guard-flow","version":"1.0.0"}
+E       assert 200 == 503
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_issue307_delete_guard_scan_limits.py:251: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=guard-flow@1.0.0）——旧 build worker 部署请尽快升级
+ERROR    plaita:redis.py:497 索引回填失败（本次列表退化为零更新，待下次重试）: simulated socket timeout
+___________________ test_list_executions_strict_mode_raises ____________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=afc5dad88bb94dd79c6acd6b927c9b82,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_list_executions_strict_mode_raises(redis):
+        """存储层 strict 模式：失败上抛；默认模式仍吞成空列表（列表语义不变）。"""
+        _seed_exec(redis, "exec-susp-one", "suspended",
+                   datetime(2026, 10, 22, 12, 0, 0))
+        flaky = _PingOkBulkFail(decode_responses=True)
+        st = RedisExecutionStorage(client=flaky, namespace="plaita")
+    
+        assert st.list_executions(query={"flow_id": FLOW_ID}) == []
+>       with pytest.raises(redis_py.exceptions.TimeoutError):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE TimeoutError
+
+tests/console/test_issue307_delete_guard_scan_limits.py:263: Failed
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:redis.py:497 索引回填失败（本次列表退化为零更新，待下次重试）: simulated socket timeout
+ERROR    plaita:redis.py:497 索引回填失败（本次列表退化为零更新，待下次重试）: simulated socket timeout
+=============================== warnings summary ===============================
+config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 38 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:676: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:814: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_flow_force_aggregate_beyond_100_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_101_suspended_at_position_101_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_boundary_100_suspended_within_window_409
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_version_force_clean_ok
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_issue307_delete_guard_scan_limits.py::test_scan_error_raises_version_in_use_scan_error
+FAILED tests/console/test_issue307_delete_guard_scan_limits.py::test_delete_endpoint_scan_error_503_fail_closed
+FAILED tests/console/test_issue307_delete_guard_scan_limits.py::test_list_executions_strict_mode_raises
+=================== 3 failed, 6 passed, 63 warnings in 1.63s ===================
