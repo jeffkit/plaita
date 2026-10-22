@@ -1,0 +1,63 @@
+# r84 A2R52-03/04 post-fix 绿（fix/a2r52-03-04 基于origin/main 2e59e4d，wt2）
+# 2026-10-23 修法：①trigger 端点两档统一前置检查——显式 enabled=False → 409 schedule_paused
+#   （集群档原 200 照常入队；本地档原 502「查看 console 日志」；行缺键不拦=零行为变化；cron 面不经端点不受影响；
+#    拒绝在受理前，无 fire record，零入队）；②fire_schedule 加 keyword-only rejection 出参（租户停用/配额满两闸路径
+#   回写 REJECTION_*，cron 调用方不传零变化），端点把配额满映射为与 POST /executions 同契约（#28 同一准入闸）的
+#   429 tenant_quota_exceeded（max_running 随 detail，未配额=「未配置」），其余 None 仍 502。
+
+== 1) 探针 post（A2 r56 探针原样，01d 双面+01e 翻转绿；01a/01b/01c 维持 r83 翻转后形态=红世界断言失败点后移）==
+test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version PASSED [ 14%]
+test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version FAILED [ 28%]
+test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule FAILED [ 42%]
+test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite FAILED [ 57%]
+test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule PASSED [ 71%]
+test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502 PASSED [ 85%]
+test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502 PASSED [100%]
+b2-r84-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+FAILED test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+FAILED test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+FAILED test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+================== 3 failed, 4 passed, 100 warnings in 1.54s ===================
+
+== 2) 新绿门 test_issue_a2r52_trigger_semantics.py（7 用例）==
+7 passed（集群 paused 409+零入队零 fire record / 本地 paused 409 / 双档 enabled happy 200 守恒×2 /
+        缺 enabled 键行不拦 200 / 配额满 429 具名+history rejection_reason+队列零残留 / 桩面闸不触达 local.fire）
+
+== 3) schedules 家族守恒（14 文件：A2R24-history/A2R52-pin-guard/A48/#300×2/#303/#304/#307×2/#308/local_scheduler/CAS/trigger_visibility/本席新文件）==
+125 passed, 4 skipped（4S=plaita-nodes entry-point 本机不装，既有）
+
+== 4) 引擎侧 fire_schedule 触点单测（10 文件 unit：#288/#289/#198/B44-01/A56-02/A2R44-02/#300-pool/trigger_visibility/#151/r59-dedup）==
+51 passed + 25 passed
+
+== 5) console 全量 ==
+1460 passed, 18 skipped in 192.87s (0:03:12)，rc=0（18S 与 r83 基线同；1460=上轮基线+本轮 7 新用例）
+
+== 6) ruff（仓规：E722 硬门 / BLE001 仅 warn 面存量清理）==
+E722：3 改动文件 All checks passed (rc=0)；BLE001：schedule_service+schedules 改动前后均 6 条=零新增（全部既有行）
+
+== 7) mkdocs build（docs 临时 venv /tmp/b2-r84-docs-venv）==
+rc=0，Documentation built in 7.40 seconds（INFO 锚点 3 条均预存在）
+
+PROOF-DONE

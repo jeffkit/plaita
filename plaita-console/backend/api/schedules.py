@@ -39,6 +39,7 @@ from redis import Redis
 
 try:
     from plaita.server.services.schedule_service import (
+        REJECTION_QUOTA_EXHAUSTED,
         SCHEDULE_FIRES_KEY,
         SCHEDULES_KEY,
         ScheduleConflictError,
@@ -53,6 +54,7 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     from services import flow_store  # type: ignore
     try:
         from plaita.server.services.schedule_service import (
+            REJECTION_QUOTA_EXHAUSTED,
             SCHEDULE_FIRES_KEY,
             SCHEDULES_KEY,
             ScheduleConflictError,
@@ -65,6 +67,7 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
     except ImportError:
         SCHEDULES_KEY = "plaita:schedules"
         SCHEDULE_FIRES_KEY = "plaita:schedule:fires:{schedule_id}"
+        REJECTION_QUOTA_EXHAUSTED = "tenant_quota_exhausted"
 
 # get_redis / 队列名与 executions 同源：队列名用 _task_queue_name() 在**使用点**
 # 解析（env PLAITA_CONSOLE_TASK_QUEUE > 默认值），不得导入模块级静态别名——
@@ -101,6 +104,11 @@ try:  # A2R24-01：统一错误 detail 形状
     from ..error_contract import error_detail
 except ImportError:
     from error_contract import error_detail  # type: ignore
+
+try:  # A2R52-04：manual 触发配额满 429 与 POST /executions 同契约（#28 同源）
+    from plaita.server.tenant_quota import tenant_max_running
+except ImportError:
+    tenant_max_running = None  # type: ignore[assignment]
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -673,6 +681,20 @@ def trigger_now(schedule_id: str, request: Request,
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
         if not _tenant_is_active(request, schedule.get("tenant_id")):
             raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
+        # A2R52-03：暂停调度拒绝手动触发，与集群档同语义（此前本地档走到
+        # fire() 的 A48-04 闸返回 None → 502「查看 console 日志」，把用户
+        # 配置态误导成基础设施故障）。具名 409，无 fire record——拒绝发生在
+        # 受理之前（与 403 停用租户同层）。只拦显式 enabled=False（行缺键的
+        # 最小形状/畸形行不在此拦，行为零变化）。
+        if schedule.get("enabled", True) is False:
+            raise HTTPException(
+                status_code=409,
+                detail=error_detail(
+                    "schedule_paused",
+                    f"调度 {schedule_id} 已暂停，手动触发被拒绝；请先启用调度",
+                    schedule_id=schedule_id,
+                ),
+            )
         execution_id = local.trigger_now(store, schedule)
         if execution_id is None:
             raise HTTPException(status_code=502, detail="触发失败，请查看 console 日志")
@@ -687,6 +709,18 @@ def trigger_now(schedule_id: str, request: Request,
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
     if not _tenant_is_active(request, schedule.get("tenant_id")):
         raise HTTPException(status_code=403, detail="租户已停用，拒绝触发调度")
+    # A2R52-03：暂停调度拒绝手动触发（此前集群档 fire_schedule 不查 enabled
+    # 照常入队 200，与本地档 502 分裂）——两档统一为具名 409。cron 面不经过
+    # 端点，不受影响（调度循环本就跳过 paused 行）。只拦显式 enabled=False。
+    if schedule.get("enabled", True) is False:
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "schedule_paused",
+                f"调度 {schedule_id} 已暂停，手动触发被拒绝；请先启用调度",
+                schedule_id=schedule_id,
+            ),
+        )
     # plaita#300 触发面：与手动 POST /executions 同一受理语义——先过能力门
     # （不支持即 422 结构化拒绝，零入队零占位行），再按版本行 runtime 选池
     # 队列（此前恒落默认 python 队列，go-runtime flow 的调度会串池）。
@@ -714,11 +748,40 @@ def trigger_now(schedule_id: str, request: Request,
         except ValueError:
             trigger_queue = None
     # 与手动「启动流程」同源：写任务队列 Stream（队列名在调用点解析 env）
+    # A2R52-04：rejection 出参接闸拒绝原因——None 返回有多义（配额满/租户
+    # 停用/入队失败/dedup 收敛），据此把「配额满」映射为与 POST /executions
+    # 同契约的 429 tenant_quota_exceeded（#28 同一准入闸），其余仍 502。
+    fire_rejection: dict = {}
     msg_id = fire_schedule(
         redis, schedule, trigger_queue or _task_queue_name(),
-        trigger_kind="manual",
+        trigger_kind="manual", rejection=fire_rejection,
     )
     if msg_id is None:
+        if fire_rejection.get("reason") == REJECTION_QUOTA_EXHAUSTED:
+            tenant_for_quota = schedule.get("tenant_id") or "default"
+            max_running = (
+                tenant_max_running(redis, tenant_for_quota)
+                if tenant_max_running is not None else None
+            )
+            # None=未配额（fail-open 下本不应拒，防御性呈现「未配置」而非 None）
+            cap_text = str(max_running) if max_running is not None else "未配置"
+            logger.warning(
+                "租户 %s start 配额已满（%s），拒绝调度 %s 手动触发",
+                tenant_for_quota, cap_text, schedule_id,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=error_detail(
+                    "tenant_quota_exceeded",
+                    (
+                        f"租户 {tenant_for_quota} 并发 start 数已达上限"
+                        f"（{cap_text}），调度未入队；请等待在跑执行终态后重试"
+                    ),
+                    error="tenant_quota_exceeded",
+                    tenant_id=tenant_for_quota,
+                    max_running=max_running,
+                ),
+            )
         raise HTTPException(status_code=502, detail="入队失败，请检查 Redis 与任务队列配置")
     detail = _schedule_detail(schedule)
     detail["queue_msg_id"] = msg_id
