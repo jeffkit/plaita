@@ -1,0 +1,4 @@
+publish rc=200: published
+console_redis key plaita:flow:demo:1.0.0 exists: True
+target_redis  key plaita:flow:demo:1.0.0 exists: False
+RESULT: RED —— 跨 Redis 部署下目标环境拿不到定义（worker 侧 ErrFlowNotFound）

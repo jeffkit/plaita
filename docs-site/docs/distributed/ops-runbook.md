@@ -220,6 +220,12 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSOLE_PORT` | `8080` | `startup`（`run_server`/容器 CMD） | 监听端口 | 非整数 → `get_settings()` `ValueError`（import app 时） |
 | `PLAITA_CONSOLE_LOOPBACK_URL` | 未设 | `request`（supervisor iterate） | supervisor 回环目标覆盖（#291）：默认由 `HOST`/`PORT` 推导（通配监听取回环地址） | 非法（非 `http(s)://host[:port]`）→ 503 具名拒绝；指向非本机地址照用但 **WARNING**（平台 admin key 将发往该地址）。uvicorn CLI 绕过 `PORT` 起服时需显式设置，否则回环连接失败 → iterate 502 |
 | `PLAITA_CONSOLE_REDIS_URL` | `redis://localhost:6379/0` | `startup`（lifespan） | Redis 连接；不可达 → 本地单机模式 | 降级是**永久**的；运行中恢复 Redis 需重启 |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_TARGET_REDIS_URL` | `""`（关闭） | `startup`（lifespan）+ 每轮投递 | 跨 Redis 部署的发布 outbox 目标（worker 环境的 Redis）；配置即启用投递链（#299，见「跨 Redis 部署的发布投递链」节） | 空/未设 = outbox 整体关闭（同 Redis 部署零负担）；目标不可达不阻断启动，线程按轮重连，恢复后自动补投 |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS` | `2.0` | `startup`（lifespan） | 投递线程轮询间隔 | ≤0/非法 → WARNING + 回退默认；0 视为非法（投递链停摆） |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_RECONCILE_SECONDS` | `300.0` | `startup`（lifespan） | delivered 对账间隔（目标缺 key/hash 不符 → 重投） | `0` 显式关闭周期对账（启动对账仍跑一次）+ WARNING；非法 → WARNING + 回退默认 |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_MAX_ATTEMPTS` | `8` | 每轮投递 | 连续失败转 `failed`（DLQ 档）的次数上限 | 非法 → WARNING + 回退默认 |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_BATCH` | `200` | 每轮投递/对账 | 单轮处理的 outbox 行数上限 | 非法 → WARNING + 回退默认 |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_FAILED_REQUEUE_SECONDS` | `300.0` | 每轮投递 | DLQ 行慢速重排的基础间隔（翻倍封顶 30min） | 非法 → WARNING + 回退默认 |
 | `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | `startup`（`init_engine` 一次） | 流程/版本/执行历史 SQLAlchemy URL | 凭据文件/密钥目录由它推导；**相对 URL 按各进程 cwd 解析**，PG/未设置/内存库回退 cwd 并打 WARNING（A67-04）；官方 compose 默认无持久卷 |
 | `PLAITA_CONSOLE_ENV` | `dev` | `request` / 每次发布 | 环境标识；仅精确 `prod` 时删除需 admin | 其他值（test/staging）无额外语义 |
 | `PLAITA_CONSOLE_ADMIN_API_KEY` | `""` | `request`（`get_settings`） | 管理面 API Key | 空且未 `ALLOW_INSECURE_ADMIN` → 管理 API 503 |
@@ -289,7 +295,7 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
 |---|---|
 | **启动/导入期 fail-fast**（聚合后一次退出） | `PLAITA_LOG_LEVEL`、`PLAITA_HTTP_BLOCK_PRIVATE`（未知布尔）、`PLAITA_SANDBOX_MEMORY_MB`（负/非数字）、`PLAITA_SANDBOX_DOCKER_CPUS`（非有限正数）、`PLAITA_CONSOLE_LANGFUSE`（非 auto/true/false）、`PLAITA_TENANT_MAX_RUNNING`（负/非数字）、`PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN`（未知布尔）、`PLAITA_EVENT_RECONCILE_INTERVAL` / `PLAITA_CHECK_INTERVAL`（0/负/非数字）、`PLAITA_MAX_DELIVERIES` / `PLAITA_LEASE_TTL_SECONDS` / `PLAITA_DLQ_MAX_LEN`（≤0/非数字）、`PLAITA_SANDBOX_TIMEOUT`、`PLAITA_SANDBOX_DOCKER_TIMEOUT`、`PLAITA_BG_*`、`PLAITA_CONSOLE_PORT`、`PLAITA_SANDBOX_ALLOWED_LANGUAGES/_BACKENDS`、`PLAITA_CODE_BACKEND`（worker 路径未知值） |
 | **空串 identity/routing fail-fast** | `PLAITA_QUEUE_NAME`、`QUEUE_NAME`、`PLAITA_CONSOLE_TASK_QUEUE`、`PLAITA_CONSUMER_GROUP`、`PLAITA_DLQ_KEY`、`PLAITA_REDIS_URL`、`REDIS_URL`、`PLAITA_CONSOLE_REDIS_URL`、`PLAITA_INSTANCE_ID`、`PLAITA_DELAY_QUEUE`、`PLAITA_DEPLOYMENT_EPOCH` |
-| **WARNING + 回退默认（绝不静默）** | `PLAITA_HTTP_MAX_RESPONSE_BYTES`、`PLAITA_HTTP_DNS_TTL`（拒绝 nan/inf）、`PLAITA_HTTP_CONNECTOR_LIMIT`、`PLAITA_HTTP_COOKIES`、`PLAITA_CONSOLE_DEBUG`、`PLAITA_DLQ_MAX_LEN`（≤0 钳 1）、`PLAITA_EXECUTION_STATE_TTL_DAYS`、`PLAITA_CAPACITY_STALE_SECONDS`、`PLAITA_EXECUTION_TIMELINE_MAX`、`PLAITA_WORKER_DRAIN_TIMEOUT`、`PLAITA_WORKER_MIN_FREE_DISK_GIB`、`PLAITA_EXPR_*`、`PLAITA_EXECUTION_DEADLINE_SECONDS`、`PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`、`PLAITA_TASK_MAX_AGE_SECONDS`、`PLAITA_EVENT_TTL_SECONDS`、`PLAITA_EVENT_INDEX_SWEEP_INTERVAL/_BUDGET`、`PLAITA_CONSOLE_RECONCILE_ORPHANS`、`PLAITA_TENANT_MAX_RUNNING`（运行期负/非法按不限）、`PLAITA_TENANT_RUNNING_TTL_SECONDS`、`PLAITA_TENANT_QUOTA_DEFER_MAX` |
+| **WARNING + 回退默认（绝不静默）** | `PLAITA_HTTP_MAX_RESPONSE_BYTES`、`PLAITA_HTTP_DNS_TTL`（拒绝 nan/inf）、`PLAITA_HTTP_CONNECTOR_LIMIT`、`PLAITA_HTTP_COOKIES`、`PLAITA_CONSOLE_DEBUG`、`PLAITA_DLQ_MAX_LEN`（≤0 钳 1）、`PLAITA_EXECUTION_STATE_TTL_DAYS`、`PLAITA_CAPACITY_STALE_SECONDS`、`PLAITA_EXECUTION_TIMELINE_MAX`、`PLAITA_WORKER_DRAIN_TIMEOUT`、`PLAITA_WORKER_MIN_FREE_DISK_GIB`、`PLAITA_EXPR_*`、`PLAITA_EXECUTION_DEADLINE_SECONDS`、`PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`、`PLAITA_TASK_MAX_AGE_SECONDS`、`PLAITA_EVENT_TTL_SECONDS`、`PLAITA_EVENT_INDEX_SWEEP_INTERVAL/_BUDGET`、`PLAITA_CONSOLE_RECONCILE_ORPHANS`、`PLAITA_TENANT_MAX_RUNNING`（运行期负/非法按不限）、`PLAITA_TENANT_RUNNING_TTL_SECONDS`、`PLAITA_TENANT_QUOTA_DEFER_MAX`、`PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS`（≤0 非法）/`_RECONCILE_SECONDS`/`_MAX_ATTEMPTS`/`_BATCH`/`_FAILED_REQUEUE_SECONDS` |
 | **运行期/执行期才失败** | `PLAITA_SANDBOX_DOCKER_MEMORY_MB`（0/负传给 docker）、`PLAITA_SANDBOX_NODE_BIN`（缺失）、`PLAITA_BG_*_WORKERS=0/负`（首次建池）、`PLAITA_CODE_BACKEND`（直接 `register_code_node` 不传白名单） |
 | **接受任意值/仅特定值特殊** | `PLAITA_CONSOLE_ENV`、`PLAITA_SANDBOX_LIFECYCLE`/`PLAITA_EXECUTION_EVENTS_PUBLISH`/`PLAITA_WORKER_LANGFUSE`（legacy 精确 0/1）、`PLAITA_DISABLE_*`（strip 后等于 1） |
 
@@ -683,6 +689,39 @@ pipeline，并受墙钟预算 `PLAITA_CONSOLE_ENGINE_SYNC_DEADLINE`（默认 5s�
 `PLAITA_CONSOLE_ENGINE_SYNC_MAX_VERSIONS`（默认 5 万）约束；触界只降级、
 不阻断启动，日志有 WARNING。Redis 半开时回填在声明的读超时内失败并降级，
 不会让 readiness 永久不达。
+
+### 跨 Redis 部署的发布投递链（flow publish outbox，#299） {#跨-redis-部署的发布投递链}
+
+`engine_sync`（含启动回填）只写 **console 进程所连的那个 Redis**。console 与
+worker 不同机/不同 Redis 时，人工在目标机跑 `sync_published_to_engine.py`
+是批处理兜底，不是实时同步。配置
+
+`PLAITA_CONSOLE_ENGINE_OUTBOX_TARGET_REDIS_URL`（指向 worker 环境的 Redis）
+后，console 启用 durable 发布 outbox：
+
+- **发布事务内**与 `flow_versions` 同事务写一条 `flow_publish_outbox`
+  （幂等键 `(tenant_id, flow_id, version, definition_hash)`，同版本重复发布
+  不重复入队；publish 回滚则 outbox 不残留）；
+- 后台线程每 `PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS`（默认 2s）投递一轮：
+  写目标 Redis 的 `{ns}:flow:{flow_id}:{version}` 后**读回校验**
+  `flow-definition-json-sortkeys-v2` 指纹一致才记 delivered（至少一次；
+  重复写是同内容覆盖，天然幂等）；
+- 失败按指数退避重试（2s 起封顶 120s）；连续
+  `PLAITA_CONSOLE_ENGINE_OUTBOX_MAX_ATTEMPTS`（默认 8）次失败转 `failed`
+  （DLQ 档）并 ERROR 告警，DLQ 行按
+  `PLAITA_CONSOLE_ENGINE_OUTBOX_FAILED_REQUEUE_SECONDS`（默认 300s 起、翻倍
+  封顶 30min）慢速重排——目标 Redis 长时间不可用恢复后**自动补齐**，定义
+  不丢；
+- 每 `PLAITA_CONSOLE_ENGINE_OUTBOX_RECONCILE_SECONDS`（默认 300s，0=关）
+  对账：delivered 行在目标侧缺 key / hash 不符（被外部删改）→ 打回 pending
+  重投；删除流程/版本会同步清 outbox，对账不会复活已删版本；
+- `GET /health` 的 `engine_outbox` 字段暴露 `status/pending/failed/
+  last_delivered_at/last_error` 及当轮对账/投递计数。
+
+每轮投递批量上限 `PLAITA_CONSOLE_ENGINE_OUTBOX_BATCH`（默认 200）。**未配置
+目标 Redis（默认）时 outbox 整体关闭**：不建连、不起线程、publish 零额外
+写入——同 Redis 部署沿用 engine_sync 的进程内同步。数字/枚举类值非法时
+WARNING + 回退默认（见下方非法值矩阵）。
 
 非 SQLite 的 `PLAITA_CONSOLE_DB_URL` 显式设置 connect/pool 超时（默认 5s）
 与 PG `lock_timeout=5s`；DB 黑洞/半开时启动在约 5s 内具名失败（不回退

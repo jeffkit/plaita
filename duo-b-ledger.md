@@ -714,3 +714,53 @@
   `docs/proofs/issue297-298-module-scope-orphan-window.md`。
 - 单 commit 关闭 #297/#298；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第七十一轮 · #299（flow publish outbox 跨 Redis 投递链，2026-10-22，B1 修复席；任务书标称第六十八轮——68/69/70 已被 #296、#297/#298、B2 r70 占用，按序列顺延）
+
+> 编号碰撞注记：派单写「第六十八轮」，68/69/70 均已被占用（本文件第六十八/
+> 六十九轮 + eb08fd0 合并的 B2 r70），沿用「占用即递增」先例记第七十一轮。
+
+- 基线：`origin/main` `daadc00`；落地门 `landing_gate.py ci` rc=0（main CI +
+  Console E2E 双绿，落地前复核 origin/main 未漂移）。
+- **#299（高优 feat，墨者接入）console 侧 outbox 全链**——跨 Redis 部署下
+  `engine_sync` 只写 console 所连 Redis，「发布成功、worker 找不到 flow」，
+  人工跑 `sync_published_to_engine.py` 是批处理兜底非实时。worker 读穿透
+  （issue §2，plaita-go FlowSource 回源）归 B3 后续轮；B2 #300 的 publish
+  校验逻辑未触碰（`api/flows.py` 零改动）。
+- 修法四件：①`flow_publish_outbox` 表（`models/flow.py` + alembic
+  `0003`，字段按 issue 建议 + 实现列 `next_attempt_at`；幂等键唯一约束
+  `(tenant_id, flow_id, version, definition_hash)`），**publish 事务内**与
+  flow_versions 同事务入队（SAVEPOINT 吸收幂等竞态；回滚零残留），删除
+  流程/版本同事务 purge（防对账复活已删版本）；②投递 worker（main 后台
+  线程，poll 默认 2s）：至少一次写 `{ns}:flow:{fid}:{ver}`（复用
+  `sync_flow_to_engine` 写入面）+ **读回校验**存储原文
+  `flow-definition-json-sortkeys-v2` 指纹才记 delivered；失败指数退避
+  （2s→120s 封顶）→ 8 次转 `failed`（DLQ 档，ERROR 告警）→ 慢速重排
+  （300s 翻倍封顶 30min）自动补投；③对账（启动首遍 + 每 300s，0=关）：
+  delivered 缺 key/hash 不符 → 打回 pending 重投（预算重置）；④配置
+  `PLAITA_CONSOLE_ENGINE_OUTBOX_TARGET_REDIS_URL`（空=整体关闭，同 Redis
+  零负担零线程）+ poll/reconcile/max_attempts/batch/failed_requeue 五节律
+  env（非法 WARNING+回退默认）；`/health` 新增 `engine_outbox`
+  （status/pending/failed/last_delivered_at/last_error/当轮计数）。
+- **开发期实锤并修正**：指纹必须按「投递后工件」（定义 + 注入
+  flow_id/version）算——worker 校验的是 Redis 存储原文，按原始定义算读回
+  校验永远不等（首跑 verify_hash_mismatch 实证）；`engine_payload` 收口 +
+  与 `compute_flow_definition_hash` 等价性单测钉住。
+- 负控（先红后绿，证据 `docs/proofs/data/r71-299-negative-control-{pre,post}.txt`
+  + 脚本同目录）：pre=双 Redis 实例发布后目标缺 key（RED）；post=投递
+  delivered=1、目标 hash 与工件一致（GREEN）。场景矩阵见
+  `docs/proofs/issue299-outbox-cross-redis.md`（回滚零残留/幂等/DLQ→恢复
+  补投/对账重投/守恒/已删版本不复活/租户命名空间/同 Redis 零负担）。
+- 新增测试：`tests/console/test_engine_outbox.py` 18P（含 API 层发布端点
+  → outbox → 投递全链 + 指纹等价 + hash 损坏拒投）；`test_schema_
+  migrations.py` +4P（fresh create_all+stamp / 存量 stamp-baseline /
+  0002→0003 upgrade 三路径都长出表 + 幂等）。
+- 验收：console 全量 **1236P/13S**（基线 1215P/13S，零回归）；unit
+  `-m "not slow"` **8836P/13S/3501 subtests**（与 r69 逐位一致）；e2e+
+  integration **287P/4S**；定向 66P；ruff 新增代码零告警；
+  `mkdocs --strict` rc=0。开发期自抓自修 1 个真 bug（成功分支 continue
+  跳过行级 commit，delivered 状态未落库——被对账 checked=0 断言抓住）。
+- 文档：ops-runbook 新节「跨 Redis 部署的发布投递链」+ console env 表 6 行
+  + 非法值矩阵行；DOC_CODE_MAP 行 26 补 engine_outbox/flow_store/main.py；
+  proof `docs/proofs/issue299-outbox-cross-redis.md`。
+- 单 commit 关闭 #299；未触碰他席 duo-a-ledger/duo-a2-ledger/duo-b4-ledger。

@@ -4,6 +4,7 @@ Plaita Console Backend - FastAPI 应用入口
 import logging
 import os
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -84,6 +85,10 @@ def build_health_body(app) -> dict:
     engine_sync = getattr(app.state, "engine_sync", None)
     if engine_sync:
         body["engine_sync"] = engine_sync
+    # #299：发布 outbox 投递链状态（backlog / last error / 最近送达）。
+    engine_outbox = getattr(app.state, "engine_outbox", None)
+    if engine_outbox:
+        body["engine_outbox"] = engine_outbox
     return body
 
 
@@ -337,6 +342,103 @@ async def lifespan(app: FastAPI):
             }
             logger.warning("启动同步已发布流程到引擎存储失败（忽略，不阻断启动）: %s", e)
 
+        # #299：跨 Redis 部署的发布 outbox 投递链。未配目标 Redis（同 Redis
+        # 部署，默认）时整体关闭——不建连、不起线程、零额外写入。
+        try:
+            try:
+                from .services import engine_outbox
+            except ImportError:
+                from services import engine_outbox  # type: ignore
+            if engine_outbox.is_enabled():
+                try:
+                    from .services.flow_store import session_factory as _outbox_sessions
+                except ImportError:
+                    from services.flow_store import session_factory as _outbox_sessions  # type: ignore
+                app.state.engine_outbox = {"status": "starting"}
+                outbox_target = None
+                try:
+                    outbox_target = engine_outbox.connect_target()
+                except Exception as exc:  # noqa: BLE001 — 不可达不阻断启动，线程按轮重连
+                    logger.warning(
+                        "outbox 目标 Redis 不可达（线程将按轮重连）: %s", exc,
+                    )
+                # 启动首遍：对账（delivered 缺 key/hash 不符 → 重投）+ 一轮投递。
+                # 有界由 batch 上限保证；目标不可达时 cycle 内部自愈为空转统计。
+                startup_summary: dict = {}
+                if outbox_target is not None:
+                    sessions = _outbox_sessions()
+                    startup_summary.update(engine_outbox.run_reconcile_cycle(
+                        outbox_target, sessions))
+                    startup_summary.update(engine_outbox.run_delivery_cycle(
+                        outbox_target, sessions))
+                    startup_summary.update(engine_outbox.stats_snapshot(sessions))
+                app.state.engine_outbox_target = outbox_target
+                app.state.engine_outbox = {
+                    **startup_summary,
+                    "status": "ready" if outbox_target is not None else "degraded",
+                }
+                if outbox_target is not None:
+                    logger.info(
+                        "发布 outbox 投递链已启用（目标 Redis 已连）：对账 "
+                        "checked=%s requeued=%s，投递 delivered=%s errors=%s，"
+                        "周期对账每 %.0fs",
+                        startup_summary.get("checked"),
+                        startup_summary.get("requeued"),
+                        startup_summary.get("delivered"),
+                        startup_summary.get("errors"),
+                        engine_outbox.reconcile_seconds(),
+                    )
+                reconcile_interval = engine_outbox.reconcile_seconds()
+                poll_interval = engine_outbox.poll_seconds()
+                if outbox_target is not None and poll_interval > 0:
+                    import threading
+
+                    outbox_stop = threading.Event()
+                    app.state.engine_outbox_stop = outbox_stop
+
+                    def _outbox_loop():
+                        next_reconcile_at = 0.0  # 启动首遍已对账，下一轮按间隔
+                        target = app.state.engine_outbox_target
+                        while not outbox_stop.wait(poll_interval):
+                            try:
+                                if target is None:
+                                    target = engine_outbox.connect_target()
+                                    app.state.engine_outbox_target = target
+                                    logger.info("outbox 目标 Redis 已恢复连接")
+                                now_mono = time.monotonic()
+                                reconcile_stats: dict = {}
+                                if reconcile_interval > 0 and now_mono >= next_reconcile_at:
+                                    reconcile_stats = engine_outbox.run_reconcile_cycle(
+                                        target, _outbox_sessions())
+                                    next_reconcile_at = now_mono + reconcile_interval
+                                deliver_stats = engine_outbox.run_delivery_cycle(
+                                    target, _outbox_sessions())
+                                app.state.engine_outbox = {
+                                    **reconcile_stats, **deliver_stats,
+                                    **engine_outbox.stats_snapshot(_outbox_sessions()),
+                                    "status": "ready",
+                                }
+                            except Exception as exc:  # noqa: BLE001 — 下轮重连/重试
+                                app.state.engine_outbox = {
+                                    "status": "degraded",
+                                    "error": str(exc)[:300],
+                                }
+                                target = None  # 连接可疑：下轮重建
+                                logger.warning(
+                                    "outbox 维护轮次失败（下轮重连重试）: %s", exc,
+                                )
+
+                    threading.Thread(
+                        target=_outbox_loop,
+                        name="engine-outbox-delivery",
+                        daemon=True,
+                    ).start()
+            else:
+                app.state.engine_outbox = {"status": "disabled"}
+        except Exception as e:  # noqa: BLE001 — outbox 装配失败不阻断启动
+            app.state.engine_outbox = {"status": "degraded", "error": str(e)[:300]}
+            logger.warning("发布 outbox 投递链装配失败（不阻断启动）: %s", e)
+
         # 租户状态对账（#27/#255/A2R25-06）：console 停机期间改过状态 / Redis
         # 被清空 / Redis-only 恢复回滚墓碑时，worker 侧的租户状态闸只有这份
         # 短视图可读——启动时以权威库为准对齐，并把 DB 已不存在的租户回落
@@ -470,6 +572,18 @@ async def lifespan(app: FastAPI):
     stop_event = getattr(app.state, "tenant_status_reconcile_stop", None)
     if stop_event is not None:
         stop_event.set()
+
+    # #299：先停 outbox 投递线程，再断目标 Redis。
+    outbox_stop = getattr(app.state, "engine_outbox_stop", None)
+    if outbox_stop is not None:
+        outbox_stop.set()
+    outbox_target = getattr(app.state, "engine_outbox_target", None)
+    if outbox_target is not None:
+        try:
+            outbox_target.close()
+        except Exception as exc:  # noqa: BLE001 — 收尾失败只 WARNING
+            logger.warning("outbox 目标 Redis 连接关闭失败: %s", exc)
+        app.state.engine_outbox_target = None
 
     # 关闭时断开 Redis 连接（关当前绑定：集群切换后 redis_client 全局已过时）
     logger.info("关闭 Redis 连接")

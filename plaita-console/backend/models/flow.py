@@ -134,6 +134,49 @@ class FlowVersion(Base):
     )
 
 
+class FlowPublishOutbox(Base):
+    """flow 发布 outbox（#299：跨 Redis 部署的 durable 发布投递链）。
+
+    发布事务内与 ``flow_versions`` 同事务写入一条 pending（同事务 = publish
+    回滚时 outbox 不残留）；由投递 worker 至少一次送达目标 Redis 的
+    ``{ns}:flow:{flow_id}:{version}``。幂等键是四元组唯一约束
+    ``(tenant_id, flow_id, version, definition_hash)``——同版本重复发布
+    （同内容）不产生第二行；同版本换了内容（hash 不同）是新投递。
+
+    状态机：pending（待投/退避中）→ delivered（已送达且读回校验通过）
+    / failed（连续失败到上限，DLQ 档；由投递循环按慢速退避自动重排）；
+    对账把「delivered 但目标缺 key/hash 不符」打回 pending 重投。
+
+    注意**故意不建**指向 flow_versions 的外键：版本删除时由删除路径显式
+    清理对应 outbox 行（purge），否则对账会把已删除的版本「复活」进目标
+    Redis。tenant_id 同 flow_versions 口径：default/存量行为空串。
+    """
+
+    __tablename__ = "flow_publish_outbox"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(String(64), nullable=False, default="", index=True)
+    flow_id = Column(String(128), nullable=False)
+    version = Column(String(64), nullable=False)
+    definition_hash = Column(String(64), nullable=False)
+    definition = Column(Text, nullable=False, default="")
+    status = Column(String(16), nullable=False, default="pending", index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    delivered_at = Column(DateTime, nullable=True)
+    # 退避调度：下次允许投递的时点（None=立即可投）。issue 建议字段之外
+    # 的实现列——重试退避与 failed 慢速重排都需要它，避免全表逐行 sleep。
+    next_attempt_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "flow_id", "version", "definition_hash",
+            name="uq_outbox_delivery_key",
+        ),
+    )
+
+
 class NodeDescriptor(Base):
     """节点描述（内置 + 租户自定义；租户内 node_type 唯一）"""
 

@@ -131,3 +131,49 @@ class TestMigrationBootstrap:
 
         bare = create_engine(f"sqlite:///{tmp_path / 'bare.db'}", future=True)
         assert sm.current_revision(bare) is None
+
+
+class TestFlowPublishOutboxMigration:
+    """#299：flow_publish_outbox 三条引导路径都必须长出该表。
+
+    - 空库：create_all（模型在 Base.metadata）+ stamp 基线；
+    - 存量库（无 alembic_version）：create_all 补齐缺失表 + stamp 基线
+      （**不会** upgrade——0003 的 upgrade 分支对这些库不执行）；
+    - 已登记库：upgrade head 执行 0003（表已存在时幂等跳过）。
+    """
+
+    def test_fresh_db_has_outbox_table(self, tmp_path):
+        db = tmp_path / "fresh-outbox.db"
+        engine = fs.init_engine(f"sqlite:///{db}")
+        assert "flow_publish_outbox" in _tables(db)
+        # 空库走 create_all+stamp：schema 已是全量，版本停在基线（既有语义）
+        assert sm.current_revision(engine) == sm.BASELINE_REVISION
+
+    def test_legacy_db_gets_outbox_table_via_create_all(self, tmp_path):
+        db = tmp_path / "legacy-outbox.db"
+        _make_legacy_db(db)
+        engine = fs.init_engine(f"sqlite:///{db}")
+        assert engine.schema_summary["action"] == "stamp-baseline"
+        assert "flow_publish_outbox" in _tables(db)
+
+    def test_stamped_db_upgrades_outbox_table(self, tmp_path):
+        """0002 → 0003 真实升级路径：删表 + 版本号回拨，再启动应补回。"""
+        db = tmp_path / "upgrade-outbox.db"
+        fs.init_engine(f"sqlite:///{db}")
+        con = sqlite3.connect(db)
+        try:
+            con.execute("drop table flow_publish_outbox")
+            con.execute(
+                "update alembic_version set version_num='0002_audit_identity'"
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        engine = fs.init_engine(f"sqlite:///{db}")
+        assert engine.schema_summary["action"] == "upgrade"
+        assert "flow_publish_outbox" in _tables(db)
+        assert sm.current_revision(engine) == _head_revision()
+        # 幂等：表已存在时再次 upgrade 不炸（create_all+stamp 路径的库二启）
+        again = fs.init_engine(f"sqlite:///{db}")
+        assert sm.current_revision(again) == _head_revision()

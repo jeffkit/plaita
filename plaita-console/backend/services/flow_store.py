@@ -137,6 +137,47 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
     return "unique constraint failed" in text_
 
 
+def _outbox_enqueue(session: Session, *, tenant_id: str, flow_id: str,
+                    version: str, definition: str) -> None:
+    """在**当前数据库事务内**登记发布 outbox（#299；调用方负责 commit）。
+
+    懒导入避免 services 内环；outbox 未启用（同 Redis 部署）时引擎侧
+    ``enqueue_publish`` 是 no-op。入队本身绝不改变发布成败——except 兜底
+    只把「入队器自身的意外」降级为 ERROR 日志（降级必须可观测），数据库
+    级错误仍随事务上抛（那本来就会让发布失败）。
+    """
+    try:
+        try:
+            from .engine_outbox import enqueue_publish
+        except ImportError:  # 平铺布局（cwd=backend）运行时
+            from engine_outbox import enqueue_publish  # type: ignore
+        enqueue_publish(
+            session, tenant_id=tenant_id, flow_id=flow_id,
+            version=version, definition=definition,
+        )
+    except Exception as e:  # noqa: BLE001 — 入队失败不阻断发布，但必须 loud
+        logger.error(
+            "发布 outbox 入队失败（发布继续；跨 Redis 目标将依赖对账/重发布）: %s", e,
+            exc_info=True,
+        )
+
+
+def _outbox_purge(session: Session, *, tenant_id: str, flow_id: str,
+                  version: Optional[str] = None) -> None:
+    """删除流程/版本时清理对应 outbox 行（防对账把已删版本复活进目标 Redis）。"""
+    try:
+        try:
+            from .engine_outbox import purge_for
+        except ImportError:  # 平铺布局（cwd=backend）运行时
+            from engine_outbox import purge_for  # type: ignore
+        purge_for(session, tenant_id=tenant_id, flow_id=flow_id, version=version)
+    except Exception as e:  # noqa: BLE001 — 清理失败不阻断删除，但必须 loud
+        logger.error(
+            "发布 outbox 清理失败（flow=%s@%s）：对账可能重投已删版本: %s",
+            flow_id, version or "*", e,
+        )
+
+
 class VersionConflictError(ValueError):
     """草稿乐观锁冲突：base_updated_at 与服务端不一致（C5-1）。
 
@@ -364,6 +405,10 @@ class FlowStore:
             if record is None:
                 raise LookupError(f"流程不存在: {flow_id}")
             session.delete(record)
+            # #299：级联删版本的同时清掉发布 outbox，防对账重投已删流程。
+            # 租户以行内为准（全量视角删除时入参 tenant_id 可能为 None）。
+            _outbox_purge(session, tenant_id=getattr(record, "tenant_id", "") or "",
+                          flow_id=flow_id)
             session.flush()
             assert_tenant_generation(session, tenant_id)
             session.commit()
@@ -743,6 +788,17 @@ class FlowStore:
             if row.status != "published":
                 row.status = "published"
                 row.published_at = datetime.utcnow()
+                # #299：发布事务内登记 outbox（跨 Redis 部署的 durable 投递链）。
+                # 与 flow_versions 同事务 = publish 回滚时 outbox 不残留；
+                # 未配目标 Redis（同 Redis 部署）时是 no-op，零额外写入。
+                # 已发布版本的重复发布在 enqueue 内按幂等键去重。
+                _outbox_enqueue(
+                    session,
+                    tenant_id=row.tenant_id or "",
+                    flow_id=flow_id,
+                    version=version,
+                    definition=row.definition or "",
+                )
                 session.flush()
                 assert_tenant_generation(session, tenant_id)
                 session.commit()
@@ -763,6 +819,9 @@ class FlowStore:
             if row is None:
                 raise LookupError(f"版本不存在: {flow_id}@{version}")
             session.delete(row)
+            # #299：版本删除时同步清 outbox，防对账把已删版本复活进目标 Redis。
+            _outbox_purge(session, tenant_id=getattr(row, "tenant_id", "") or "",
+                          flow_id=flow_id, version=version)
             session.flush()
             assert_tenant_generation(session, tenant_id)
             session.commit()
@@ -1676,6 +1735,13 @@ def get_flow_store() -> FlowStore:
     if _SessionLocal is None:
         raise RuntimeError("FlowStore 未初始化，请先调用 init_engine()")
     return FlowStore(_SessionLocal)
+
+
+def session_factory() -> sessionmaker:
+    """全局 SessionLocal（供 outbox 投递等后台服务自建会话）。"""
+    if _SessionLocal is None:
+        raise RuntimeError("FlowStore 未初始化，请先调用 init_engine()")
+    return _SessionLocal
 
 
 def parse_layout(layout: str) -> dict:

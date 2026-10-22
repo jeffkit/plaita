@@ -1,0 +1,6 @@
+publish rc=200: published
+console_redis key plaita:flow:demo:1.0.0 exists: True
+target_redis  key plaita:flow:demo:1.0.0 exists: False
+delivery_cycle: {'scanned': 1, 'delivered': 1, 'retried': 0, 'to_dlq': 0, 'errors': 0}
+target hash matches engine artifact (v2): True
+RESULT: GREEN
