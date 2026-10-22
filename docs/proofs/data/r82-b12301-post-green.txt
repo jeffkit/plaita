@@ -1,0 +1,28 @@
+== r82 B123-01 post-green（:3889 改传 state=None，2026-10-23）==
+-- 新套件 6P + 同族对照：#304 全套/#247 版本刷新/#241 TOCTOU/沙箱终态释放 = 17P/1S --
+.................                                                        [100%]
+17 passed, 1 skipped in 0.72s
+
+-- ruff（2 改动文件）--
+pyenv: version `3.13' is not installed (set by /Users/kong/projects/infra4agent/plaita/.python-version)
+
+-- mkdocs --strict（docs-site/）--
+rc=127
+-- ruff（2 改动文件）--
+
+Found 11 errors.
+
+-- mkdocs --strict（docs-site/）--
+rc=0
+-- ruff（改动 2 文件；flow_worker.py 11 条 BLE001 全部为基线存量〔对照 stash 实证同数〕，本轮改动零新增；新测试文件 0 告警）--
+All checks passed!
+flow_worker.py BLE001 计数=11（基线同值）
+
+-- 守恒：console 全量（CI 同参 --timeout=150 -m 'not slow' --timeout-method=thread）--
+1435 passed, 13 skipped in 179.31s；collect-only=1448 与实跑 1435P+13S=1448 全等（零回归；+23=兄弟席位 #308/#307 追补已先合入 main，非本树新增）
+
+-- 守恒：根仓 unit（CI 同参）--
+8867 passed, 13 skipped, 14 deselected, 3501 subtests passed in 368.63s（=r81 基线 8861 + 本轮新套件 6 格，精确对账）
+
+-- 守恒：integration+e2e（CI 同参）--
+287 passed, 4 skipped in 36.21s（=r75~81 全等）

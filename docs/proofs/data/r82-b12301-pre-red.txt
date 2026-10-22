@@ -1,0 +1,10 @@
+== r82 B123-01 pre-red（基线 04c814c 未修，2026-10-23）==
+-- 新文件 tests/unit/test_issue304_resume_prelease_race_b12301.py：4F/2P（4 竞窗格全红=覆写窗三点放大实证；2 个 state=None 直格基线即绿=GREEN 锁定格）--
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:flow_worker.py:2414 执行 exec-b12301 的 flow 定义缺失，终态化 error: 流程定义缺失，执行无法推进（flow_id=f1, version=1）。版本可能已被删除或未同步到引擎存储。
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue304_resume_prelease_race_b12301.py::test_resume_prelease_race_completed_not_clobbered
+FAILED tests/unit/test_issue304_resume_prelease_race_b12301.py::test_resume_race_nonterminal_terminates_on_fresh_context
+FAILED tests/unit/test_issue304_resume_prelease_race_b12301.py::test_resume_race_no_sandbox_pause_from_stale_context
+FAILED tests/unit/test_issue304_resume_prelease_race_b12301.py::test_resume_race_no_false_terminal_run_end
+4 failed, 2 passed in 0.56s

@@ -3882,12 +3882,17 @@ class FlowWorker:
         except FlowDefinitionMissingError:
             # #304：定义缺失（版本被删/未同步）不再裸 ValueError poison ack
             # ——先终态化 error（可观测 + 配额名额释放）再上抛。位置在租约
-            # 前（#33「suspended + continue 不取租约」契约保持）：定义缺失时
-            # 任何 worker 都无法推进本执行，此写要么生效、要么被仍持有缓存
-            # 定义的活 worker 推进覆写（后者证明执行未孤儿化，无害）。
-            # 未持租约 ⇒ fenced 存储按普通写落盘。
+            # 前（#33「suspended + continue 不取租约」契约保持）。不传上面
+            # 的预读快照（B123-01）：load→取定义的窗口内，持缓存定义的活
+            # worker 可能已把执行推进到 completed 终态，快照（suspended +
+            # 旧 context）的 error 写会无条件覆写终态——状态回退 + 整行
+            # 倒灌旧断点（retry 重放已成功节点）+ 按快照 context 误 pause
+            # 活跑沙箱 + 假终态 run_end 先行双发。传 None 让助手**现读盘**：
+            # 已终态一律不覆写，非终态才终态化且落在现读行（与 start 路径
+            # 同款）。现读后的写仍走普通写（未持租约）——写的是刚读到的
+            # 行，窗口收窄到读-写之间。
             self._terminalize_definition_missing(
-                execution_id, flow_id, version, state,
+                execution_id, flow_id, version, None,
                 phase="flow_definition_missing_resume",
             )
             raise
