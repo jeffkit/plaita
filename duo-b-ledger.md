@@ -855,3 +855,6 @@
 > 必炸）；基线 8d715f7 同样 1F，CI（装真包）success——测试隔离缺陷候选单，
 > 未提报待拍板。**教训复踩警示**：`pytest | tail; echo $?` 取的是 tail 的
 > 退出码，第一遍 unit 判定无效、以输出落文件读 `pytest_rc` 重跑纠正。
+> **终态**：推送 `c83229d` 后 main CI + CI slow lane + Console E2E 三线
+> **success**；`landing_gate.py ci` **rc=0**（✅ main CI 绿 ✅ Console E2E
+> 绿 ✅ 允许落地）——三连红熔断解除，B2/B4 在途交付恢复落地。
