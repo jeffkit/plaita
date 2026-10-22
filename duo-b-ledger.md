@@ -909,3 +909,13 @@
 - 判据修正（实现期自证）：①end 的出边曾造假环（a→end→a）——运行期 `next_node(end)` 恒 None，环/可达性邻接把 end 当绝对终点，死边由 `edge.end_outgoing` warning 提示；②`end.resultType` 非法值被引擎静默归一 success（warning 非拒绝面），pydantic 级拒绝面换 `end.error` 非对象；③if 的 condition 是结构化 Condition（field/operator/value）不是表达式串（json.loads）。
 - 守恒：console 全量 **1360P/13S rc=0**（rebase 后含 B2 新增；本轮 +39）；unit **8927P/17S/226 deselected/3501 subtests rc=0**（与 r76 前值逐项相等）；integration+e2e **287P/4S**（CI 同参 `--timeout=150 -m "not slow" --timeout-method=thread`，与 r75/76 全等）；ruff 改动文件零告警。
 - **终态**：推送 `f327ee2` 后 main CI + CI slow lane + Console E2E 三线 **success**；`landing_gate.py ci` **rc=0**（✅ main CI 绿 ✅ Console E2E 绿 ✅ 允许落地）。#305 **不关单**（四期 Plan 之 Phase 1；Phase 2 generate API 排下一轮），进度回评已附。
+
+## 第七十九轮 · #307（#304 删除守卫引用判据两处失效——翻页穷尽 + 扫描 strict fail-closed，2026-10-22，B1 修复席）
+
+- 基线：`origin/main` `f06755e`（与任务书一致；开工 git status 仅他席未跟踪台账三件，无在途代码）。
+- 机制（A2R50-01 实弹，探针归档 `~/.issue-keeper/duty/a2-r50-scripts/`）：r76 落地的 `_enforce_version_delete_guard` 引用判据两处失效——①`find_flow_version_active_executions` 调 `list_executions(query=...)` 未传 limit，存储层默认 100 且 start_time **升序**，忙 flow（30 天 TTL 内 cron 即积 >100 条终态）尾部挂起执行不可见 → `delete_version/delete_flow?force=true` 200 放行（对照 50+1 正确 409，边界恰 100）；②`list_executions` 整体 except→[]，ping 通过后的批量读故障被判「无引用」放行，违反 #304 自身 503 fail-closed 契约。
+- 修法（判据一个函数收口 + 存储层 strict 模式）：①判据**翻页穷尽**（显式 limit+offset 循环至短页/空页、收满 limit 提前停；列表端点分页语义不动——#307 边界）；②`RedisExecutionStorage` 读路径增 `strict` 参数，守卫路径异常一律转 `VersionInUseScanError` → 503。**strict 须穿透三层吞点**：`list_executions` 外层、`_ensure_execution_index`（整批失败→零更新降级 + 单键/坏行→部分索引降级——**首版只加外层实测 3F 不翻绿**，异常实际死在回填层 catch-all，证据 `r79-issue307-intermediate-outer-strict-only.txt`）、`_load_indexed_states` 坏行跳过。同族调用点核对：fenced/tenant_context 显式透传、reap_zombie 自行翻页（空页停）、ops 走 HTTP 分页——「默认参数当全量」仅守卫一处。
+- 负控先红后绿：新回归 `tests/console/test_issue307_delete_guard_scan_limits.py` **9 用例**——pre（基线树直接跑）**7F/2P**（120+1 双端点 200 放行、边界 101 窗外一格、异常直读+端到端 fail-open、strict 缺失 TypeError；对照格=窗口内 100 条 409 绿 + 无引用 force 200 绿）→ post **9P** rc=0；#304 既有守卫 11 + 终态 5 用例合跑 **25P 零回归**。证据 `docs/proofs/data/r79-issue307-negative-control-{pre,post}.txt` + `-issue304-regression.txt`。
+- 守恒：console 全量 **1369P/13S rc=0**（基线 collect-only 1373 = 1360P+13S 与 r78 台账终值吻合，+9 全为本轮；差额 9 曾疑记账漂移，stash 往返 collect-only 定案）；unit **8861P/13S/14d/3501 subtests rc=0**（**树真实测**——r76/r78 台账 8927P/226d 为旧树 carried 值，现树 slow 标记仅 2 文件 14 条，subtests 3501 全等可互证）；integration+e2e **287P/4S**（CI 同参，与 r75/76/78 全等）；ruff 改动文件零新增（两文件 30→25 既有 BLE001，新文件 0）；mkdocs --strict rc=0（配置在 docs-site/ 子目录）。runbook #304 节扫描语义同步修准（翻页穷尽 + 503 覆盖探活通过后的扫描故障）。
+- 教训：**「在建议处加开关」不等于「修到位」**——异常注入负控必须实跑翻绿才算数，首版 strict 只盖外层时 3F 红的就是更深的吞点；多层降级结构里 fail-closed 要按「读面全链」审计吞点，不是按调用点。
+- **终态**：推送 `cc5d1fc`。（landing_gate 三线结论关单回评时补记）
