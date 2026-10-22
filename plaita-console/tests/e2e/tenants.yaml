@@ -354,7 +354,8 @@ cases:
   - name: "清理：qa-user 删本租户流程"
     request:
       method: DELETE
-      url: http://localhost:18081/api/flows/e2e-tenant-flow
+      # #304：published 版本删除需显式 force（清理时点无在途执行）
+      url: http://localhost:18081/api/flows/e2e-tenant-flow?force=true
       headers:
         Authorization: "Bearer {{runtime.qa_token}}"
     expect:
@@ -363,7 +364,8 @@ cases:
   - name: "清理：admin 删 default 流程"
     request:
       method: DELETE
-      url: http://localhost:18081/api/flows/e2e-default-flow
+      # #304：published 版本删除需显式 force（清理时点无在途执行）
+      url: http://localhost:18081/api/flows/e2e-default-flow?force=true
       headers:
         Authorization: "Bearer {{runtime.admin_token}}"
     expect:
