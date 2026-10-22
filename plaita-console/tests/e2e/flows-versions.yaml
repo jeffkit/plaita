@@ -156,10 +156,20 @@ cases:
     expect:
       status: 404
 
-  - name: "删除整个流程"
+  - name: "删除含 published 版本的流程默认 409（#304 守卫）"
     request:
       method: DELETE
       url: http://localhost:18080/api/flows/e2e-fv-flow
+    expect:
+      status: 409
+      body:
+        detail:
+          code: "version_published"
+
+  - name: "force 删除整个流程"
+    request:
+      method: DELETE
+      url: http://localhost:18080/api/flows/e2e-fv-flow?force=true
     expect:
       status: 200
 

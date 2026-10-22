@@ -202,5 +202,7 @@ teardown:
   - name: "清理: 删除契约测试流程（容错）"
     request:
       method: DELETE
-      url: http://localhost:18080/api/flows/e2e-contract-flow
+      # #304：published 版本删除需显式 force（无 ignoreError 时 409 会使
+      # 清理静默失效；本流程无在途执行，引用守卫不拦）
+      url: http://localhost:18080/api/flows/e2e-contract-flow?force=true
     ignoreError: true
