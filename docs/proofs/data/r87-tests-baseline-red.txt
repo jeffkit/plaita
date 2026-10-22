@@ -1,0 +1,213 @@
+FFFFF.                                                                   [100%]
+=================================== FAILURES ===================================
+_________ test_manual_exit_race_window_rejected_by_tombstone[resolve] __________
+
+store = <services.flow_store.FlowStore object at 0x105a8be00>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1026/test_manual_exit_race_window_r0/a2r50-lock.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105aea8b0>
+action = 'resolve'
+
+    @pytest.mark.parametrize("action", ["resolve", "discard"])
+    def test_manual_exit_race_window_rejected_by_tombstone(
+            store, sessions, env_enabled, monkeypatch, action):
+        """竞窗内落下的 tombstone 必须被锁内重读看见——出口按既有 409 语义拒。"""
+        _publish_version(store)
+        row_id = _row_to_failed(sessions)
+        _install_race(monkeypatch, sessions, row_id)
+    
+        fn = engine_outbox.resolve_row if action == "resolve" \
+            else engine_outbox.discard_row
+>       with pytest.raises(ValueError, match="deleting"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests/console/test_a2r50_outbox_manual_exit_lock.py:147: Failed
+_________ test_manual_exit_race_window_rejected_by_tombstone[discard] __________
+
+store = <services.flow_store.FlowStore object at 0x106c84b90>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1026/test_manual_exit_race_window_r1/a2r50-lock.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105dc09d0>
+action = 'discard'
+
+    @pytest.mark.parametrize("action", ["resolve", "discard"])
+    def test_manual_exit_race_window_rejected_by_tombstone(
+            store, sessions, env_enabled, monkeypatch, action):
+        """竞窗内落下的 tombstone 必须被锁内重读看见——出口按既有 409 语义拒。"""
+        _publish_version(store)
+        row_id = _row_to_failed(sessions)
+        _install_race(monkeypatch, sessions, row_id)
+    
+        fn = engine_outbox.resolve_row if action == "resolve" \
+            else engine_outbox.discard_row
+>       with pytest.raises(ValueError, match="deleting"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests/console/test_a2r50_outbox_manual_exit_lock.py:147: Failed
+______________ test_manual_exit_race_no_ghost_after_failed_delete ______________
+
+store = <services.flow_store.FlowStore object at 0x106c86210>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1026/test_manual_exit_race_no_ghost0/a2r50-lock.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106d11b50>
+
+    def test_manual_exit_race_no_ghost_after_failed_delete(
+            store, sessions, env_enabled, monkeypatch):
+        """完整危害链：竞窗出口被拒 → 删除事务失败 restore → 行可恢复、无幽灵。
+    
+        修复前：discard 竞窗删行 → restore_deleting 只恢复仍为 deleting 的行
+        （恢复 0 行）→ published 版本永久失去投递/对账载体。
+        """
+        _publish_version(store)
+        row_id = _row_to_failed(sessions)
+        _install_race(monkeypatch, sessions, row_id)
+    
+>       with pytest.raises(ValueError, match="deleting"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests/console/test_a2r50_outbox_manual_exit_lock.py:164: Failed
+________________ test_manual_exit_waits_for_inflight_row_action ________________
+
+store = <services.flow_store.FlowStore object at 0x105dc22c0>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1026/test_manual_exit_waits_for_inf0/a2r50-lock.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=76af3a59155745c5a820afc507ac548e,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106d2b130>
+
+    def test_manual_exit_waits_for_inflight_row_action(
+            store, sessions, env_enabled, target_redis: FakeRedis, monkeypatch):
+        """在途投递持锁期间，人工出口必须等待（行动粒度串行），放锁后完成。
+    
+        在途投递构造成**失败**投递（返回具名原因、行保持 failed）——若在途
+        投递成功把行转 delivered，出口等锁后按既有语义拒 delivered，与等待
+        断言混在一起分不开。
+        """
+        _publish_version(store)
+        row_id = _row_to_failed(sessions)
+    
+        in_flight = threading.Event()
+        release = threading.Event()
+    
+        def slow_deliver(target, row, now):
+            in_flight.set()
+            assert release.wait(timeout=10), "delivery not released in time"
+            return "redis_unavailable: (模拟在途投递失败)"
+    
+        monkeypatch.setattr(engine_outbox, "_deliver_one", slow_deliver)
+        delivery_done = threading.Event()
+    
+        def run_delivery():
+            engine_outbox.run_delivery_cycle(target_redis, sessions)
+            delivery_done.set()
+    
+        t = threading.Thread(target=run_delivery, daemon=True)
+        t.start()
+        assert in_flight.wait(timeout=5)
+    
+        resolve_done = threading.Event()
+        resolve_result: dict = {}
+        resolve_error: list = []
+    
+        def do_resolve():
+            try:
+                resolve_result["brief"] = engine_outbox.resolve_row(
+                    sessions, row_id, tenant_id="", actor="a2r50")
+            except Exception as e:  # noqa: BLE001 — 线程内异常转存供断言
+                resolve_error.append(repr(e))
+            resolve_done.set()
+    
+        t2 = threading.Thread(target=do_resolve, daemon=True)
+        t2.start()
+        time.sleep(0.2)
+        # 出口不得在投递持锁期间落状态（修复前：无锁、此刻已完成=红）
+>       assert not resolve_done.is_set()
+E       assert not True
+E        +  where True = is_set()
+E        +    where is_set = <threading.Event at 0x106dab890: set>.is_set
+
+tests/console/test_a2r50_outbox_manual_exit_lock.py:229: AssertionError
+_____________________ test_api_manual_exit_race_named_409 ______________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1026/test_api_manual_exit_race_name0')
+env_enabled = None
+console_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=e87af41a9c944005b5203bee7c29f3f4,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106df16a0>
+
+    def test_api_manual_exit_race_named_409(tmp_path, env_enabled,
+                                            console_redis: FakeRedis,
+                                            monkeypatch):
+        """竞窗内 resolve 走 API → 409 ``outbox_row_not_eligible``，行保持 deleting。"""
+        from models.flow import DEFAULT_TENANT_ID
+    
+        client = _api_client(tmp_path, console_redis)
+        flow_store_mod = sys.modules["services.flow_store"]
+        sessions = flow_store_mod.session_factory()
+        with sessions() as session:
+            session.add(FlowPublishOutbox(
+                tenant_id=DEFAULT_TENANT_ID, flow_id="demo", version="1.0.0",
+                definition_hash="deadbeef", definition="{}",
+                status=engine_outbox.STATUS_FAILED))
+            session.commit()
+        row = sessions().scalars(select(FlowPublishOutbox)).first()
+        _install_race(monkeypatch, sessions, row.id,
+                      flow_id="demo", tenant_id=DEFAULT_TENANT_ID)
+    
+        resp = client.post(f"/api/flows/publish-outbox/{row.id}/resolve")
+>       assert resp.status_code == 409
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a2r50_outbox_manual_exit_lock.py:277: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 24 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[resolve]
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[discard]
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_no_ghost_after_failed_delete
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_waits_for_inflight_row_action
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_sequential_semantics_conserved
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_sequential_semantics_conserved
+  /private/tmp/plaita-b3-r87/plaita-console/backend/services/flow_store.py:703: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 18 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[resolve]
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[discard]
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_no_ghost_after_failed_delete
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_waits_for_inflight_row_action
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_sequential_semantics_conserved
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_sequential_semantics_conserved
+  /private/tmp/plaita-b3-r87/plaita-console/backend/services/flow_store.py:865: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[resolve]
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_waits_for_inflight_row_action
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_api_manual_exit_race_named_409
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_sequential_semantics_conserved
+  /private/tmp/plaita-b3-r87/plaita-console/backend/services/engine_outbox.py:1064: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    note = f"manually resolved by {actor or 'unknown'} @ {datetime.utcnow().isoformat()}"
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_waits_for_inflight_row_action
+  /private/tmp/plaita-b3-r87/plaita-console/backend/services/engine_outbox.py:688: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_api_manual_exit_race_named_409
+  /private/tmp/plaita-b3-r87/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[resolve]
+FAILED tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_window_rejected_by_tombstone[discard]
+FAILED tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_race_no_ghost_after_failed_delete
+FAILED tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_waits_for_inflight_row_action
+FAILED tests/console/test_a2r50_outbox_manual_exit_lock.py::test_api_manual_exit_race_named_409
+5 failed, 1 passed, 60 warnings in 1.46s

@@ -59,6 +59,10 @@ Redis**；console 与 FlowWorker 不同机/不同 Redis 时，「发布成功、
 - **DLQ 人工出口（c117-06）**：``resolve``（认定无需再投递，置
   ``resolved`` 终态、留痕）/ ``discard``（放弃投递并删行），见
   ``api/flows.py`` 的 ``POST /flows/publish-outbox/{id}/resolve|discard``。
+  人工出口同样在 :data:`OUTBOX_DELETE_LOCK` 内行动（A2R50-02）：
+  删除协议标记 tombstone 与出口的状态写竞争时，锁内重读现态必见
+  ``deleting``/已删，按既有 409/404 语义拒——出口不再可能盖掉
+  tombstone 或抢在删除事务前删行（删除失败回滚后行不可自愈的幽灵链）。
 
 **单副本约定（b117-03）**：投递/对账线程无 claim/leader 机制，按**单
 console 副本**设计；多副本并发会重复投递（同内容覆盖写、幂等无害）但
@@ -144,10 +148,13 @@ STATUS_RESOLVED = "resolved"
 #: 删行 commit 之前，任何线程都不得再触碰该行（对偶破口封死）。
 STATUS_DELETING = "deleting"
 
-#: 删除协议与投递/对账的进程内互斥锁（#303）。「单副本约定」（b117-03）
-#: 的延伸：投递/对账线程本就按单 console 副本设计，删除与两线程同进程，
-#: 进程内锁即完整覆盖；删除守卫全程持锁，投递/对账逐行动作前也持锁重读
-#: 行现态——三者在行动粒度上串行，删除窗口内不可能有投递写出 key。
+#: 删除协议与投递/对账/人工出口的进程内互斥锁（#303；A2R50-02 收口）。
+#: 「单副本约定」（b117-03）的延伸：投递/对账线程本就按单 console 副本
+#: 设计，删除与两线程同进程，进程内锁即完整覆盖；删除守卫全程持锁，
+#: 投递/对账/人工出口（resolve/discard）在**行动粒度**上持锁并重读
+#: 行现态——各面在单行动作上串行，删除窗口内不可能有投递写出 key、
+#: 也不可能有人工出口盖掉 tombstone。持锁段均为单行动作（毫秒级），
+#: 等待方最多让出一个行动位，不饿死。
 OUTBOX_DELETE_LOCK = threading.RLock()
 
 last_error_truncate = 300
@@ -1044,35 +1051,44 @@ def resolve_row(
     不进对账（只扫 delivered），保留行体与失败原因作留痕。delivered 行
     无需人工出口（下线请走删除流程/版本接口，#301 会清目标三件）→
     ``ValueError``。租户不匹配/行不存在 → ``None``。
+
+    A2R50-02：检查与写在 :data:`OUTBOX_DELETE_LOCK` 内全程串行（与
+    deleting_guard/投递/对账同锁），锁内 ``_reload_row`` 重读现态——
+    竞窗内落下的 tombstone / 删除在此显形（deleting → ``ValueError``
+    409、已删 → ``None`` 404，陈旧读不放行），resolve 不再可能盖掉
+    tombstone 致删除回滚后行不可恢复。
     """
     with session_local() as session:
-        row = _get_scoped_row(session, row_id, tenant_id)
-        if row is None:
-            return None
-        if row.status == STATUS_DELETING:
-            raise ValueError(
-                "该行处于删除协议中（deleting），不可人工出口；"
-                "删除事务失败会自动恢复行原状，稍后重试"
+        with OUTBOX_DELETE_LOCK:
+            row = _get_scoped_row(session, row_id, tenant_id)
+            if row is None:
+                return None
+            if _reload_row(session, row_id) is None:
+                return None
+            if row.status == STATUS_DELETING:
+                raise ValueError(
+                    "该行处于删除协议中（deleting），不可人工出口；"
+                    "删除事务失败会自动恢复行原状，稍后重试"
+                )
+            if row.status == STATUS_DELIVERED:
+                raise ValueError(
+                    "已 delivered 的行无需人工出口；如需下线请走删除流程/版本接口"
+                )
+            if row.status != STATUS_RESOLVED:
+                row.status = STATUS_RESOLVED
+                row.next_attempt_at = None
+                note = f"manually resolved by {actor or 'unknown'} @ {datetime.utcnow().isoformat()}"
+                row.last_error = (
+                    f"{row.last_error} | {note}" if row.last_error else note
+                )[:last_error_truncate]
+                session.commit()
+            brief = _row_brief(row)
+            logger.info(
+                "outbox 行人工 resolve：%s@%s（租户 %s，row_id=%s，actor=%s）",
+                brief["flow_id"], brief["version"], brief["tenant_id"] or "default",
+                row_id, actor or "unknown",
             )
-        if row.status == STATUS_DELIVERED:
-            raise ValueError(
-                "已 delivered 的行无需人工出口；如需下线请走删除流程/版本接口"
-            )
-        if row.status != STATUS_RESOLVED:
-            row.status = STATUS_RESOLVED
-            row.next_attempt_at = None
-            note = f"manually resolved by {actor or 'unknown'} @ {datetime.utcnow().isoformat()}"
-            row.last_error = (
-                f"{row.last_error} | {note}" if row.last_error else note
-            )[:last_error_truncate]
-            session.commit()
-        brief = _row_brief(row)
-        logger.info(
-            "outbox 行人工 resolve：%s@%s（租户 %s，row_id=%s，actor=%s）",
-            brief["flow_id"], brief["version"], brief["tenant_id"] or "default",
-            row_id, actor or "unknown",
-        )
-        return brief
+            return brief
 
 
 def discard_row(
@@ -1088,30 +1104,38 @@ def discard_row(
     拒绝——删行会失去对账覆盖（目标 key 幽灵化风险）→ ``ValueError``；
     若定义也不该留在目标 Redis，走删除流程/版本接口（#301 清理三件）。
     租户不匹配/行不存在 → ``None``。
+
+    A2R50-02：与 :func:`resolve_row` 同锁同重读纪律——竞窗内 discard
+    不再可能抢在删除事务前删行（删除失败回滚后 restore_deleting 只恢复
+    仍为 deleting 的行，被抢删的行 = published 版本永久失去投递/对账
+    载体，幽灵不可自愈）；竞窗内已落 tombstone 的行按 409 拒。
     """
     with session_local() as session:
-        row = _get_scoped_row(session, row_id, tenant_id)
-        if row is None:
-            return None
-        if row.status == STATUS_DELETING:
-            raise ValueError(
-                "该行处于删除协议中（deleting），不可 discard；"
-                "删除事务失败会自动恢复行原状，稍后重试"
+        with OUTBOX_DELETE_LOCK:
+            row = _get_scoped_row(session, row_id, tenant_id)
+            if row is None:
+                return None
+            if _reload_row(session, row_id) is None:
+                return None
+            if row.status == STATUS_DELETING:
+                raise ValueError(
+                    "该行处于删除协议中（deleting），不可 discard；"
+                    "删除事务失败会自动恢复行原状，稍后重试"
+                )
+            if row.status == STATUS_DELIVERED:
+                raise ValueError(
+                    "已 delivered 的行不可 discard（会失去对账覆盖）；"
+                    "如需下线请走删除流程/版本接口"
+                )
+            brief = _row_brief(row)
+            session.delete(row)
+            session.commit()
+            logger.info(
+                "outbox 行人工 discard（删行）：%s@%s（租户 %s，row_id=%s，actor=%s）",
+                brief["flow_id"], brief["version"], brief["tenant_id"] or "default",
+                row_id, actor or "unknown",
             )
-        if row.status == STATUS_DELIVERED:
-            raise ValueError(
-                "已 delivered 的行不可 discard（会失去对账覆盖）；"
-                "如需下线请走删除流程/版本接口"
-            )
-        brief = _row_brief(row)
-        session.delete(row)
-        session.commit()
-        logger.info(
-            "outbox 行人工 discard（删行）：%s@%s（租户 %s，row_id=%s，actor=%s）",
-            brief["flow_id"], brief["version"], brief["tenant_id"] or "default",
-            row_id, actor or "unknown",
-        )
-        return brief
+            return brief
 
 
 # ---- 观测 ----
