@@ -349,6 +349,32 @@ _PLACEHOLDER_MEM = "__MEM_BYTES__"
 _PLACEHOLDER_CODE = "__USER_CODE__"
 
 
+class SandboxEnvelopeError(RuntimeError):
+    """沙箱 runner 信封 ``ok=false`` 的具名包装（node-F2 × plaita-go#43）。
+
+    subprocess/docker 后端的 runner 把用户代码异常写成 JSON 信封
+    ``{"ok": false, "type": <类型名>, "error": <消息>}``。旧实现把它压成裸
+    ``RuntimeError``，内层类型只剩文本前缀，重试分类无法穿透（B3 r70 实测
+    ``is_retryable_error(RuntimeError("ValueError: boom")) == True``——确定性
+    失败被烧满 retryTimes，每次重试都是一次真实的子进程 spawn + 用户代码
+    执行）。本类把信封保留的类型名挂在 ``origin_type`` 供
+    ``core.runner.is_retryable_error`` 按确定性集分类。
+
+    ``RuntimeError`` 子类且文本逐字不变（``f"{type}: {msg}"``，与 Go
+    ``decodePythonRunnerOutput`` 同文），既有按 ``RuntimeError``/文案捕获的
+    行为不受影响。只用于 **python** 信封：JS 信封的类型名体系不同
+    （``ReferenceError``/``EvalError`` 等，无 ``ValueError``），维持裸
+    ``RuntimeError`` 历史行为，不在 plaita-go#43 裁决集内。
+    """
+
+    def __init__(self, exc_type: str, exc_msg: str):
+        super().__init__(f"{exc_type}: {exc_msg}")
+        #: 信封保留的用户代码异常类型名（``"ValueError"``/``"TypeError"``/…
+        #: 缺型时为 ``"Error"``）。重试分类按它对照
+        #: ``core.errors.DETERMINISTIC_ERROR_TYPES``。
+        self.origin_type = exc_type
+
+
 def _build_runner_script(user_code: str, mem_bytes: int = 0) -> str:
     """Embed *user_code* inside the runner template.
 
@@ -366,8 +392,15 @@ def _build_runner_script(user_code: str, mem_bytes: int = 0) -> str:
     return script
 
 
-def _decode_runner_output(raw: str, stderr: str) -> Any:
-    """Parse the JSON envelope written by the runner script."""
+def _decode_runner_output(raw: str, stderr: str, *, origin_typed: bool = False) -> Any:
+    """Parse the JSON envelope written by the runner script.
+
+    ``origin_typed=True``（python 后端专用）时 ``ok=false`` 分支抛
+    ``SandboxEnvelopeError``（携带信封类型名供重试分类穿透）；JS 后端维持
+    裸 ``RuntimeError`` 历史行为。基础设施级失败（无输出/坏 JSON）两语言
+    都是无 ``origin_type`` 的裸 ``RuntimeError``，保持历史可重试缺省（与 Go
+    ``decodePythonRunnerOutput`` 的注释口径一致）。
+    """
     if not raw.strip():
         raise RuntimeError(
             f"Sandbox produced no output. Stderr: {stderr[:500] or '(empty)'}"
@@ -383,6 +416,8 @@ def _decode_runner_output(raw: str, stderr: str) -> Any:
     if not envelope.get("ok"):
         exc_type = envelope.get("type", "Error")
         exc_msg = envelope.get("error", "(unknown)")
+        if origin_typed:
+            raise SandboxEnvelopeError(exc_type, exc_msg)
         raise RuntimeError(f"{exc_type}: {exc_msg}")
     return envelope["result"]
 
@@ -806,7 +841,7 @@ def run_python_subprocess(code, input_value, cancel_event=None):
             f"Stderr: {stderr[:500] or '(empty)'}"
         )
 
-    return _decode_runner_output(stdout, stderr)
+    return _decode_runner_output(stdout, stderr, origin_typed=True)
 
 
 # ---------------------------------------------------------------------------
@@ -833,8 +868,11 @@ def _docker_hardening_flags() -> list:
 
 
 def _run_docker_container(container_name, cmd, timeout, cancel_event,
-                          input_value, what) -> Any:
+                          input_value, what, *, origin_typed: bool = False) -> Any:
     """跑一次性容器并解出 runner 的 JSON 信封（python / js docker 后端共用）。
+
+    ``origin_typed`` 透传给 :func:`_decode_runner_output`（仅 python 信封
+    携带内层类型名；见 :class:`SandboxEnvelopeError`）。
 
     超时或取消：``_popen_wait_cancellable`` 先 killpg 掉 ``docker run`` 客户端进程组，
     这里再 best-effort ``docker rm -f`` —— ``--rm`` 只在容器正常退出时生效，客户端被
@@ -893,7 +931,7 @@ def _run_docker_container(container_name, cmd, timeout, cancel_event,
             f"Stderr: {stderr_text}"
         )
 
-    return _decode_runner_output(stdout, stderr)
+    return _decode_runner_output(stdout, stderr, origin_typed=origin_typed)
 
 
 def run_python_docker(code, input_value, cancel_event=None):
@@ -946,7 +984,7 @@ def run_python_docker(code, input_value, cancel_event=None):
 
     return _run_docker_container(
         container_name, cmd, SANDBOX_DOCKER_TIMEOUT, cancel_event,
-        input_value, "Docker sandbox")
+        input_value, "Docker sandbox", origin_typed=True)
 
 
 # ---------------------------------------------------------------------------

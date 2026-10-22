@@ -977,7 +977,8 @@ def _is_retryable_node_failure(exc: BaseException) -> bool:
       ``_execute_current_node`` 的 ``runner.run_node`` 抛出时 context 未变）；
     - **A50-03**：``NodeExecutionError`` 只是 abort 包装层，原始节点异常挂在
       它的 ``__cause__``。若更深处是 node-F2 判定的确定性错误（1001 /
-      非校验 ValueError），**不重试**——否则 core 里「执行 1 次」的分类在
+      ValueError·TypeError·NameError·SyntaxError 及沙箱信封 ``origin_type``
+      落集同型，#43），**不重试**——否则 core 里「执行 1 次」的分类在
       worker 层被包装层抹掉，同一确定性错误还会被重投 5 次。分类直接复用
       ``core.runner.is_retryable_error``（单一来源），保留 #219 输出校验
       异常的可重试例外；

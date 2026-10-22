@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
+    DETERMINISTIC_ERROR_TYPES,
     ErrorResultException,
     ErrorStrategy,
     ExecutionDeadlineError,
@@ -137,14 +138,36 @@ _RETRY_MAX_DELAY_SECONDS = 30.0
 _RETRY_MAX_BACKOFF_EXPONENT = 30
 
 
+#: 确定性错误类型（node-F2 × plaita-go#43）：isinstance 判定的类型面。
+#: 名集本体（``DETERMINISTIC_ERROR_TYPES``）与沙箱信封的 ``origin_type``
+#: 分类共用同一份，见 ``plaita.core.errors``。
+_DETERMINISTIC_ERROR_CLASSES = (
+    ValueError,
+    TypeError,
+    NameError,
+    SyntaxError,
+)
+
+
 def is_retryable_error(exc: BaseException) -> bool:
-    """按异常类型/错误码判定是否值得重试（node-F2）。
+    """按异常类型/错误码判定是否值得重试（node-F2 × plaita-go#43）。
 
     - ``NodeException``：1001（请求生成 = 配置/参数确定性错误）不重试；
       1002/1003（发送/处理 = 瞬态）重试；其余未知码维持历史行为（重试），
       避免把未来新增的错误码静默降级成「一次都不重试」。
-    - 非 ``NodeException`` 的 ``ValueError``：参数/配置类确定性错误，不重试；
-      但节点输出校验钩子抛出的异常除外（#219 契约：校验异常仍走 retryTimes）。
+    - 沙箱信封穿透：subprocess/docker 后端把 runner 的 ``ok=false`` 信封包成
+      ``SandboxEnvelopeError``（``RuntimeError`` 子类，信封保留的内层类型名
+      挂 ``origin_type``）。``origin_type`` 落在确定性集内 → 不重试；缺型
+      （``Error``）/``KeyError`` 等集外类型与基础设施级失败（无输出/坏 JSON/
+      无信封非零退出，无 ``origin_type``）维持历史可重试缺省。按属性分类、
+      不做文本嗅探——裸 ``RuntimeError("TypeError: …")`` 仍可重试。与 Go
+      ``pyDeterministicEnvelopeTypes``（r69 终态）逐字对齐。
+    - 确定性错误类型（``ValueError``/``TypeError``/``NameError``/``SyntaxError``
+      及子类，in-process 后端用户异常原样穿出）：参数/配置/编码类确定性错误，
+      不重试——同一份代码在同一份输入上重跑不可能变对（plaita-go#43 owner
+      裁决 2026-10-22：Python 采纳完整集，Go 不放松）。但节点输出校验钩子
+      抛出的异常除外（#219 契约：校验异常仍走 retryTimes），豁免对整个
+      确定性家族一致生效。
     - 其余异常（``RuntimeError``、节点自身 ``TimeoutError`` 等）：保持历史行为。
 
     A50-03：公开导出。worker 层的重投判据必须复用同一份分类，否则
@@ -158,7 +181,10 @@ def is_retryable_error(exc: BaseException) -> bool:
         if code in _NON_RETRYABLE_NODE_CODES:
             return False
         return True
-    if isinstance(exc, ValueError):
+    origin_type = getattr(exc, "origin_type", None)
+    if isinstance(origin_type, str) and origin_type in DETERMINISTIC_ERROR_TYPES:
+        return False
+    if isinstance(exc, _DETERMINISTIC_ERROR_CLASSES):
         return is_output_validation_retryable(exc)
     return True
 
@@ -659,8 +685,9 @@ class NodeRunner:
                 if attempt == max_retries or not _is_retryable_error(e):
                     return _handle_node_error(flow, node, error_handler, e)
                 # node-F2：只对瞬态错误重试，重试间隔按指数退避（1s×2^n，封顶
-                # 30s）——确定性配置错误（1001 / ValueError）在上面的分类处直接
-                # 落到 errorHandler，不再被盲目重试 retryTimes 次；429/限流类
+                # 30s）——确定性错误（1001 / ValueError·TypeError·NameError·
+                # SyntaxError 及沙箱信封同型）在上面的分类处直接落到
+                # errorHandler，不再被盲目重试 retryTimes 次；429/限流类
                 # 瞬态错误也不再零间隔连打。
                 delay = _retry_backoff_seconds(attempt)
                 if total_timeout_ms is not None:
