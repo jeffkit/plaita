@@ -1,0 +1,6 @@
+VERDICT RED S1_301_target_three_cleaned: ghost still_there=1 flow_list=1 versions_set=1 purge_target_keys=MISSING
+VERDICT RED S2_302_source_drift_named_and_converged: reconcile={'checked': 1, 'requeued': 0} target_desc='outbox' console_desc='OPS-EDITED' drift_total=MISSING row_status=delivered
+VERDICT RED S3_c117_06_dlq_manual_exit: engine_outbox.resolve_row MISSING（无人工出口）
+VERDICT RED S4_b117_04_inf_named_rejected: poll_seconds(inf)=inf default=2.0
+VERDICT RED S5_302_healthy_row_no_drift: drifted=MISSING status=delivered drift_count=MISSING
+SUMMARY 0/5 GREEN

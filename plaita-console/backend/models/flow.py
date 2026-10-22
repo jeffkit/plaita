@@ -162,6 +162,9 @@ class FlowPublishOutbox(Base):
     definition = Column(Text, nullable=False, default="")
     status = Column(String(16), nullable=False, default="pending", index=True)
     attempts = Column(Integer, nullable=False, default=0)
+    # #302：源表定义漂移被对账命中的累计次数（/health.engine_outbox.
+    # drift_total 聚合；>0 = 该行经历过 DB 级定义修改并被按源表现值重投）。
+    drift_count = Column(Integer, nullable=False, default=0)
     last_error = Column(Text, nullable=False, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     delivered_at = Column(DateTime, nullable=True)

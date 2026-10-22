@@ -1,0 +1,8 @@
+outbox 对账发现源表定义漂移（#302）：demo@1.0.0（租户 default）行内副本已过期，按源表现值重投（drift_count=1）
+PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS=<env:text len=3> 非法（需 ≥ 0.0 的数），使用默认 2.0
+VERDICT GREEN S1_301_target_three_cleaned: ghost still_there=0 flow_list=0 versions_set=0 purge_target_keys=yes
+VERDICT GREEN S2_302_source_drift_named_and_converged: reconcile={'checked': 1, 'requeued': 0, 'drifted': 1} target_desc='OPS-EDITED' console_desc='OPS-EDITED' drift_total=1 row_status=delivered
+VERDICT GREEN S3_c117_06_dlq_manual_exit: resolved=resolved exit_queue(scanned)=0 health_resolved=1
+VERDICT GREEN S4_b117_04_inf_named_rejected: poll_seconds(inf)=2.0 default=2.0
+VERDICT GREEN S5_302_healthy_row_no_drift: drifted=0 status=delivered drift_count=0
+SUMMARY 5/5 GREEN

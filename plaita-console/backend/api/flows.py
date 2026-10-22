@@ -4,12 +4,14 @@
 - GET    /api/flows                            流程列表
 - POST   /api/flows                            新建流程（仅元信息）
 - GET    /api/flows/{flow_id}                  流程详情 + 版本列表
-- DELETE /api/flows/{flow_id}                  删除流程及其全部版本
+- DELETE /api/flows/{flow_id}                  删除流程及其全部版本（#301：同步清目标 Redis 三件）
 - GET    /api/flows/{flow_id}/versions/{ver}   取某版本定义（含 layout）
 - GET    /api/flows/{flow_id}/versions/{ver}/source   codeflow 源码视图（权威 / emit_source 反编译兜底）
 - PUT    /api/flows/{flow_id}/versions/{ver}   保存草稿（Flow.model_validate 强校验）
-- DELETE /api/flows/{flow_id}/versions/{ver}   删除版本
+- DELETE /api/flows/{flow_id}/versions/{ver}   删除版本（#301：同步清目标 Redis 三件）
 - POST   /api/flows/{flow_id}/publish          发布版本（draft → published）
+- POST   /api/flows/publish-outbox/{id}/resolve  DLQ 人工出口·resolve（c117-06，置终态留痕）
+- POST   /api/flows/publish-outbox/{id}/discard   DLQ 人工出口·discard（c117-06，放弃并删行）
 """
 import json
 import logging
@@ -323,6 +325,10 @@ def delete_flow(flow_id: str, request: Request = None,
                 redis: Redis = Depends(get_redis_dep),
                 body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
+    # #301：跨 Redis 部署先清目标侧（与 outbox 投递同源配置）。先清后删：
+    # 若下方删除事务失败回滚，已 delivered 的 outbox 行仍在，对账会把 key
+    # 重投自愈；反之（先删后清）清理失败会留下无行覆盖的幽灵 key。
+    _outbox_purge_target(flow_id, tenant_id=tenant, request=request)
     try:
         _store().delete_flow(flow_id, tenant_id=tenant)
     except LookupError as e:
@@ -455,6 +461,9 @@ def delete_version(flow_id: str, version: str, request: Request = None,
                    redis: Redis = Depends(get_redis_dep),
                    body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
+    # #301：同 delete_flow——先清目标侧再删行（失败回滚可对账自愈）。
+    _outbox_purge_target(flow_id, tenant_id=tenant, version=version,
+                         request=request)
     prior = _store().get_version(flow_id, version, tenant_id=tenant)
     try:
         _store().delete_version(flow_id, version, tenant_id=tenant)
@@ -470,6 +479,28 @@ def delete_version(flow_id: str, version: str, request: Request = None,
                 "prior_status": prior.status if prior is not None else None},
                tenant_id=tenant)
     return {"success": True, "flow_id": flow_id, "version": version}
+
+
+@router.post("/flows/publish-outbox/{row_id}/resolve")
+def resolve_publish_outbox(row_id: int, request: Request = None,
+                           body: Optional[EmptyRequestModel] = None):
+    """DLQ 人工出口·resolve（c117-06）：认定该行无需再投递，置 resolved 终态。
+
+    resolved 行不进投递扫描、不进对账，行体与失败原因保留作留痕；
+    /health.engine_outbox.resolved 计数。delivered 行 409（无需人工出口）。
+    """
+    return _outbox_manual_exit(row_id, "resolve", request)
+
+
+@router.post("/flows/publish-outbox/{row_id}/discard")
+def discard_publish_outbox(row_id: int, request: Request = None,
+                           body: Optional[EmptyRequestModel] = None):
+    """DLQ 人工出口·discard（c117-06）：放弃投递并删除该行（无留痕，仅审计）。
+
+    delivered 行 409——删行会失去对账覆盖；若定义也不该留在目标 Redis，
+    走删除流程/版本接口（#301 清理三件）。
+    """
+    return _outbox_manual_exit(row_id, "discard", request)
 
 
 @router.post("/flows/{flow_id}/publish", response_model=VersionView)
@@ -535,6 +566,72 @@ def _audit(request: Request, action: str, resource_id: str,
             return
     audit_svc.record(request, action=action, resource="flow", resource_id=resource_id,
                      detail=detail, tenant_id=tenant_id)
+
+
+def _outbox_sessions():
+    try:
+        from ..services.flow_store import session_factory
+    except ImportError:
+        from services.flow_store import session_factory  # type: ignore
+    return session_factory()
+
+
+def _outbox_purge_target(flow_id: str, *, tenant_id: str,
+                         version: Optional[str] = None,
+                         request: Request = None) -> None:
+    """#301：删除流程/版本时清**目标 Redis** 侧引擎存储三件（尽力而为）。
+
+    与 outbox 投递同源配置（``TARGET_REDIS_URL``）；未启用（同 Redis 部署）
+    时 no-op。复用 lifespan 缓存的目标连接（``app.state.engine_outbox_target``）
+    避免逐次建连。清理失败只 ERROR 不阻断删除——console 是权威库，但行已
+    随删除事务 purge、对账不再覆盖该 key，幽灵 key 需按日志指引人工对齐。
+    """
+    try:
+        try:
+            from ..services import engine_outbox as _engine_outbox
+        except ImportError:
+            from services import engine_outbox as _engine_outbox  # type: ignore
+        client = getattr(getattr(request, "app", None), "state", None) \
+            if request is not None else None
+        client = getattr(client, "engine_outbox_target", None)
+        _engine_outbox.purge_target_keys(
+            flow_id, tenant_id=tenant_id, version=version, client=client
+        )
+    except Exception as e:  # noqa: BLE001 — 清理失败不阻断删除，但必须 loud
+        logger.error(
+            "outbox 目标侧删除清理异常（flow=%s@%s）：目标 Redis 可能残留"
+            "幽灵 key，需人工对齐: %s", flow_id, version or "*", e,
+        )
+
+
+def _outbox_manual_exit(row_id: int, action: str, request: Request = None) -> Dict:
+    """DLQ 人工出口（c117-06）共用：resolve=置终态留痕 / discard=删行。
+
+    delivered 行拒绝（409）——resolve 失去意义、discard 会失去对账覆盖；
+    租户不匹配/行不存在 → 404。
+    """
+    tenant = tenant_scope(request, required=True) if request is not None else ""
+    try:
+        from ..services import engine_outbox as _engine_outbox
+    except ImportError:
+        from services import engine_outbox as _engine_outbox  # type: ignore
+    fn = (_engine_outbox.resolve_row if action == "resolve"
+          else _engine_outbox.discard_row)
+    actor = getattr(getattr(request, "state", None), "actor", "") or ""
+    try:
+        brief = fn(_outbox_sessions(), row_id, tenant_id=tenant, actor=actor)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=error_detail(
+            "outbox_row_not_eligible", str(e)))
+    if brief is None:
+        raise HTTPException(status_code=404, detail=error_detail(
+            "outbox_row_not_found", f"outbox 行不存在或不在当前租户: {row_id}"))
+    if request is not None:
+        _audit(request, f"outbox.{action}", str(row_id),
+               {"flow_id": brief["flow_id"], "version": brief["version"],
+                "prior_status": brief["status"]},
+               tenant_id=tenant)
+    return {"success": True, **brief}
 
 
 @router.get("/flows/{flow_id}/versions/{version}/export")

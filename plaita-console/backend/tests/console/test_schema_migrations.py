@@ -177,3 +177,48 @@ class TestFlowPublishOutboxMigration:
         # 幂等：表已存在时再次 upgrade 不炸（create_all+stamp 路径的库二启）
         again = fs.init_engine(f"sqlite:///{db}")
         assert sm.current_revision(again) == _head_revision()
+
+
+class TestOutboxDriftCountMigration:
+    """#302：flow_publish_outbox.drift_count 三条引导路径都必须长出该列。
+
+    - 空库：create_all（模型含新列）+ stamp 基线；
+    - 已登记 0003 的存量库：upgrade head 执行 0004 补列（幂等）。
+    """
+
+    def test_fresh_db_has_drift_count_column(self, tmp_path):
+        db = tmp_path / "fresh-drift.db"
+        fs.init_engine(f"sqlite:///{db}")
+        con = sqlite3.connect(db)
+        try:
+            cols = {r[1] for r in con.execute("pragma table_info(flow_publish_outbox)")}
+        finally:
+            con.close()
+        assert "drift_count" in cols
+
+    def test_stamped_0003_db_upgrades_drift_count(self, tmp_path):
+        """0003 → 0004 真实升级路径：去列 + 版本号回拨，再启动应补回。"""
+        db = tmp_path / "upgrade-drift.db"
+        fs.init_engine(f"sqlite:///{db}")
+        con = sqlite3.connect(db)
+        try:
+            con.execute("alter table flow_publish_outbox drop column drift_count")
+            con.execute(
+                "update alembic_version set version_num='0003_flow_publish_outbox'"
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        engine = fs.init_engine(f"sqlite:///{db}")
+        assert engine.schema_summary["action"] == "upgrade"
+        con = sqlite3.connect(db)
+        try:
+            cols = {r[1] for r in con.execute("pragma table_info(flow_publish_outbox)")}
+        finally:
+            con.close()
+        assert "drift_count" in cols
+        assert sm.current_revision(engine) == _head_revision()
+        # 幂等：列已存在时再次 upgrade 不炸
+        again = fs.init_engine(f"sqlite:///{db}")
+        assert sm.current_revision(again) == _head_revision()

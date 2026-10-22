@@ -30,9 +30,29 @@ Redis**；console 与 FlowWorker 不同机/不同 Redis 时，「发布成功、
   ``max_attempts`` 转 ``failed``（DLQ 档，/health 暴露），failed 行按
   **慢速重排**（``failed_requeue_seconds`` 起、翻倍封顶 30min）自动重试
   ——目标 Redis 长时间不可用恢复后**自动补齐**，定义不丢。
-- **对账**：启动 + 周期扫 delivered 行——目标缺 key / hash 不符（被外部
+- **对账（#302 扩口径）**：启动 + 周期扫 delivered 行，每行**先对源表**：
+  重读 ``flow_versions.definition`` 现值重算指纹与行内 ``definition_hash``
+  比对——分歧 = 源表被 DB 级修改（API 面禁止覆盖 published，绕开 API 的
+  写入是唯一来源），行内副本已过期：按「console 是权威库」口径以**源表
+  现值**更新行并打回 pending 重投（``drift_count`` 累计、/health 暴露
+  ``drift_total``）；源表行已删除（删除竞态漏 purge 的残留）则按删除语义
+  收尾——清目标三件 + 删行。**后对目标**：目标缺 key / hash 不符（被外部
   删改）打回 pending 重投。版本/流程删除走 ``purge_for`` 显式清理，
   对账不会复活已删版本。
+- **删除投递语义（#301）**：删除流程/版本时除清 DB 行外，同步清**目标
+  Redis** 侧引擎存储三件（``{ns}:flow:{fid}:{ver}``、``flow_versions:{fid}``
+  注册集、``flow_list`` 成员）——复用 ``RedisFlowStorage.delete_flow``、
+  与投递同源配置（``TARGET_REDIS_URL``）。尽力而为：目标不可达 ERROR +
+  留待人工（此时行已 purge、对账不再覆盖，幽灵 key 需手工清理）；先清
+  目标后删行——删除事务失败回滚时，已 delivered 行会被对账重投自愈。
+- **DLQ 人工出口（c117-06）**：``resolve``（认定无需再投递，置
+  ``resolved`` 终态、留痕）/ ``discard``（放弃投递并删行），见
+  ``api/flows.py`` 的 ``POST /flows/publish-outbox/{id}/resolve|discard``。
+
+**单副本约定（b117-03）**：投递/对账线程无 claim/leader 机制，按**单
+console 副本**设计；多副本并发会重复投递（同内容覆盖写、幂等无害）但
+``attempts`` 计数可能互相覆盖（退避/DLQ 计数失真）——部署上不要起多个
+console 副本共享同一数据库 + 目标 Redis 跑 outbox。
 
 多租户：键空间与引擎侧同一映射（``tenant_namespace``）；投递线程对每行
 以**行内租户**显式声明上下文后过 ``guard_tenant_write``（#239 phase 2
@@ -43,6 +63,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
@@ -65,10 +86,10 @@ from plaita.tenant_context import (
 
 try:
     from .engine_sync import sync_flow_to_engine
-    from ..models.flow import FlowPublishOutbox
+    from ..models.flow import FlowPublishOutbox, FlowVersion
 except ImportError:  # 平铺布局（cwd=backend）运行时
     from services.engine_sync import sync_flow_to_engine  # type: ignore
-    from models.flow import FlowPublishOutbox  # type: ignore
+    from models.flow import FlowPublishOutbox, FlowVersion  # type: ignore
 
 from plaita.server.tenant_context import tenant_namespace
 
@@ -102,6 +123,8 @@ _FAILED_REQUEUE_MAX_SECONDS = 1800.0
 STATUS_PENDING = "pending"
 STATUS_DELIVERED = "delivered"
 STATUS_FAILED = "failed"
+#: DLQ 人工出口终态（c117-06）：不投递、不对账、只留痕。
+STATUS_RESOLVED = "resolved"
 
 last_error_truncate = 300
 
@@ -114,7 +137,11 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         value = None  # type: ignore[assignment]
-    if value is None or value < minimum:
+    # b117-04：inf/nan 一并具名拒——``value < minimum`` 对两者恒 False，
+    # 修前会静默放行（poll=inf → Event.wait(inf) 投递链停摆、reconcile=inf
+    # → 周期对账静默失效）；与 PLAITA_HTTP_DNS_TTL 的「nan/inf → 拦截」
+    # 先例同口径（非法值矩阵不再漏网）。
+    if value is None or not math.isfinite(value) or value < minimum:
         logger.warning(
             "%s=%s 非法（需 ≥ %s 的数），使用默认 %r",
             name, _redact_env_value(raw), minimum, default,
@@ -322,6 +349,77 @@ def purge_for(
     return int(result.rowcount or 0)
 
 
+# ---- 删除链路的目标侧清理（#301） ----
+
+
+def _purge_target_storage(
+    client: Redis, *, tenant_id: str, flow_id: str, version: Optional[str]
+) -> bool:
+    """对给定目标 Redis 清引擎存储三件：版本 key、``flow_versions`` 注册集、
+    ``flow_list`` 成员——复用引擎存储自身的 ``delete_flow``（与投递落盘
+    ``sync_flow_to_engine`` 同一存储抽象，不另立清理逻辑）。
+
+    返回 ``False`` = 目标侧本就无此流程/版本（从未投递或已清过），非错误。
+    """
+    from plaita.storage.redis import RedisFlowStorage
+
+    storage = RedisFlowStorage(
+        client=client, namespace=tenant_namespace(tenant_id or "")
+    )
+    return bool(storage.delete_flow(flow_id, version=version))
+
+
+def purge_target_keys(
+    flow_id: str,
+    *,
+    tenant_id: str = "",
+    version: Optional[str] = None,
+    client: Optional[Redis] = None,
+) -> Optional[bool]:
+    """删除流程/版本时同步清**目标 Redis**侧引擎存储（#301）。
+
+    outbox 投递过的 key 与 ``RedisFlowStorage.save_flow`` 一并维护的
+    ``flow_list`` 成员 / ``flow_versions:{fid}`` 注册集，只清 DB 行会在
+    目标侧永驻（幽灵 key）。本函数与投递**同源配置**（
+    ``TARGET_REDIS_URL``）建连（调用方可传 lifespan 缓存的连接复用）。
+
+    尽力而为：outbox 未启用（同 Redis 部署）→ ``None`` no-op；目标不可达
+    → ERROR（降级必须可观测）+ ``None``，不抛、不阻断删除——此时行已随
+    删除事务 purge，对账不再覆盖该 key，恢复后需人工对齐或在目标可达后
+    重试同 key 删除。返回 ``None``=no-op/失败，``bool``=``delete_flow`` 结果。
+    """
+    if not is_enabled():
+        return None
+    token = set_current_tenant(tenant_id or DEFAULT_TENANT_ID,
+                               source=TENANT_SOURCE_EXPLICIT)
+    try:
+        # 与投递路径同一写闸（#239 phase 2）：删除也是对引擎存储的写。
+        guard_tenant_write("engine_outbox.purge_target")
+        if client is None:
+            try:
+                client = connect_target()
+            except Exception as e:  # noqa: BLE001 — 建连失败按不可达处理
+                logger.error(
+                    "outbox 目标侧删除清理失败（目标 Redis 不可达，行已 purge、"
+                    "对账不再覆盖；目标恢复后需人工清理幽灵 key %s@%s，租户 %s）: %s",
+                    flow_id, version or "*", tenant_id or "default", e,
+                )
+                return None
+        try:
+            return _purge_target_storage(
+                client, tenant_id=tenant_id, flow_id=flow_id, version=version
+            )
+        except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+            logger.error(
+                "outbox 目标侧删除清理失败（目标 Redis 写入异常，行已 purge、"
+                "对账不再覆盖；目标恢复后需人工清理幽灵 key %s@%s，租户 %s）: %s",
+                flow_id, version or "*", tenant_id or "default", e,
+            )
+            return None
+    finally:
+        reset_current_tenant(token)
+
+
 # ---- 投递 ----
 
 
@@ -489,13 +587,27 @@ def run_reconcile_cycle(
     now: Optional[datetime] = None,
     max_rows: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """一轮对账：delivered 行在目标 Redis 缺 key / hash 不符 → 打回 pending 重投。
+    """一轮对账（#302 扩口径）：每行先对源表、后对目标。
+
+    1. **源表对账**（修「行内副本自检不防源表被改」的三路全闭）：重读
+       ``flow_versions.definition`` 现值重算指纹，与行内 ``definition_hash``
+       比对。分歧 = 源表被 DB 级修改、行内副本过期——按「console 是权威
+       库」口径以**源表现值**更新行内副本与指纹、打回 pending 重投
+       （``drift_count`` 累计；重投被投递期自检/读回校验兜住）。源表定义
+       不可解析时保留旧指纹，投递期自检会具名拒投进 DLQ（可见、不静默）。
+       源表行已删除而 outbox 行仍在（删除竞态漏 purge 的残留）→ 按删除
+       语义收尾：清目标三件 + 删行；目标清理失败保留行、下轮重试。
+    2. **目标对账**（#299 原口径）：delivered 行在目标 Redis 缺 key /
+       hash 不符 → 打回 pending 重投。
 
     有界（``max_rows``，默认 batch_size）；行多时按 id 序分轮消化。
     """
     now = now or datetime.utcnow()
     max_rows = max_rows or batch_size()
-    stats: Dict[str, Any] = {"checked": 0, "requeued": 0, "errors": 0}
+    stats: Dict[str, Any] = {
+        "checked": 0, "requeued": 0, "errors": 0,
+        "drifted": 0, "source_missing": 0,
+    }
     try:
         with session_local() as session:
             rows = session.scalars(
@@ -508,6 +620,33 @@ def run_reconcile_cycle(
             for row in rows:
                 stats["checked"] += 1
                 tenant = row.tenant_id or ""
+
+                # ---- 1. 源表对账（#302）----
+                source = session.scalars(
+                    select(FlowVersion).where(
+                        FlowVersion.tenant_id == tenant,
+                        FlowVersion.flow_id == row.flow_id,
+                        FlowVersion.version == row.version,
+                    )
+                ).first()
+                if source is None:
+                    if _reconcile_source_missing(target, session, row, tenant, now):
+                        stats["source_missing"] += 1
+                    else:
+                        stats["errors"] += 1
+                    continue
+                try:
+                    _, source_hash = engine_payload(
+                        row.flow_id, row.version, source.definition
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    source_hash = None
+                if source_hash != row.definition_hash:
+                    _reconcile_definition_drift(session, row, source, source_hash, now)
+                    stats["drifted"] += 1
+                    continue
+
+                # ---- 2. 目标对账（#299 原口径）----
                 if tenant not in ns_cache:
                     ns_cache[tenant] = tenant_namespace(tenant)
                 key = f"{ns_cache[tenant]}:flow:{row.flow_id}:{row.version}"
@@ -545,23 +684,235 @@ def run_reconcile_cycle(
     return stats
 
 
+def _reconcile_definition_drift(
+    session: Session,
+    row: FlowPublishOutbox,
+    source: FlowVersion,
+    source_hash: Optional[str],
+    now: datetime,
+) -> None:
+    """源表定义与行内副本分歧：按源表现值更新行并打回 pending 重投（#302）。
+
+    SAVEPOINT 吸收唯一约束竞态（同键同 hash 的另一行已存在时回滚本次
+    更新、计 ERROR，不拖垮整轮对账）。源表不可解析（``source_hash`` 为
+    ``None``）时保留旧指纹——投递期自检会以「行内定义与指纹不一致」具名
+    拒投，最终进 DLQ 可见。
+    """
+    new_hash = source_hash if source_hash is not None else row.definition_hash
+    try:
+        with session.begin_nested():
+            row.definition = source.definition or ""
+            row.definition_hash = new_hash
+            row.status = STATUS_PENDING
+            row.attempts = 0
+            row.delivered_at = None
+            row.next_attempt_at = None
+            row.drift_count = (row.drift_count or 0) + 1
+            row.last_error = (
+                f"reconcile: 源表定义与行内副本不一致（DB 级修改），已按源表现值"
+                f"重算指纹并打回重投 @ {now.isoformat()}"
+            )[:last_error_truncate]
+            session.flush()
+    except IntegrityError:
+        logger.error(
+            "outbox 对账发现漂移但行更新冲突（同键同 hash 行已存在），"
+            "本行保持原状下轮重试：%s@%s（租户 %s）",
+            row.flow_id, row.version, row.tenant_id or "default",
+        )
+        return
+    logger.warning(
+        "outbox 对账发现源表定义漂移（#302）：%s@%s（租户 %s）行内副本已过期，"
+        "按源表现值重投（drift_count=%s）",
+        row.flow_id, row.version, row.tenant_id or "default", row.drift_count,
+    )
+
+
+def _reconcile_source_missing(
+    target: Redis,
+    session: Session,
+    row: FlowPublishOutbox,
+    tenant: str,
+    now: datetime,
+) -> bool:
+    """源表行已删除而 outbox 行仍在：按删除语义收尾（#301+#302）。
+
+    清目标三件后删行；目标清理失败则保留行（仍 delivered）待下轮重试。
+    返回 ``True`` = 收尾完成（行已删）。
+    """
+    token = set_current_tenant(row.tenant_id or DEFAULT_TENANT_ID,
+                               source=TENANT_SOURCE_EXPLICIT)
+    try:
+        guard_tenant_write("engine_outbox.reconcile_purge")
+        ns = tenant_namespace(tenant)
+        key = f"{ns}:flow:{row.flow_id}:{row.version}"
+        try:
+            # delete_flow 内部吞连接异常只回 False/True，不能作为成功判据；
+            # 以「目标版本 key 已消失」为收尾口径（从未投递/已清过也算成功）。
+            _purge_target_storage(
+                target, tenant_id=tenant, flow_id=row.flow_id, version=row.version
+            )
+            gone = not target.exists(key)
+        except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+            logger.warning(
+                "outbox 对账发现源表行缺失但目标清理失败（保留行下轮重试）："
+                "%s@%s（租户 %s）: %s",
+                row.flow_id, row.version, tenant or "default", e,
+            )
+            row.last_error = (
+                f"reconcile: 源表行已删除但目标 Redis 清理失败，保留行重试 "
+                f"@ {now.isoformat()}"
+            )[:last_error_truncate]
+            return False
+        if not gone:
+            logger.warning(
+                "outbox 对账发现源表行缺失但目标 key 清理未生效（保留行下轮"
+                "重试）：%s@%s（租户 %s）",
+                row.flow_id, row.version, tenant or "default",
+            )
+            row.last_error = (
+                f"reconcile: 源表行已删除但目标 key 清理未生效，保留行重试 "
+                f"@ {now.isoformat()}"
+            )[:last_error_truncate]
+            return False
+        brief = (row.flow_id, row.version)
+        session.delete(row)
+        logger.warning(
+            "outbox 对账收尾残留行（源表已删除）：清目标三件 + 删行 %s@%s（租户 %s）@ %s",
+            brief[0], brief[1], tenant or "default", now.isoformat(),
+        )
+        return True
+    finally:
+        reset_current_tenant(token)
+
+
+# ---- DLQ 人工出口（c117-06） ----
+
+
+def _row_brief(row: FlowPublishOutbox) -> Dict[str, Any]:
+    return {
+        "row_id": row.id,
+        "tenant_id": row.tenant_id or "",
+        "flow_id": row.flow_id,
+        "version": row.version,
+        "status": row.status,
+        "attempts": row.attempts or 0,
+        "drift_count": row.drift_count or 0,
+        "last_error": row.last_error or "",
+    }
+
+
+def _get_scoped_row(
+    session: Session, row_id: int, tenant_id: Optional[str]
+) -> Optional[FlowPublishOutbox]:
+    """按 id 取行；``tenant_id`` 非 ``None`` 时限定租户（不匹配视同不存在）。"""
+    row = session.get(FlowPublishOutbox, row_id)
+    if row is None:
+        return None
+    if tenant_id is not None and (row.tenant_id or "") != (tenant_id or ""):
+        return None
+    return row
+
+
+def resolve_row(
+    session_local: sessionmaker,
+    row_id: int,
+    *,
+    tenant_id: Optional[str] = None,
+    actor: str = "",
+) -> Optional[Dict[str, Any]]:
+    """DLQ 人工出口·resolve：认定该行无需再投递，置 ``resolved`` 终态。
+
+    resolved 行不进投递扫描（``_iter_due_rows`` 只取 pending/failed）、
+    不进对账（只扫 delivered），保留行体与失败原因作留痕。delivered 行
+    无需人工出口（下线请走删除流程/版本接口，#301 会清目标三件）→
+    ``ValueError``。租户不匹配/行不存在 → ``None``。
+    """
+    with session_local() as session:
+        row = _get_scoped_row(session, row_id, tenant_id)
+        if row is None:
+            return None
+        if row.status == STATUS_DELIVERED:
+            raise ValueError(
+                "已 delivered 的行无需人工出口；如需下线请走删除流程/版本接口"
+            )
+        if row.status != STATUS_RESOLVED:
+            row.status = STATUS_RESOLVED
+            row.next_attempt_at = None
+            note = f"manually resolved by {actor or 'unknown'} @ {datetime.utcnow().isoformat()}"
+            row.last_error = (
+                f"{row.last_error} | {note}" if row.last_error else note
+            )[:last_error_truncate]
+            session.commit()
+        brief = _row_brief(row)
+        logger.info(
+            "outbox 行人工 resolve：%s@%s（租户 %s，row_id=%s，actor=%s）",
+            brief["flow_id"], brief["version"], brief["tenant_id"] or "default",
+            row_id, actor or "unknown",
+        )
+        return brief
+
+
+def discard_row(
+    session_local: sessionmaker,
+    row_id: int,
+    *,
+    tenant_id: Optional[str] = None,
+    actor: str = "",
+) -> Optional[Dict[str, Any]]:
+    """DLQ 人工出口·discard：放弃投递并**删除**该行。
+
+    与 resolve 的差别：不保留行体（无留痕，仅审计日志）。delivered 行
+    拒绝——删行会失去对账覆盖（目标 key 幽灵化风险）→ ``ValueError``；
+    若定义也不该留在目标 Redis，走删除流程/版本接口（#301 清理三件）。
+    租户不匹配/行不存在 → ``None``。
+    """
+    with session_local() as session:
+        row = _get_scoped_row(session, row_id, tenant_id)
+        if row is None:
+            return None
+        if row.status == STATUS_DELIVERED:
+            raise ValueError(
+                "已 delivered 的行不可 discard（会失去对账覆盖）；"
+                "如需下线请走删除流程/版本接口"
+            )
+        brief = _row_brief(row)
+        session.delete(row)
+        session.commit()
+        logger.info(
+            "outbox 行人工 discard（删行）：%s@%s（租户 %s，row_id=%s，actor=%s）",
+            brief["flow_id"], brief["version"], brief["tenant_id"] or "default",
+            row_id, actor or "unknown",
+        )
+        return brief
+
+
 # ---- 观测 ----
 
 
 def stats_snapshot(session_local: sessionmaker) -> Dict[str, Any]:
-    """/health.engine_outbox 的 backlog 视图（pending/failed 计数 + 最近错误）。"""
+    """/health.engine_outbox 的 backlog 视图（pending/failed 计数 + 最近错误）。
+
+    #302：``drift_total`` = 各行 ``drift_count`` 之和（源表定义漂移被对账
+    命中的累计次数，>0 即发生过 DB 级定义修改并被自动重投收敛）。
+    c117-06：``resolved`` = 人工 resolve 终态行数。
+    """
     snapshot: Dict[str, Any] = {
-        "pending": 0, "failed": 0,
+        "pending": 0, "failed": 0, "resolved": 0,
+        "drift_total": 0,
         "last_delivered_at": None, "last_error": None,
     }
     try:
         with session_local() as session:
-            for status in (STATUS_PENDING, STATUS_FAILED):
+            for status in (STATUS_PENDING, STATUS_FAILED, STATUS_RESOLVED):
                 snapshot[status] = session.scalar(
                     select(func.count())
                     .select_from(FlowPublishOutbox)
                     .where(FlowPublishOutbox.status == status)
                 ) or 0
+            snapshot["drift_total"] = session.scalar(
+                select(func.coalesce(func.sum(FlowPublishOutbox.drift_count), 0))
+                .select_from(FlowPublishOutbox)
+            ) or 0
             last_delivered = session.scalars(
                 select(FlowPublishOutbox)
                 .where(FlowPublishOutbox.status == STATUS_DELIVERED)

@@ -764,3 +764,64 @@
   + 非法值矩阵行；DOC_CODE_MAP 行 26 补 engine_outbox/flow_store/main.py；
   proof `docs/proofs/issue299-outbox-cross-redis.md`。
 - 单 commit 关闭 #299；未触碰他席 duo-a-ledger/duo-a2-ledger/duo-b4-ledger。
+
+## 第七十三轮 · #301/#302（outbox 删除投递语义 + 源表漂移对账，2026-10-22，B1 修复席；顺带收口 c117-06/b117-04/b117-03）
+
+- 基线：`origin/main` `41984f1`（A1 r117 对抗轮基线，含我 r71 的 #299）；
+  落地门 `landing_gate.py ci` rc=0（`a905dca` 主 CI + Console E2E 双绿）。
+  本轮两单是 A1 r117 对抗产出同 seam 收口（#299 投递语义全家桶的补全）。
+- **#301（P2）删除链路跨 Redis 半边清**：DELETE flow/version 的
+  `remove_flow_*_from_engine` 全挂 console 侧 `get_redis_dep`，outbox
+  `purge_for` 只删 DB 行——目标 Redis 的 `{ns}:flow:{fid}:{ver}` +
+  `flow_list` 成员 + `flow_versions:{fid}` 注册集永驻（A1 实弹
+  still_there=1）。修法：`engine_outbox.purge_target_keys()` 与投递**同源
+  配置**（TARGET_REDIS_URL，复用 lifespan 缓存连接），复用引擎存储
+  `RedisFlowStorage.delete_flow` 清三件（不另立清理逻辑）；挂钩
+  `api/flows.py` 两个 DELETE 端点且**先清目标后删行**——删除事务失败
+  回滚时已 delivered 行被对账重投自愈（反向排序会留无行覆盖幽灵）；
+  尽力而为：目标不可达具名 ERROR 不阻断删除，行已 purge 后对账不再
+  覆盖，runbook 写明恢复后人工清理。未启用（同 Redis）no-op。
+- **#302（P2）源表 definition 被改三路全闭**：outbox 行内副本自洽投旧
+  定义/对账用行内 hash 恒绿/幂等 publish 不补行（A1 实弹 target
+  desc="outbox"≠console "OPS-EDITED" 永久漂移）。**口径拍板：console
+  权威=源表现值，重投不锁行**（锁行会冻结分叉、违背最终一致承诺）。
+  修法：对账每行**先对源表**——重读 `flow_versions.definition` 现值重算
+  指纹与行内 hash 比对：分歧→按源表现值更新行内副本+指纹、打回 pending
+  重投（`drift_count` 逐行累计 + `/health.drift_total` 聚合，迁移
+  `0004_outbox_drift_count` 补列幂等；SAVEPOINT 吸收同键同 hash 竞态）；
+  源表不可解析→保留旧指纹照常重投，投递期自检 `definition_unparsable`
+  具名拒投进 DLQ（目标不被坏数据污染）；**源表行已删**（漏 purge 残留，
+  含 A1 A5b 交错构造）→ 清目标三件+删行，`delete_flow` 吞异常只回 False
+  不能作成功判据、以「目标 key 已消失」为收尾口径，清理失败保留行下轮
+  重试。后对目标（#299 原口径）不动；对账统计新增 drifted/source_missing。
+- **c117-06（c）DLQ 人工出口**：`POST /api/flows/publish-outbox/{id}/
+  resolve`（置 `resolved` 终态留痕，追加 manually resolved by <actor>）/
+  `.../discard`（删行仅审计）。resolved 不进投递扫描不进对账；delivered
+  行双 409（resolve 无意义/discard 失对账覆盖）；跨租户/不存在 404；
+  `/health.engine_outbox.resolved` 计数。
+- **b117-04（P3）**：`_env_float` 加 `math.isfinite`——inf/nan 的
+  `value < minimum` 恒 False 修前静默放行（poll=inf 投递链停摆），现与
+  DNS_TTL 先例同口径 WARNING 具名+回退默认。
+- **b117-03（P3）**：文档钉单副本约定（无 claim/leader；多副本重复投递
+  幂等无害但 attempts 互覆失真）入 ops-runbook outbox 节。
+- 负控（先红后绿，A1 探针同源复刻；证据
+  `docs/proofs/data/r73-301-302-negative-control-{pre,post}.txt` + 脚本
+  同目录；pre 对 A1 的 clean archive `/tmp/plaita-r117-tree`=基线树）：
+  **pre 0/5 GREEN**（S1 still_there=1/S2 requeued=0 恒绿无信号/S3 无
+  出口/S4 inf 静默放行）→ **post 5/5 GREEN**（三件全清/drifted=1+
+  drift_total=1 按 OPS-EDITED 收敛/resolve 出队 scanned=0/inf→2.0/S5
+  健康行零误报守恒）。proof `docs/proofs/issue301-302-outbox-delete-drift.md`。
+- 新增测试：`test_engine_outbox.py` **+15P**（#301 三件全清/单版本只清
+  己/API 层清/未配 no-op/不可达具名不抛；#302 漂移收敛/坏 JSON DLQ 可见/
+  源缺失收尾/不可达保留行/健康零误报；c117-06 四态；b117-04 inf/nan/
+  -inf）+ `test_schema_migrations.py` **+2P**（0004 fresh/0003→0004 升级
+  幂等）；守恒测试断言更新到新统计形状。
+- 验收：console 全量 **1253P/13S**（基线 1236P/13S，+17P 零回归）；unit
+  `-m "not slow"` **8836P/13S/3501 subtests**（与 r69/r71 逐位一致）；
+  e2e+integration **287P/4S**；ruff 改动文件零告警；`mkdocs --strict`
+  rc=0；`landing_gate.py ci` rc=0。
+- 文档：ops-runbook「跨 Redis 部署的发布投递链」节扩四块（删除投递
+  语义/对账扩口径/人工出口/单副本约定 + drift_total/resolved 字段）+
+  env 表 2 行（inf/nan 拦截）+ 非法值矩阵行；DOC_CODE_MAP 行 26。
+- 单 commit 关闭 #301/#302（c117-06/b117-04/b117-03 顺带收）；未触碰
+  他席 duo-a-ledger/duo-a2-ledger/duo-b3-ledger/duo-b4-ledger。
