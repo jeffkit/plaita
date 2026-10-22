@@ -84,8 +84,11 @@ python -m plaita_console              # 或使用 plaita-console 命令
 `/api/flows/ai-generate/stream` 同口径）；默认 `flow_agent`（纯 validate /
 dry-run 工具，无宿主 Agent）保持 editor+ 可用。Copilot 会话（thread）归属
 创建租户：upsert 按 (租户, threadId) 复合键，跨租户使用他租户 threadId 一律
-404、不接管历史；claude 会话续轮（`--resume`）按租户段隔离，知道他租户
-threadId 也无法续其会话。
+404、不接管历史；带 threadId 的请求必须携带 `x-flow-id` 头，缺失即 422
+具名拒绝（`flow_id_required`）——thread 归属闸 fail-closed，头缺席不再
+跳过闸；并发首用撞 threadId 全局唯一约束时按归属回查：同租户采纳胜者行
+（与顺序语义等价），他租户 404（A2R47-01）。claude 会话续轮（`--resume`）
+按租户段隔离，知道他租户 threadId 也无法续其会话。
 
 **全量视角是只读的，对所有租户作用域写路径生效**（A2R17-01 / A1 r110）：
 会话型平台管理员 switch-tenant 到「全量」后，schedules 的改/删/启停/触发、

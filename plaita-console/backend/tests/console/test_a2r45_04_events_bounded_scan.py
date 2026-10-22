@@ -14,7 +14,8 @@ keyspace 一大（执行键、日志流、噪声键都在同一库），最低�
 2. **分页保持**：``limit`` / ``cursor`` / ``next_cursor`` / ``truncated`` 的 A2R24-05
    语义不变——翻页语义与「扫描触界」分开表达；
 3. **触界可观测**：超出预算的 keyspace 上响应 ``scan_truncated: true``（列表只是
-   匹配键的一部分、``total`` 是下界）并记 WARNING，不静默给「空列表 = 没有事件」；
+   匹配键的一部分、``total`` 哨兵化为 ``-1``，A2R47-04：未扫完连 ``0`` 也不
+   可信）并记 WARNING，不静默给「空列表 = 没有事件」；
 4. ``KEYS`` 永不被调用（替身一调用即抛）。
 
 负控：仅还原 ``api/events.py`` 的 ``_scan_keys`` 接线 ⇒ 用例 1（轮次超预算）与
@@ -198,7 +199,7 @@ def test_list_events_reports_scan_truncation_instead_of_silent_empty(caplog):
     with caplog.at_level(logging.WARNING, logger="api.redis_scan"):
         resp = _get_bounded(client, redis, "/api/events")
     body = resp.json()
-    assert body["events"] == [] and body["total"] == 0
+    assert body["events"] == [] and body["total"] == -1  # A2R47-04：未扫完，0 也不可信
     assert body["scan_truncated"] is True, body
     # 翻页语义与扫描触界分开：本页之后没有更多页
     assert body["truncated"] is False and body["next_cursor"] is None
@@ -212,7 +213,7 @@ def test_list_subscriptions_reports_scan_truncation(caplog):
     with caplog.at_level(logging.WARNING, logger="api.redis_scan"):
         resp = _get_bounded(client, redis, "/api/events/subscriptions")
     body = resp.json()
-    assert body["subscriptions"] == [] and body["total"] == 0
+    assert body["subscriptions"] == [] and body["total"] == -1  # A2R47-04：未扫完，0 也不可信
     assert body["scan_truncated"] is True, body
     assert "有界 SCAN 触界" in caplog.text
 

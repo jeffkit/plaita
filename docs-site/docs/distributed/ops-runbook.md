@@ -930,8 +930,10 @@ console 抓取是逐命令 best-effort 的，单个 `XLEN`/`XPENDING`/注册表�
 `/api/events` 与 `/api/events/subscriptions` 的键枚举走与 `/api/logs`、
 `/api/queues` 同一有界 `SCAN`（#202 原语：页大小 ≤ 1000、匹配键 5000 /
 轮次 250 / 墙钟 1s 三预算，A2R45-04）：触界时响应 `scan_truncated: true`
-（列表只是匹配键的一部分、`total` 为下界）并打 WARNING；`truncated` /
-`next_cursor` 仍只表示翻页，两者分开判读。
+且 `total` 哨兵化为 `-1`（列表只是匹配键的一部分；未扫完的 keyspace 没有
+可信总数，`0` 也不可信——A2R47-04）并打 WARNING。**完整遍历的终止条件是
+合取**：`truncated=false` **且** `scan_truncated=false`；`truncated` /
+`next_cursor` 只表示已扫窗口内的翻页，两者分开判读。
 
 启动：
 

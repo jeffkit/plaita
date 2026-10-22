@@ -12,6 +12,11 @@
 （页大小 ≤ ``PAGE_SIZE_MAX``、键数 / 轮次 / 墙钟三预算），触界时响应
 ``scan_truncated=true`` + WARNING，绝不 ``KEYS``、绝不无界空转——这两个端点
 只要 viewer 的 GET 权限，共享 Redis 的 keyspace 不能被最低权限反复全库遍历。
+
+total 契约（A2R47-04）：触界时 ``total`` 哨兵化为 ``-1``——未扫完的
+keyspace 没有可信的「匹配总数」（实现里的 ``total`` 曾是已扫前缀内计数且
+逐页递减，naive 客户端把它当全集会静默丢数据）。完整遍历的终止条件是
+**合取**：``truncated=false`` **且** ``scan_truncated=false``。
 """
 import json
 import logging
@@ -89,9 +94,10 @@ class EventInfo(BaseModel):
 
 class EventListResponse(BaseModel):
     events: List[EventInfo]
-    # A2R24-05：``total`` 是**匹配总数**（受扫描预算约束；``scan_truncated=true``
-    # 时是下界），``returned`` 是本页条数；``next_cursor`` 可直接回传给
-    # ``?cursor=`` 继续翻页（历史不再在 limit 之外不可达）。
+    # A2R24-05 / A2R47-04：``total`` 是匹配总数——**只在完整扫描时可信**；
+    # ``scan_truncated=true`` 时哨兵化为 ``-1``（键空间未扫完，总数不可知，
+    # 不得当总数参与计算）。``returned`` 是本页条数；``next_cursor`` 可直接
+    # 回传给 ``?cursor=`` 继续翻页（历史不再在 limit 之外不可达）。
     total: int
     returned: int = 0
     truncated: bool = False
@@ -99,8 +105,10 @@ class EventListResponse(BaseModel):
     # A2R19-04：部分键读取失败时显式标注——空列表不等于「没有事件」。
     degraded: bool = False
     skipped: int = 0
-    # A2R45-04：键枚举触到有界 SCAN 预算——列表只是匹配键的一部分（``total``
-    # 为下界）。与 ``truncated``（翻页：本页之后还有）是两回事，分开表达。
+    # A2R45-04：键枚举触到有界 SCAN 预算——列表只是匹配键的一部分。与
+    # ``truncated``（翻页：本页之后还有）是两回事，分开表达。完整遍历的
+    # 终止条件是合取：``truncated=false`` 且 ``scan_truncated=false``
+    # （A2R47-04），此时 ``total=-1``。
     scan_truncated: bool = False
 
 
@@ -117,6 +125,7 @@ class SubscriptionInfo(BaseModel):
 
 class SubscriptionListResponse(BaseModel):
     subscriptions: List[SubscriptionInfo]
+    # A2R47-04：同 EventListResponse.total——scan_truncated=true 时哨兵 -1。
     total: int
     degraded: bool = False
     skipped: int = 0
@@ -209,9 +218,12 @@ async def list_events(
 ):
     """获取事件列表（plaita#192：按事件受信 tenant_id 收窄，平台视角全量）。
 
-    A2R24-05：``total`` 为匹配总数、``truncated`` 表示还有更多，``next_cursor``
-    传回 ``cursor`` 即可继续翻页。事件按 ``(timestamp, event_id)`` 降序，游标
-    是排他键集（同时间戳的多条事件不会被跳过）。
+    A2R24-05：事件按 ``(timestamp, event_id)`` 降序，``next_cursor`` 传回
+    ``cursor`` 即可继续翻页（游标是排他键集，同时间戳的多条事件不会被跳过）。
+
+    A2R47-04：``truncated`` 只是**已扫窗口内**的翻页信号；完整遍历的终止
+    条件是合取 ``truncated=false`` **且** ``scan_truncated=false``。
+    ``scan_truncated=true`` 时 ``total=-1`` 哨兵（匹配总数不可知）。
     """
     cursor_key = _parse_event_cursor(cursor)
     pattern = "plaita:event:*"
@@ -277,16 +289,18 @@ async def list_events(
         )
 
     events.sort(key=lambda e: (e.timestamp or 0.0, e.event_id), reverse=True)
-    total = len(events)
+    window_total = len(events)
     page = events[:limit]
-    truncated = total > len(page)
+    truncated = window_total > len(page)
     next_cursor = None
     if truncated and page:
         next_cursor = f"{page[-1].timestamp or 0.0}:{page[-1].event_id}"
 
     return EventListResponse(
         events=page,
-        total=total,
+        # A2R47-04：触界即哨兵——已扫前缀内的计数不得冒充匹配总数（naive
+        # 客户端会把它当全集静默丢数据）；完整扫描时才是匹配总数。
+        total=-1 if scan_truncated else window_total,
         returned=len(page),
         truncated=truncated,
         next_cursor=next_cursor,
@@ -380,7 +394,11 @@ async def list_subscriptions(
     request: Request = None,
     redis: Redis = Depends(get_redis),
 ):
-    """获取事件订阅列表（租户视角按订阅内的 tenant_id 过滤）"""
+    """获取事件订阅列表（租户视角按订阅内的 tenant_id 过滤）。
+
+    A2R47-04：``scan_truncated=true`` 时 ``total=-1`` 哨兵——未扫完的
+    keyspace 没有可信总数；完整遍历以 ``scan_truncated=false`` 为准。
+    """
     tenant = tenant_scope(request) if request is not None else None
 
     pattern = "plaita:subscription:*"
@@ -434,7 +452,8 @@ async def list_subscriptions(
 
     return SubscriptionListResponse(
         subscriptions=subscriptions,
-        total=len(subscriptions),
+        # A2R47-04：同 events——触界即哨兵，前缀计数不得冒充匹配总数。
+        total=-1 if scan_truncated else len(subscriptions),
         degraded=skipped > 0,
         skipped=skipped,
         scan_truncated=scan_truncated,

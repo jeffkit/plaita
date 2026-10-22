@@ -945,13 +945,19 @@ class FlowStore:
         title: str = "",
         bump_message: bool = False,
         tenant_id: str = "",
-    ) -> None:
-        """记录/更新 Copilot 会话与流程的关联（不存在则创建）。
+    ) -> str:
+        """记录/更新 Copilot 会话与流程的关联（不存在则创建），返回权威 thread_id。
 
         thread 归属租户闸（r70 b/P2）：按 ``(tenant_id, thread_id)`` 复合键
         查行；thread_id 已被**其他租户**占用时抛 ``LookupError``（端点转
         404）——不接管历史、不静默改归属（threadId 客户端可控，全局唯一键
         曾使 tenant-a 一条请求即夺走 tenant-b 的会话关联）。
+
+        A2R47-01②：并发首用（check-then-insert 竞窗）双双通过两级检查后，
+        败者的 INSERT 撞 ``thread_id`` 全局唯一约束——此时**回查归属**而非
+        漏出 ``IntegrityError``（端点曾 ``except Exception`` 吞成 warning+200，
+        顺序语义的「不存在 404」在并发下静默消失）：同租户胜者行就地采纳
+        （更新臂重放 + bump，与顺序语义等价），他租户抛 ``LookupError``。
         """
         from datetime import datetime
 
@@ -962,7 +968,8 @@ class FlowStore:
                     CopilotThread.tenant_id == tenant_id,
                 )
             ).first()
-            if record is None:
+            fresh = record is None
+            if fresh:
                 squatter = session.scalars(
                     select(CopilotThread).where(
                         CopilotThread.thread_id == thread_id
@@ -989,7 +996,36 @@ class FlowStore:
             if bump_message:
                 record.message_count = (record.message_count or 0) + 1
             record.updated_at = datetime.utcnow()
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                # 只有首插会撞 thread_id 全局唯一约束；更新臂的完整性错误
+                # 原样上抛（不是竞窗，不得掩盖）。
+                if not fresh or not _is_unique_violation(exc):
+                    raise
+                session.rollback()
+                winner = session.scalars(
+                    select(CopilotThread).where(
+                        CopilotThread.thread_id == thread_id
+                    )
+                ).first()
+                if winner is None:
+                    raise
+                if winner.tenant_id != tenant_id:
+                    raise LookupError(
+                        f"copilot thread 已归属其他租户: {thread_id}"
+                    ) from exc
+                # 同租户胜者行就地采纳：更新臂重放 + 再次 bump（两笔计数都在）。
+                winner.flow_id = flow_id or winner.flow_id
+                if version:
+                    winner.version = version
+                if title:
+                    winner.title = title
+                if bump_message:
+                    winner.message_count = (winner.message_count or 0) + 1
+                winner.updated_at = datetime.utcnow()
+                session.commit()
+            return thread_id
 
     def list_copilot_threads(
         self, flow_id: str, tenant_id: Optional[str] = None

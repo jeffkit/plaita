@@ -16,7 +16,7 @@ import os
 from typing import Any, Dict
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic_ai.ui import SSE_CONTENT_TYPE
 from pydantic_ai.ui.ag_ui import AGUIAdapter
@@ -24,15 +24,25 @@ from pydantic_ai.ui.ag_ui import AGUIAdapter
 try:
     from ..auth import ensure_platform_admin, require_auth
     from ..config import get_settings
+    from ..error_contract import error_detail
     from ..services import ai_flow, claude_brain, flow_agent, flow_store
 except ImportError:  # 直接以 backend 为工作目录启动（python run.py）
     from auth import ensure_platform_admin, require_auth  # type: ignore
     from config import get_settings
+    from error_contract import error_detail  # type: ignore
     from services import ai_flow, claude_brain, flow_agent, flow_store  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: A2R47-01①：thread 归属闸 fail-closed——带 threadId 的请求缺 ``x-flow-id``
+#: 即具名 422，不再以「头缺席」整段跳过闸（threadId 是 recursive 侧的全局
+#: 会话钥匙，闸的作用域不能由一个客户端可控的非必填头决定）。
+FLOW_ID_REQUIRED = error_detail(
+    "flow_id_required",
+    "缺少 x-flow-id 头：copilot 会话必须关联流程（thread 归属闸）",
+)
 
 # Copilot system prompt：M1 通过追加到 user 消息头部送达（recursive /agui 的
 # goal 解析取最后一条 user 消息；system role 是否透传给模型不可控）。
@@ -165,20 +175,25 @@ async def copilot_run(
         body.setdefault("forwardedProps", {})
 
     # 会话持久化：thread_id ↔ flow_id/version 关联入库（审计与回看）。
-    # thread 归属租户闸（r70 b/P2）：跨租户 thread 404，不接管历史。
-    flow_id = request.headers.get("x-flow-id", "")
-    if flow_id and isinstance(body.get("threadId"), str) and body["threadId"]:
+    # thread 归属租户闸（r70 b/P2；A2R47-01 收敛 fail-closed）：带 threadId
+    # 的请求必须携带 x-flow-id，缺失即具名 422——头缺席不再整段跳过闸。
+    flow_id = (request.headers.get("x-flow-id") or "").strip()
+    raw_thread_id = body.get("threadId")
+    has_thread = isinstance(raw_thread_id, str) and bool(raw_thread_id.strip())
+    if has_thread:
+        if not flow_id:
+            raise HTTPException(status_code=422, detail=FLOW_ID_REQUIRED)
         try:
             flow_store.get_flow_store().upsert_copilot_thread(
-                thread_id=body["threadId"], flow_id=flow_id, bump_message=True,
+                thread_id=raw_thread_id, flow_id=flow_id, bump_message=True,
                 tenant_id=getattr(request.state, "tenant_id", "") or "",
             )
         except LookupError:
             return JSONResponse(
                 status_code=404, content={"detail": "thread 不存在"},
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("copilot thread upsert 失败: %s", exc)
+        # A2R47-01②：不再 ``except Exception`` 吞——upsert 的意外失败向上抛
+        # （error contract 归一具名 500），不得静默后继续跑大脑。
 
     if brain == "flow_agent":
         try:

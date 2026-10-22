@@ -1354,7 +1354,15 @@ export interface EventInfo {
 
 export interface EventListResponse {
   events: EventInfo[]
+  // A2R47-04：scan_truncated=true 时 total=-1 哨兵（keyspace 未扫完，
+  // 总数不可知）；完整遍历以 truncated=false 且 scan_truncated=false 为准。
   total: number
+  returned?: number
+  truncated?: boolean
+  next_cursor?: string | null
+  degraded?: boolean
+  skipped?: number
+  scan_truncated?: boolean
 }
 
 export interface SubscriptionInfo {
@@ -1370,7 +1378,11 @@ export interface SubscriptionInfo {
 
 export interface SubscriptionListResponse {
   subscriptions: SubscriptionInfo[]
+  // A2R47-04：同 EventListResponse.total——scan_truncated=true 时哨兵 -1。
   total: number
+  degraded?: boolean
+  skipped?: number
+  scan_truncated?: boolean
 }
 
 // ============ 集群类型定义 ============

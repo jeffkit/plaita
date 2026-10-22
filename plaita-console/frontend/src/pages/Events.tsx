@@ -98,7 +98,10 @@ function SubscriptionsPanel({ eventType }: { eventType: string }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-caption text-ink-muted">
-          共 <span className="font-mono tabular-nums">{data?.total ?? 0}</span> 个活跃订阅
+          {/* A2R47-04：total=-1 哨兵（扫描触界，总数不可知），不得显示成「共 -1 个」 */}
+          {data != null && data.total < 0
+            ? "扫描触界，以下为部分订阅（不一定完整）"
+            : <>共 <span className="font-mono tabular-nums">{data?.total ?? 0}</span> 个活跃订阅</>}
         </p>
         <Button variant="ghost" size="sm" onClick={() => refetch()}>
           <RefreshCw size={13} />
@@ -221,7 +224,10 @@ function EventsPanel({ eventType }: { eventType: string }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-caption text-ink-muted">
-          共 <span className="font-mono tabular-nums">{data?.total ?? 0}</span> 条事件记录
+          {/* A2R47-04：total=-1 哨兵（扫描触界，总数不可知），不得显示成「共 -1 条」 */}
+          {data != null && data.total < 0
+            ? "扫描触界，以下为部分事件记录（不一定完整）"
+            : <>共 <span className="font-mono tabular-nums">{data?.total ?? 0}</span> 条事件记录</>}
         </p>
         <Button variant="ghost" size="sm" onClick={() => refetch()}>
           <RefreshCw size={13} />
