@@ -4,7 +4,9 @@ BrainRunner 抽象的第二实现（第一个是 recursive /agui 反代）：
 - 输入：经 `_inject_context` 处理后的 RunAgentInput（system 头 + 画布状态已拼进
   最后一条 user 消息，作为 claude 的单轮 prompt）
 - 输出：AG-UI 事件（RunStarted / TextMessage* / RunFinished / RunError），SSE 字节流
-- 会话：threadId → claude session_id 映射（内存），续轮走 `--resume`
+- 会话：(tenant_id, threadId) → claude session_id 映射（内存），续轮走
+  `--resume`；键带租户段（r70 b/P2）——threadId 客户端可控，裸键曾使知道
+  他租户 threadId 即可 `--resume` 其会话
 - 凭证：经环境变量（ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN 等），后端不落盘；
   便捷方法 `resolve_claude_env()` 可从 flowcast providers.json 读取 anthropic
   兼容 provider（如 GLM）注入
@@ -26,13 +28,15 @@ import shutil
 import signal
 import threading
 import uuid
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, Optional, Tuple
 
 from plaita.core.url_redaction import _scrub_url_text
 
 logger = logging.getLogger(__name__)
 
-_SESSIONS: Dict[str, str] = {}
+# 会话映射键 = (tenant_id, thread_id)：threadId 客户端可控，租户段隔离
+# --resume（r70 b/P2——裸 threadId 键曾让知道 ID 即可续他租户会话）。
+_SESSIONS: Dict[Tuple[str, str], str] = {}
 _SESSIONS_LOCK = threading.Lock()
 
 _MAX_TURNS = "30"
@@ -192,19 +196,23 @@ async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
         logger.warning("回收 claude 子进程失败（pid=%s）: %s", proc.pid, exc)
 
 
-async def claude_agui_stream(body: dict, context_note: str) -> AsyncIterator[bytes]:
+async def claude_agui_stream(
+    body: dict, context_note: str, tenant_id: str = ""
+) -> AsyncIterator[bytes]:
     """驱动 claude CLI 并产出 AG-UI SSE 帧。
 
     body: 已反序列化的 RunAgentInput（_inject_context 已执行——最后一条 user
     消息包含 system 头与画布状态）。
     context_note: 兜底上下文文本（context 项拼接），goal 无 user 消息时使用。
+    tenant_id: 调用方租户——会话映射按 (tenant_id, threadId) 隔离（r70 b/P2）。
     """
     cli = os.getenv("PLAITA_CONSOLE_CLAUDE_CLI", "claude")
     thread_id = str(body.get("threadId") or uuid.uuid4().hex)
     run_id = str(body.get("runId") or uuid.uuid4().hex)
+    session_key = (str(tenant_id or ""), thread_id)
 
     with _SESSIONS_LOCK:
-        session_id = _SESSIONS.get(thread_id)
+        session_id = _SESSIONS.get(session_key)
 
     user_msgs = [m for m in body.get("messages") or [] if m.get("role") == "user"]
     prompt = user_msgs[-1].get("content") if user_msgs else ""
@@ -285,7 +293,7 @@ async def claude_agui_stream(body: dict, context_note: str) -> AsyncIterator[byt
                 if ev_type == "system" and ev.get("subtype") == "init":
                     new_session = ev.get("session_id")
                     with _SESSIONS_LOCK:
-                        _SESSIONS[thread_id] = new_session or thread_id
+                        _SESSIONS[session_key] = new_session or thread_id
 
                 elif ev_type == "assistant":
                     content_blocks = (ev.get("message") or {}).get("content") or []
