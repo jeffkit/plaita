@@ -1,0 +1,48 @@
+F..                                                                      [100%]
+=================================== FAILURES ===================================
+___________ test_status_publish_failure_aborts_create_no_half_tenant ___________
+
+env = {'store': <services.flow_store.FlowStore object at 0x1062de270>, 'redis': <fakeredis._clients._sync.FakeRedis(<redis.c...ype=None),orig_host_address=9fbc2e96f427469897622a82d234e589,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>}
+
+    def test_status_publish_failure_aborts_create_no_half_tenant(env):
+        """红格翻转：状态 hset 故障 → 具名失败 + 无半租户（修前 = 200 + 拦行窗）。"""
+        store, real = env["store"], env["redis"]
+        # ① 首世：建 → 删，删除写 disabled 墓碑（#255 前提）。
+        tenants_svc.create_tenant(store, TENANT, "Acme", redis_client=real)
+        assert tenants_svc.delete_tenant(store, TENANT, redis_client=real) is True
+        assert real.hget(STATUS_KEY, TENANT) == "disabled"
+    
+        # ② 同名重建：状态 hset 注入故障（世代发布正常）。修后 = 具名 TenantError。
+>       with pytest.raises(tenants_svc.TenantError, match="状态发布失败"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE TenantError
+
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py:77: Failed
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.tenant_status:tenant_status.py:129 租户 acme 状态同步到 Redis 失败: Traceback (most recent call last):
+  File "/private/tmp/plaita-b3-r88/plaita/server/tenant_status.py", line 125, in publish_tenant_status
+    redis_client.hset(TENANT_STATUS_KEY, key=*** value=status)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/plaita-b3-r88/plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py", line 49, in hset
+    raise ConnectionError("simulated redis blip on tenant_status hash")
+ConnectionError: simulated redis blip on tenant_status hash
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+  /private/tmp/plaita-b3-r88/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_healthy_recreate_overrides_tombstone
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_healthy_recreate_overrides_tombstone
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_healthy_recreate_overrides_tombstone
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_generation_publish_failure_still_aborts_before_status
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_generation_publish_failure_still_aborts_before_status
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+1 failed, 2 passed, 9 warnings in 0.83s

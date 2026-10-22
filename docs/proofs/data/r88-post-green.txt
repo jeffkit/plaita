@@ -1,0 +1,20 @@
+...                                                                      [100%]
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+  /private/tmp/plaita-b3-r88/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_status_publish_failure_aborts_create_no_half_tenant
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_healthy_recreate_overrides_tombstone
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_healthy_recreate_overrides_tombstone
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_healthy_recreate_overrides_tombstone
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_generation_publish_failure_still_aborts_before_status
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py::test_generation_publish_failure_still_aborts_before_status
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 10 warnings in 2.70s
