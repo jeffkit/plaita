@@ -1,0 +1,5 @@
+delete_version/draft→publish 插窗              status=409 code=version_stale      row=published record=in     outbox=[] engkey=1
+delete_version/outbox 启用                     status=409 code=version_stale      row=published record=in     outbox=[('1.0.0', 'pending')] engkey=1
+delete_version/force+draft→publish 插窗        status=409 code=version_stale      row=published record=in     outbox=[] engkey=1
+delete_flow/draft→publish 插窗                 status=409 code=version_stale      row=published record=in     outbox=[] engkey=1
+delete_flow/窗内新建+发布 1.0.1                    status=409 code=version_stale      row=draft     record=in     outbox=[] engkey=0

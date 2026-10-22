@@ -733,20 +733,35 @@ def delete_flow(flow_id: str, request: Request = None,
     # 引用（force 也不可越）→ 具名 409。守卫通过（或 flow 不存在交由下方
     # 404）才允许触碰目标侧与定义键。flow 不存在时 list_versions 为空、
     # 守卫自然放行，404 语义由既有 LookupError 路径保留。
+    versions = _store().list_versions(flow_id, tenant_id=tenant)
     pinned_schedules = _enforce_version_delete_guard(
-        redis, tenant, flow_id,
-        _store().list_versions(flow_id, tenant_id=tenant),
-        force=force,
+        redis, tenant, flow_id, versions, force=force,
     )
     # #301：跨 Redis 部署先清目标侧（与 outbox 投递同源配置）。先清后删：
     # 若下方删除事务失败回滚，已 delivered 的 outbox 行仍在，对账会把 key
     # 重投自愈；反之（先删后清）清理失败会留下无行覆盖的幽灵 key。
     # #303：全程经删除守卫（互斥锁 + deleting tombstone）——清 key 后
     # 投递/对账不可能复活该 key；删除事务失败守卫恢复行原状（自愈保留）。
+    # A134-02：删行钉在守卫观察到的 {version: status} 快照上（逐行条件
+    # DELETE + 幸存者复核）——守卫判据与删行之间夹进的并发 publish 翻转/
+    # 新版本直发 → 具名 409 version_stale、零删除，而非静默删掉刚发布版本
+    # 并 purge 其 outbox；force 只越 published 状态守卫、不越快照漂移。
     with _outbox_delete_guard(flow_id, tenant_id=tenant):
         _outbox_purge_target(flow_id, tenant_id=tenant, request=request)
         try:
-            _store().delete_flow(flow_id, tenant_id=tenant)
+            _store().delete_flow(
+                flow_id, tenant_id=tenant,
+                expected_versions={v.version: v.status for v in versions},
+            )
+        except flow_store.VersionConflictError as e:
+            raise HTTPException(
+                status_code=409,
+                detail=error_detail(
+                    "version_stale", str(e),
+                    conflict="version_stale",
+                    latest_updated_at=e.latest_updated_at,
+                ),
+            )
         except LookupError as e:
             raise HTTPException(
                 status_code=404, detail=error_detail("flow_not_found", str(e))
@@ -897,21 +912,40 @@ def delete_version(flow_id: str, version: str, request: Request = None,
     tenant = tenant_scope(request, required=True) if request is not None else ""
     # #304：删除前置守卫——published 默认 409（force 可越）、非终态执行
     # 引用 409（force 不可越）。前置到目标侧清理与删行之前：守卫拒绝时
-    # outbox/引擎键一律不碰。版本不存在（prior=None）整体跳过守卫、交由
-    # 下方既有 404 路径——不存在的版本没有可守卫的状态/真源。
+    # outbox/引擎键一律不碰。版本不存在（prior=None）直接 404：不存在的
+    # 版本没有可守卫的状态/真源，也没有可钉的删除快照（A134-02）——
+    # 不再先清目标侧再由 store 抛 404（半截清理无意义）。
     prior = _store().get_version(flow_id, version, tenant_id=tenant)
-    pinned_schedules: List[tuple] = []
-    if prior is not None:
-        pinned_schedules = _enforce_version_delete_guard(
-            redis, tenant, flow_id, [prior], force=force,
+    if prior is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("version_not_found", f"版本不存在: {flow_id}@{version}"),
         )
+    pinned_schedules = _enforce_version_delete_guard(
+        redis, tenant, flow_id, [prior], force=force,
+    )
     # #301：同 delete_flow——先清目标侧再删行（失败回滚可对账自愈）。
     # #303：同 delete_flow——全程经删除守卫（互斥锁 + deleting tombstone）。
+    # A134-02：删行钉在守卫观察到的 status 上（条件 DELETE）——判据读与
+    # 删行之间夹进的并发 publish 翻转 → 具名 409 version_stale、行与刚写
+    # 出的 outbox 行原样保留；force 只越 published 状态守卫、不越快照漂移
+    # （force+观察 draft+窗内 publish 同样 409，重试 force 即过）。
     with _outbox_delete_guard(flow_id, tenant_id=tenant, version=version):
         _outbox_purge_target(flow_id, tenant_id=tenant, version=version,
                              request=request)
         try:
-            _store().delete_version(flow_id, version, tenant_id=tenant)
+            _store().delete_version(
+                flow_id, version, tenant_id=tenant, expected_status=prior.status,
+            )
+        except flow_store.VersionConflictError as e:
+            raise HTTPException(
+                status_code=409,
+                detail=error_detail(
+                    "version_stale", str(e),
+                    conflict="version_stale",
+                    latest_updated_at=e.latest_updated_at,
+                ),
+            )
         except LookupError as e:
             raise HTTPException(
                 status_code=404, detail=error_detail("version_not_found", str(e))
@@ -927,7 +961,7 @@ def delete_version(flow_id: str, version: str, request: Request = None,
         _audit(request, "flow.delete_version", f"{flow_id}@{version}",
                {"version": version,
                 "force": force,
-                "prior_status": prior.status if prior is not None else None,
+                "prior_status": prior.status,
                 **({"pinned_schedules_paused": paused_schedules}
                    if paused_schedules else {})},
                tenant_id=tenant)

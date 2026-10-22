@@ -1,0 +1,376 @@
+........................................................................ [  0%]
+........................................................................ [  1%]
+........................................................................ [  2%]
+..............................................................s [  3%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  7%]
+............................................................... [  8%]
+.....................sssss............s................................. [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 15%]
+.................................................................. [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+........................................................................ [ 19%]
+.................................................................. [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 23%]
+........................................................................ [ 24%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 27%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+...................................................................... [ 30%]
+.......................................................................................................................... [ 31%]
+.......................................... [ 32%]
+.................................................... [ 32%]
+........................... [ 33%]
+.................................................. [ 33%]
+........................................... [ 34%]
+............................................................................. [ 34%]
+.................................................................... [ 35%]
+........................................................................ [ 36%]
+........................................................................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+.............................................................. [ 40%]
+........................................................................ [ 41%]
+.............................................................. [ 41%]
+........s.....................s......................................... [ 42%]
+.......................................................... [ 43%]
+...................s.............................. [ 44%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 46%]
+.................................................................................................................................................... [ 48%]
+........................................................................ [ 48%]
+........................................................................ [ 49%]
+........................................................................ [ 50%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 55%]
+........................................................................ [ 56%]
+........................................................................ [ 56%]
+........................................................................ [ 57%]
+.................................................... [ 58%]
+...................................................................................................................... [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+.................................................................................. [ 62%]
+........................................................................ [ 63%]
+........................................................................ [ 63%]
+........................................................................ [ 64%]
+........................................................................ [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+.s..................................s................................... [ 67%]
+........................................................................ [ 68%]
+................................................................. [ 69%]
+........................................................................ [ 70%]
+........................................................................ [ 71%]
+............................................. [ 71%]
+.................................................................. [ 72%]
+........................................................................................................ [ 73%]
+................................................................................................................................................ [ 75%]
+................................................................ [ 75%]
+........................................................................ [ 76%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 79%]
+........................................................................ [ 79%]
+........................................................................ [ 80%]
+...................................................................... [ 81%]
+........................................................................ [ 82%]
+........................................................................ [ 83%]
+............................................................................... [ 83%]
+................................. [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 85%]
+........................................................................ [ 86%]
+.................................................................... [ 87%]
+........... [ 87%]
+.......................................................................... [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 92%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+........................................................................ [ 97%]
+................................................................... [ 98%]
+........................................................................ [ 98%]
+........................................................................ [ 99%]
+.........................                                                [100%]
+=============================== warnings summary ===============================
+tests/unit/test_a2r31_config_generation.py: 1 warning
+tests/unit/test_b75_01_unknown_queue.py: 1 warning
+tests/unit/test_issue300_capability_manifest.py: 1 warning
+tests/unit/test_issue42_worker_capacity_report.py: 9 warnings
+tests/unit/test_r50_registry_state_machine.py: 15 warnings
+tests/unit/test_redis_url_parse.py: 48 warnings
+tests/unit/test_registry.py: 1 warning
+tests/unit/test_reviewfix_c_http.py: 1 warning
+tests/unit/test_sync_node_timeout.py: 1 warning
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita/server/registry.py:371: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+tests/unit/test_a69_03_index_cleanup.py::test_console_delete_removes_node_index
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+tests/unit/test_b75_01_unknown_queue.py: 2 warnings
+tests/unit/test_issue300_capability_manifest.py: 1 warning
+tests/unit/test_issue42_worker_capacity.py: 3 warnings
+tests/unit/test_r50_registry_state_machine.py: 10 warnings
+tests/unit/test_registry.py: 1 warning
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita/server/registry.py:236: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+tests/unit/test_clean_c4_delay_service.py: 9 warnings
+tests/unit/test_issue300_capability_manifest.py: 1 warning
+tests/unit/test_issue35_trigger_failure_retry.py: 5 warnings
+tests/unit/test_r50_registry_state_machine.py: 9 warnings
+tests/unit/test_registry.py: 1 warning
+tests/unit/test_service_manager_redis_wiring.py: 5 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita/server/registry.py:312: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(key, 5, service_info.to_json())  # 5秒后过期
+
+tests/unit/test_executor_mutations.py::TestRunCompatibleLazyCloseR5::test_lazy_partial_consume_then_close_still_uses_correct_flow
+tests/unit/test_flow.py::FlowTestCase::test_debug_flow
+tests/unit/test_flow.py::ExecuteTestCase::test_execute_with_lazy_mode
+  /opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py:744: RuntimeWarning: coroutine method 'aclose' of 'GeneratorStrategy.execute' was never awaited
+    self._ready.clear()
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/test_expression_size_guard.py: 69 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita/core/expression.py:1178: DeprecationWarning: Pickle, copy, and deepcopy support will be removed from itertools in Python 3.14.
+    reduced = prototype.__reduce__(value)          # C 槽，0 作者调用
+
+tests/unit/test_expression_size_guard.py::TestTwentyThirdRoundExactTypeSlots::test_every_exact_type_branch_has_bound_ge_actual
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_expression_size_guard.py:7271: DeprecationWarning: The 'u' type code is deprecated and will be removed in Python 3.16
+    ("array", array.array("i", [1, 2])), ("array-u", array.array("u", big[:1000])),
+
+tests/unit/test_expression_size_guard.py::TestTwentyThirdRoundExactTypeSlots::test_every_exact_type_branch_has_bound_ge_actual
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_expression_size_guard.py:7285: DeprecationWarning: The 'u' type code is deprecated and will be removed in Python 3.16
+    ("array-u-escapes", array.array("u", "\U0010ffff\x00\ud800" * 100)),
+
+tests/unit/test_expression_size_guard.py::TestTwentyThirdRoundExactTypeSlots::test_every_exact_type_branch_has_bound_ge_actual
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_expression_size_guard.py:7293: DeprecationWarning: The 'u' type code is deprecated and will be removed in Python 3.16
+    ("array-u-nonascii", array.array("u", "\u00e9" * 200)),
+
+tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual
+tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual
+tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual
+tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual
+tests/unit/test_expression_size_guard.py::TestTwentyFifthRoundArrayElementBounds::test_every_typecode_worst_case_has_bound_ge_actual
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_expression_size_guard.py:7587: DeprecationWarning: The 'u' type code is deprecated and will be removed in Python 3.16
+    array_value = array.array("u", text)
+
+tests/unit/test_ir_validate.py::TestFlowFromSourceGate::test_topology_caught_at_compile
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita/dsl/codeflow/_source.py:422: DeprecationWarning: input_type/output_type on @flow/@childflow is deprecated and ignored; $INPUT is always a dict from run(**kwargs) or run({...}).
+    return build_flow(compile_source(src, flow_id, **opts))
+
+tests/unit/test_issue42_dispatch_target.py::TestHandoverPreservesTarget::test_handover_copy_keeps_target_and_target_worker_accepts
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue42_dispatch_target.py:193: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    w.redis_client.setex(
+
+tests/unit/test_issue42_dispatch_target.py::TestHandoverStripsUnavailableTarget::test_non_running_target_is_stripped_and_broadcast[draining]
+tests/unit/test_issue42_dispatch_target.py::TestHandoverStripsUnavailableTarget::test_non_running_target_is_stripped_and_broadcast[stopping]
+tests/unit/test_issue42_dispatch_target.py::TestHandoverStripsUnavailableTarget::test_non_running_target_is_stripped_and_broadcast[stopped]
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue42_dispatch_target.py:265: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    w.redis_client.setex(
+
+tests/unit/test_issue42_dispatch_target.py::TestHandoverStripsUnavailableTarget::test_target_is_preserved_when_running
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue42_dispatch_target.py:302: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    w.redis_client.setex(
+
+tests/unit/test_issue81_redis_client_cache.py::test_same_target_reuses_one_client
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue81_redis_client_cache.py:34: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    assert n._client_for("redis://u1:p1@h1:1111/1") is n._client_for("redis://u1:p1@h1:1111/1")
+
+tests/unit/test_issue81_redis_client_cache.py::test_different_target_gets_different_client
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue81_redis_client_cache.py:41: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    a = n._client_for("redis://u1:p1@h1:1111/1")
+
+tests/unit/test_issue81_redis_client_cache.py::test_different_target_gets_different_client
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue81_redis_client_cache.py:42: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    b = n._client_for("redis://u2:p2@h2:2222/2")2026-10-23 05:06:00,627 WARNING plaita.server.log_handler.audit: 日志刷新失败: RecordingRedis 不支持 pipeline（本批起回灌 10000 条，丢弃最旧 0 条，累计丢弃 30367，队列 10000/10000）
+
+
+tests/unit/test_issue81_redis_client_cache.py::test_db_is_int_not_str
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue81_redis_client_cache.py:53: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    kw = dict(n._client_for("redis://u:p@h:1/7").connection_pool.connection_kwargs)
+
+tests/unit/test_issue81_redis_client_cache.py::test_client_is_not_visible_to_model_dump
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue81_redis_client_cache.py:60: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    n._client_for("redis://u1:p1@h1:1111/1")
+
+tests/unit/test_issue81_redis_client_cache.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue81_redis_client_cache.py:84: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    c = orig(self, url)
+
+tests/unit/test_issue_a2r19_registry_retry.py::test_ensure_registration_self_heals_after_redis_recovers
+tests/unit/test_issue_a2r19_registry_retry.py::test_ensure_registration_self_heals_after_redis_recovers
+tests/unit/test_issue_a2r19_registry_retry.py::test_ensure_registration_success_starts_heartbeat
+tests/unit/test_issue_a2r19_registry_retry.py::test_ensure_registration_success_starts_heartbeat
+tests/unit/test_issue_a2r19_registry_retry.py::test_retry_success_preserves_startup_drain_status
+tests/unit/test_issue_a2r19_registry_retry.py::test_retry_success_preserves_startup_drain_status
+tests/unit/test_issue_a2r19_registry_retry.py::test_retry_success_preserves_startup_drain_status
+tests/unit/test_issue_a2r19_registry_retry.py::test_retry_success_preserves_startup_drain_status
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_issue_a2r19_registry_retry.py:50: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    return self._inner.setex(*args, **kwargs)
+
+tests/unit/test_redis_url_parse.py::TestQueryOptionsPassThrough::test_consumed_query_params_still_build_a_client
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita/storage/fenced.py:365: DeprecationWarning: Call to '__init__' function with deprecated usage of input argument/s 'retry_on_timeout'. (TimeoutError is included by default.) -- Deprecated since version 6.0.0.
+    inner = RedisExecutionStorage(**kwargs)
+
+tests/unit/test_reviewfix_b_b5.py::TestBackgroundPoolPidGuard::test_forked_child_rebuilds_and_uses_fresh_pool
+  /Users/kong/projects/infra4agent/plaita-wt2/tests/unit/test_reviewfix_b_b5.py:80: DeprecationWarning: This process (pid=83096) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    pid = os.fork()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+8896 passed, 13 skipped, 238 warnings, 3501 subtests passed in 816.46s (0:13:36)
+--- Logging error ---
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 218, in _flush
+    pipeline = self.redis_client.pipeline()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/tests/unit/_url_sink_support.py", line 399, in pipeline
+    raise AssertionError("RecordingRedis 不支持 pipeline")
+AssertionError: RecordingRedis 不支持 pipeline
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 1153, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 2244, in shutdown
+    h.close()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 267, in close
+    self._flush()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 253, in _flush
+    _audit_logger.warning(
+Message: '日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）'
+Arguments: ('RecordingRedis 不支持 pipeline', 10000, 0, 30367, 10000, 10000)
+--- Logging error ---
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 218, in _flush
+    pipeline = self.redis_client.pipeline()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/tests/unit/_url_sink_support.py", line 399, in pipeline
+    raise AssertionError("RecordingRedis 不支持 pipeline")
+AssertionError: RecordingRedis 不支持 pipeline
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 1153, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 2244, in shutdown
+    h.close()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 267, in close
+    self._flush()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 253, in _flush
+    _audit_logger.warning(
+Message: '日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）'
+Arguments: ('RecordingRedis 不支持 pipeline', 10000, 0, 30370, 10000, 10000)
+--- Logging error ---
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 218, in _flush
+    pipeline = self.redis_client.pipeline()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/tests/unit/_url_sink_support.py", line 399, in pipeline
+    raise AssertionError("RecordingRedis 不支持 pipeline")
+AssertionError: RecordingRedis 不支持 pipeline
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 1153, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 2244, in shutdown
+    h.close()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 267, in close
+    self._flush()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 253, in _flush
+    _audit_logger.warning(
+Message: '日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）'
+Arguments: ('RecordingRedis 不支持 pipeline', 10000, 0, 30371, 10000, 10000)
+--- Logging error ---
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 218, in _flush
+    pipeline = self.redis_client.pipeline()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/tests/unit/_url_sink_support.py", line 399, in pipeline
+    raise AssertionError("RecordingRedis 不支持 pipeline")
+AssertionError: RecordingRedis 不支持 pipeline
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 1153, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 2244, in shutdown
+    h.close()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 267, in close
+    self._flush()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 253, in _flush
+    _audit_logger.warning(
+Message: '日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）'
+Arguments: ('RecordingRedis 不支持 pipeline', 10000, 0, 30371, 10000, 10000)
+--- Logging error ---
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 218, in _flush
+    pipeline = self.redis_client.pipeline()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/tests/unit/_url_sink_support.py", line 399, in pipeline
+    raise AssertionError("RecordingRedis 不支持 pipeline")
+AssertionError: RecordingRedis 不支持 pipeline
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 1153, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/logging/__init__.py", line 2244, in shutdown
+    h.close()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 267, in close
+    self._flush()
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/log_handler.py", line 253, in _flush
+    _audit_logger.warning(
+Message: '日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）'
+Arguments: ('RecordingRedis 不支持 pipeline', 10000, 0, 30371, 10000, 10000)
