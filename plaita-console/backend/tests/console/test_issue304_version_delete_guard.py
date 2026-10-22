@@ -237,13 +237,21 @@ def test_delete_flow_with_published_or_referenced_409(redis):
 
 
 def test_delete_flow_clean_200(redis):
-    """无 published、无引用的 flow：删除照常（存量零回归）。"""
+    """无 published、无引用的 flow：删除照常（存量零回归）。
+
+    #308 升级断言：删后版本行必须清零——此前级联只靠 SQLite 未强制的
+    FK ondelete=CASCADE 声明，版本行原样残留（幽灵 start + 重建撞 409）。
+    """
     client = _client(redis)
     _seed_flow(client)  # draft-only
 
     r = client.delete("/api/flows/guard-flow", headers=_headers())
     assert r.status_code == 200, r.text
     assert client.get("/api/flows/guard-flow", headers=_headers()).status_code == 404
+    versions = flow_store.get_flow_store().list_versions(
+        "guard-flow", tenant_id="default"
+    )
+    assert versions == []
 
 
 def test_delete_guard_scan_unreachable_fail_closed_503(redis):

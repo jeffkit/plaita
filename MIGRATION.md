@@ -8,6 +8,14 @@
 
 ## Unreleased
 
+### console：SQLite 外键强制 + delete_flow 显式级联删版本行（plaita#308）
+
+**口径（contract）**：`flow_versions → flows` 的 `ondelete=CASCADE` 此前只是 DB 级声明，SQLite 默认不强制外键（console 全程无 PRAGMA，默认部署面恰是 SQLite）——`DELETE /api/flows/{id}` 返回 200 后版本行原样残留（含 published）：已删 flow 的显式版本 start 200 幽灵入队（绕过 #304 的 `version_not_found` 具名 404）、latest start 解析到孤儿 published（200 且回声版本号）、同 id 重建后 `PUT 1.0.0` 无条件 409（`force` 只绕乐观锁、绕不过 published 不可覆盖；唯一逃生是先 `DELETE /versions/1.0.0?force=true`）。现双层修复：console 引擎每次 checkout 拨 `PRAGMA foreign_keys=ON`（迁移会话在 `migrations/env.py` 反向 OFF，与存量孤儿行共存）；`delete_flow` 显式级联删版本行（先子后父同一事务，PG/MySQL 同样生效）。
+
+- **受影响**：存量库中**老版本 delete_flow 残留的孤儿版本行**（`flow_versions` 有、`flows` 无同 `(tenant_id, flow_id)` 父行）不会被自动清理——外键强制只拦新写入，不追溯删数据。排查：`SELECT fv.* FROM flow_versions fv LEFT JOIN flows f ON f.tenant_id=fv.tenant_id AND f.flow_id=fv.flow_id WHERE f.id IS NULL`；清理：对每个孤儿 `DELETE /api/flows/{id}/versions/{version}?force=true`（无执行引用时放行），或 DBA 直接删行。
+- **迁移步骤**：无 schema 变更。多租户旧库重建的回填顺序改为父表先于子表（外键强制下子行不得先插）；headless bootstrap / `create_user(memberships=…)` 的「用户行 + 成员行」同事务插入改为父行先 `flush`（SQLAlchemy 只对 `relationship()` 保证跨表顺序）；`add_member` 与租户删除并发时，迟到加入仍按 A50-02 契约以 `UserError` 具名拒绝（不再以裸 IntegrityError 漏成 500）。
+- **latest start 语义不变**：console 无记录的 flow（已删除或从未注册——CLI/worker 直部署面）latest start 仍按 #300/#304 fail-open 契约 200 受理，但响应 warning 改为具名点名「无 flow 记录（已删除或从未注册）」，与「有 flow 无 published」可区分。已删 flow 的权威防线是删除级联 + 显式版本 start 的具名 404。
+
 ### 重试分类：TypeError / NameError / SyntaxError 与 ValueError 同列确定性不重试；沙箱信封内层类型穿透（plaita-go#43 收口）
 
 **口径（contract）**：node-F2 重试分类把 `ValueError`/`TypeError`/`NameError`/`SyntaxError`（及子类）与 `NodeException` 1001 同列**确定性错误**——同一份节点代码在同一份输入上重跑不可能变对，重试只会烧预算、放大副作用。任意节点的执行异常命中这些类型即**立即按 errorHandler `strategy` 处理，不消耗 retryTimes**（此前仅 `ValueError` 入列；`TypeError`/`NameError`/`SyntaxError` 维持历史「一律可重试」）。与 plaita-go 同集对齐（#43，2026-10-22 owner 裁决：Python 采纳完整确定性集，Go r69 终态不放松）。
