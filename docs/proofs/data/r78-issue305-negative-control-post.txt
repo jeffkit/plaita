@@ -1,0 +1,9 @@
+# r78 / plaita#305 Phase 1 — 负控 post（实现树，api/graphs.py + services/graph_validation.py 在位）
+
+    created_at=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+39 passed, 146 warnings in 2.76s
+pytest_rc=0
+
+判定：39P/0F，rc=0；pre 的 39 条红全部翻绿，零跳过。

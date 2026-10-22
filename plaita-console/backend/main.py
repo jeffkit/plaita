@@ -33,6 +33,7 @@ try:
     from .api import services, executions, queues, logs, cluster, events
     from .api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates
     from .api import tenants
+    from .api import graphs
     from .api import supervisor
     from .api import metrics as metrics_api
     from .api import capacity as capacity_api
@@ -48,6 +49,7 @@ except ImportError:  # 平铺布局（cwd=backend 直接跑）；包布局不该
     from api import services, executions, queues, logs, cluster, events
     from api import nodes, flows, flow_version, dryrun, copilot, schedules, credentials, audit, property_types, credential_templates  # type: ignore
     from api import tenants  # type: ignore
+    from api import graphs  # type: ignore
     from api import supervisor  # type: ignore
     from api import metrics as metrics_api  # type: ignore
     from api import capacity as capacity_api  # type: ignore
@@ -748,6 +750,8 @@ def create_app() -> FastAPI:
     _mount_admin(credential_templates.router, "credential_templates")
     _mount_admin(audit.router, "audit")
     _mount_admin(tenants.router, "tenants")
+    # #305 Phase 1：编辑器 graph validate（宿主 AI / 嵌入编辑器保存前校验）
+    _mount_admin(graphs.router, "graphs")
     _mount_admin(metrics_api.router, "metrics")
     # #42（W10-a）：worker 容量 / 派发决策只读面（影子模式：只算不发）
     _mount_admin(capacity_api.router, "capacity")

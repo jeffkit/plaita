@@ -1,0 +1,72 @@
+# r78 / plaita#305 Phase 1 — 负控 pre（基线 worktree 4909e3b，只拷 test_issue305_graph_validate.py）
+
+## pre-A：基线原样（api/graphs.py 不存在）→ 收集期 ImportError，rc=2
+
+
+==================================== ERRORS ====================================
+_ ERROR collecting plaita-console/backend/tests/console/test_issue305_graph_validate.py _
+ImportError while importing test module '/private/tmp/r305-pre-wt/plaita-console/backend/tests/console/test_issue305_graph_validate.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita-console/backend/tests/console/test_issue305_graph_validate.py:36: in <module>
+    from api import graphs as graphs_api  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   ImportError: cannot import name 'graphs' from 'api' (/private/tmp/r305-pre-wt/plaita-console/backend/api/__init__.py)
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /private/tmp/r305-pre-wt/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR plaita-console/backend/tests/console/test_issue305_graph_validate.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 warning, 1 error in 0.94s
+pytest_rc=2
+
+## pre-B：worktree 内放空 router 壳（仅为让断言执行；主树无此文件）→ 39F/0P，rc=1（全部对着 404 面翻红）
+
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_valid_graph_200_zero_errors
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_viewport_accepted_not_validated
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_edge_folding_matches_flow_to_json
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_switch_branch_handle_folding
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_assignment_default_output_type_injected
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_container_children_skipped
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_graph_shape_guards_422
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestGraphDtoContract::test_invalid_runtime_422
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_missing_start
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_extra_start
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_orphan_node
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_duplicate_id
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_dead_end_non_end
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_cycle_without_timeout_error
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_cycle_with_timeout_warning
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_diamond_convergence_no_false_cycle
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestNodeErrors::test_childflow_missing_start
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestFieldErrors::test_unknown_node_type
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestFieldErrors::test_assignment_missing_output_and_upstream
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestFieldErrors::test_end_bad_error_payload
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestFieldErrors::test_flow_level_bad_input_type
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_dangling_target
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_switch_handle_not_a_branch
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_linear_two_out_edges_ambiguous
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_if_unknown_handle
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_if_duplicate_true_branch
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_if_missing_false_branch
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestEdgeErrors::test_end_out_edge_warning_not_blocking
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestCapabilityErrors::test_map_vs_go_pool
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestCapabilityErrors::test_while_vs_go_pool
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestCapabilityErrors::test_python_pool_takes_map
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestCapabilityErrors::test_pool_manifest_missing_fail_open_warning
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestCapabilityErrors::test_local_mode_without_redis_skips_gate
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestConsistencyMatrix::test_matrix
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestConsistencyMatrix::test_no_manifest_pool_matrix_fallback_alignment
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestTenantIsolation::test_reference_resolves_within_own_tenant
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestTenantIsolation::test_reference_does_not_borrow_other_tenant_flow
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestTenantIsolation::test_missing_reference_reports_missing
+FAILED plaita-console/backend/tests/console/test_issue305_graph_validate.py::TestAuth::test_requires_auth
+39 failed, 85 warnings in 2.98s
+pytest_rc=1
