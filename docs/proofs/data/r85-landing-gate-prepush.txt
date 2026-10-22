@@ -1,0 +1,6 @@
+# landing_gate ci（推前，origin/main=7265964）2026-10-23 06:21:12 +0800
+[landing-gate] main 最近完成 run：2026-10-22T21:55:20Z 7265964 conclusion=success  |  docs(ledger): B1 第八十四轮——#310 读失败真「交还重投」+ A133-01 饱和第三类分流与 en
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（7b99bbe）
+[landing-gate] ✅ 允许落地
+landing-gate-prepush-rc=0

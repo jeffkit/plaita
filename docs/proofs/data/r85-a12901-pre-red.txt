@@ -1,0 +1,112 @@
+# A-1 pre-red（终版 7 格 × 基线 7265964 源树，stash 修复后复跑）2026-10-23 06:37:29 +0800
+FFFFF..                                                                  [100%]
+=================================== FAILURES ===================================
+____________ test_publish_lone_surrogate_422_definition_unencodable ____________
+
+rd = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=ff8644c599484fab96e4c4d5b3583eee,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_publish_lone_surrogate_422_definition_unencodable(rd):
+        """含 \\ud800 转义定义 publish → 422 definition_unencodable（修复前 200）
+        且版本保持 draft（发布闸在状态翻转前拒绝）。"""
+        client = _client(rd)
+        _seed(client, POISON_DEF)
+        r = client.post(f"/api/flows/{FLOW_ID}/publish",
+                        json={"version": VER}, headers=_headers())
+>       assert r.status_code == 422, r.text
+E       AssertionError: {"flow_id":"a12901-flow","version":"1.0.0","status":"published","definition":"{\"flow_id\": \"a12901-flow\", \"desc\": \"poison \\ud800\", \"inputType\": {\"dataType\": \"object\"}, \"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"output\": \"$INPUT.name\", \"resultType\": \"success\"}]}","layout":"{}","runtime":"python","created_at":"2026-10-22T22:37:30.913300","published_at":"2026-10-22T22:37:30.922472","created_by":"","updated_at":"2026-10-22T22:37:30.922472","tenant_id":"default"}
+E       assert 200 == 422
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a12901_publish_unencodable_gate.py:180: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=a12901-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=a12901-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  plaita:kafka_queue_service.py:27 Kafka库未安装，Kafka队列服务将不可用. 请使用 pip install kafka-python 安装
+____________ test_publish_lone_surrogate_no_redis_key_no_outbox_row ____________
+
+rd_outbox = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=e10cceaf4fbc44bc929d4598626a4ea6,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_publish_lone_surrogate_no_redis_key_no_outbox_row(rd_outbox):
+        """422 且引擎存储零键 + outbox 零行（修复前：200 + 有键 + 无行）。"""
+        client = _client(rd_outbox)
+        _seed(client, POISON_DEF)
+        r = client.post(f"/api/flows/{FLOW_ID}/publish",
+                        json={"version": VER}, headers=_headers())
+>       assert r.status_code == 422
+E       assert 200 == 422
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a12901_publish_unencodable_gate.py:194: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=a12901-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=a12901-flow@1.0.0）——旧 build worker 部署请尽快升级
+ERROR    services.engine_outbox:engine_outbox.py:330 outbox 入队跳过：a12901-flow@1.0.0 定义不可解析（租户 default）: 'utf-8' codec can't encode character '\ud800' in position 16: surrogates not allowed
+_______________ test_sync_flow_to_engine_refuses_lone_surrogate ________________
+
+rd = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=4b82b0aff9384611bd9ec8000bbb9374,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_sync_flow_to_engine_refuses_lone_surrogate(rd):
+        """sync_flow_to_engine 毒定义 → False + 零键（修复前 True + 有键）。"""
+>       assert sync_flow_to_engine(rd, FLOW_ID, VER, POISON_DEF,
+                                   tenant_id="default") is False
+E       assert True is False
+E        +  where True = sync_flow_to_engine(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=4b82b0aff9384611bd9ec8000bbb9374,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>, 'a12901-flow', '1.0.0', '{"flow_id": "a12901-flow", "desc": "poison \\ud800", "inputType": {"dataType": "object"}, "nodes": [{"type": "start", "id": "start", "next": "end"}, {"type": "end", "id": "end", "output": "$INPUT.name", "resultType": "success"}]}', tenant_id='default')
+
+tests/console/test_a12901_publish_unencodable_gate.py:203: AssertionError
+________________ test_backfill_skips_unencodable_published_row _________________
+
+rd = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=114cf0e8ac0649b3aa0a8991dbc83044,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1110/test_backfill_skips_unencodabl0')
+
+    def test_backfill_skips_unencodable_published_row(rd, tmp_path):
+        """已 published 毒定义（DB 直种）回填 → errors 计数 + 零键；
+        合法 published 版本照常写出。"""
+        client = _client(rd)
+        _seed(client, EMOJI_DEF)
+        assert client.post(f"/api/flows/{FLOW_ID}/publish",
+                           json={"version": VER}, headers=_headers()).status_code == 200
+        # 第二版毒定义经 save 面入库（save 接受），再 DB 直翻 published
+        #（绕开发布闸——存量/DB 级修改是唯一来源）
+        r = client.put(f"/api/flows/{FLOW_ID}/versions/1.0.1",
+                       json={"definition": POISON_DEF}, headers=_headers())
+        assert r.status_code == 200, r.text
+        store = flow_store.get_flow_store()
+        sessions = flow_store.session_factory()
+        with sessions() as s:
+            s.execute(
+                text("UPDATE flow_versions SET status = 'published' "
+                     "WHERE flow_id = :fid AND version = :ver"),
+                {"fid": FLOW_ID, "ver": "1.0.1"},
+            )
+            s.commit()
+    
+        stats = sync_all_published_to_engine(rd, store)
+>       assert stats["errors"] == 1
+E       assert 0 == 1
+
+tests/console/test_a12901_publish_unencodable_gate.py:237: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=a12901-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=a12901-flow@1.0.0）——旧 build worker 部署请尽快升级
+_______________ test_enqueue_publish_raises_named_on_unencodable _______________
+
+rd_outbox = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=b025ae7afd054ee1849c91888158bf8f,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_enqueue_publish_raises_named_on_unencodable(rd_outbox):
+        """enqueue_publish 毒定义 → DefinitionUnencodableError（修复前静默
+        False）；unparseable 守旧 skip（返回 False）。"""
+        sessions = flow_store.session_factory()
+        with sessions() as s:
+>           with pytest.raises(engine_outbox.DefinitionUnencodableError):
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: module 'services.engine_outbox' has no attribute 'DefinitionUnencodableError'
+
+tests/console/test_a12901_publish_unencodable_gate.py:250: AttributeError
+=========================== short test summary info ============================
+FAILED tests/console/test_a12901_publish_unencodable_gate.py::test_publish_lone_surrogate_422_definition_unencodable
+FAILED tests/console/test_a12901_publish_unencodable_gate.py::test_publish_lone_surrogate_no_redis_key_no_outbox_row
+FAILED tests/console/test_a12901_publish_unencodable_gate.py::test_sync_flow_to_engine_refuses_lone_surrogate
+FAILED tests/console/test_a12901_publish_unencodable_gate.py::test_backfill_skips_unencodable_published_row
+FAILED tests/console/test_a12901_publish_unencodable_gate.py::test_enqueue_publish_raises_named_on_unencodable
+5 failed, 2 passed in 1.26s
+pre-red-rc=1

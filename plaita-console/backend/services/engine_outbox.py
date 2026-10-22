@@ -297,6 +297,39 @@ def engine_payload(flow_id: str, version: str, definition: Any) -> tuple:
     return payload, flow_definition_hash_v2(payload)
 
 
+class DefinitionUnencodableError(ValueError):
+    """定义含不可 UTF-8 编码字符，canonical hash 不可计算（卡 A-1 / A129-01）。
+
+    典型来源：ES2019 well-formed ``JSON.stringify`` 把孤立代理写成
+    ``\\udXXX`` 转义——合法 JSON、``json.loads`` 照收，但 canonical 形
+    （ensure_ascii=False）``.encode("utf-8")`` 抛 ``UnicodeEncodeError``。
+    这类定义 Python 池 ``compute_flow_definition_hash`` 每次必炸（毒丸），
+    Go 池 canonicaljson 解码层拒载（plaita-go G-1）——两池皆不可执行，
+    必须拒于发布/同步面，而不是落盘后拖到运行期才炸。
+    """
+
+
+def ensure_definition_encodable(flow_id: str, version: str, definition: Any) -> None:
+    """对「投递后工件」跑同款 hash 计算，编码不可行即具名上抛。
+
+    复用 :func:`engine_payload`（定义 + 注入 flow_id/version）——worker
+    校验的正是这个工件；hash 计算/编码失败（``UnicodeEncodeError``）在此
+    收口为 :class:`DefinitionUnencodableError`，发布闸与 save 面据此拒绝。
+    不改变 hash 算法本身。定义不可解析（JSONDecodeError/TypeError）**不属
+    本闸管辖**：既有「定义不可解析 → 跳过入队」语义由调用方照旧处理。
+    """
+    try:
+        engine_payload(flow_id, version, definition)
+    except UnicodeEncodeError as e:
+        raise DefinitionUnencodableError(
+            f"流程 {flow_id}@{version} 定义含不可 UTF-8 编码字符"
+            f"（如孤立代理转义 \\udXXX，位置 {e.start}）：canonical hash "
+            "无法计算，Python/Go 池均不可执行，请修正定义后重新保存"
+        ) from e
+    except (TypeError, ValueError):
+        return
+
+
 def _stored_key_hash(raw: str) -> Optional[str]:
     """对目标 Redis 里的**存储原文**算指纹（worker 读到后就是按这个算）。"""
     try:
@@ -316,6 +349,11 @@ def enqueue_publish(
     - 未启用（未配目标 Redis）→ no-op（同 Redis 部署零负担）；
     - definition 不可解析 → ERROR 跳过入队（坏定义本就发不出去；不阻断
       发布主流程，console 仍是权威库，修复后重发布会产生新 hash 行）；
+    - definition **不可 UTF-8 编码**（孤立代理转义，canonical hash 算不出）
+      → 具名上抛 :class:`DefinitionUnencodableError`（卡 A-1）：此前它作为
+      ``ValueError`` 子类被上一条吞掉——outbox 无行、发布照常成功、Redis
+      却有键，Python 池读回即毒丸。发布端点在状态翻转前前置同款闸
+      （422 ``definition_unencodable``），此处是绕开 API 调用面的兜底；
     - 幂等键已存在（同版本同内容重复发布）→ 跳过，不重复入队；
     - 并发窗口下的唯一约束冲突经 SAVEPOINT 吞掉（只影响 outbox 行，
       不波及发布本身）。
@@ -326,6 +364,14 @@ def enqueue_publish(
         # 指纹按「投递后工件」（定义 + 注入 flow_id/version）计算——worker
         # 校验的是 Redis 存储原文，见 engine_payload 的说明。
         _, definition_hash = engine_payload(flow_id, version, definition)
+    except UnicodeEncodeError as e:
+        # UnicodeEncodeError ⊂ ValueError：必须排在宽口 except 之前，否则
+        # 又被吞成「不可解析」。
+        raise DefinitionUnencodableError(
+            f"流程 {flow_id}@{version} 定义含不可 UTF-8 编码字符"
+            f"（如孤立代理转义 \\udXXX，位置 {e.start}）：canonical hash "
+            "无法计算，拒绝入队"
+        ) from e
     except (TypeError, ValueError, json.JSONDecodeError) as e:
         logger.error(
             "outbox 入队跳过：%s@%s 定义不可解析（租户 %s）: %s",

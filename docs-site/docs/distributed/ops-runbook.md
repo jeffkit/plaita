@@ -707,6 +707,20 @@ worker 不同机/不同 Redis 时，人工在目标机跑 `sync_published_to_eng
 - **发布事务内**与 `flow_versions` 同事务写一条 `flow_publish_outbox`
   （幂等键 `(tenant_id, flow_id, version, definition_hash)`，同版本重复发布
   不重复入队；publish 回滚则 outbox 不残留）；
+- **发布前置编码闸（卡 A-1 / A129-01，混编撕裂修复对的 console 半边；Go
+  半边 = plaita-go G-1 canonicaljson 拒孤立代理）**：定义含不可 UTF-8 编码
+  字符（典型 = ES2019 `JSON.stringify` 对孤立代理写出的 `\udXXX` 转义——
+  合法 JSON、save 面照收）时 canonical 指纹算不出（`UnicodeEncodeError`）。
+  此前它被 `enqueue_publish` 当「定义不可解析」吞掉：outbox 无行、发布
+  照常 200、`engine_sync` 默认转义形 dumps 照样落 Redis ⇒ 双通道不一致，
+  Python worker 读回 hash 即炸（毒丸）、Go worker 拒载——两池皆不可跑却拖
+  到运行期才炸。现 `POST /flows/{id}/publish` 与导入直发在**状态翻转前**
+  （与 #300 能力门同层，事务内 fresh 行同样复核）422
+  `definition_unencodable`：版本保持 draft、outbox 零行、引擎存储零写入；
+  `engine_sync`（含启动回填）对同类定义**拒写**（具名 ERROR/WARNING，回填
+  计入 `errors`），存量 DB 级写入不再在每次启动时被重写成毒丸。处置：
+  修正定义中的孤立代理后重新保存、再发布；「定义不可解析」（非法 JSON）
+  仍是既有的跳过入队语义，不归此闸；
 - 后台线程每 `PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS`（默认 2s）投递一轮：
   写目标 Redis 的 `{ns}:flow:{flow_id}:{version}` 后**读回校验**
   `flow-definition-json-sortkeys-v2` 指纹一致才记 delivered（至少一次；

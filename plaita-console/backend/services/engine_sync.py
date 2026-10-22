@@ -68,6 +68,31 @@ def _storage(redis: Redis, tenant_id: Optional[str] = None) -> RedisFlowStorage:
     return RedisFlowStorage(client=redis, namespace=tenant_namespace(tenant_id))
 
 
+def _unencodable_reason(flow_id: str, version: str, defn: Dict) -> Optional[str]:
+    """save 面编码闸（卡 A-1）：与发布闸同一判据，不可编码返回具名原因。
+
+    复用 ``engine_outbox.ensure_definition_encodable``（对「投递后工件」跑
+    同款 hash 计算，UnicodeEncodeError 收口为具名异常）；懒导入避免
+    services 内环（engine_outbox 顶层 import 本模块）。返回 ``None`` =
+    可编码；定义不可解析等非本闸类别由调用方既有分支处理。
+    """
+    try:
+        from .engine_outbox import (
+            DefinitionUnencodableError,
+            ensure_definition_encodable,
+        )
+    except ImportError:  # 平铺布局（cwd=backend）运行时
+        from engine_outbox import (  # type: ignore
+            DefinitionUnencodableError,
+            ensure_definition_encodable,
+        )
+    try:
+        ensure_definition_encodable(flow_id, version, defn)
+    except DefinitionUnencodableError as e:
+        return str(e)
+    return None
+
+
 def sync_flow_to_engine(redis: Redis, flow_id: str, version: str,
                         definition: Union[str, Dict],
                         tenant_id: Optional[str] = None) -> bool:
@@ -80,6 +105,14 @@ def sync_flow_to_engine(redis: Redis, flow_id: str, version: str,
 
     defn["flow_id"] = flow_id
     defn["version"] = version
+    # 卡 A-1（A129-01）save 面同闸：孤立代理转义定义经 save_flow 默认
+    # ensure_ascii=True dumps 不炸、落 Redis 成功，Python worker 读回
+    # canonical hash 即炸（毒丸）——与发布闸同一判据，拒写、零键落 Redis。
+    reason = _unencodable_reason(flow_id, version, defn)
+    if reason is not None:
+        logger.error("同步流程 %s@%s 拒写引擎存储（租户 %s）：%s",
+                     flow_id, version, tenant_id, reason)
+        return False
     try:
         ok = _storage(redis, tenant_id).save_flow(defn)
         if not ok:
@@ -301,6 +334,13 @@ def sync_all_published_to_engine(
                 payload = json.dumps(defn)
             except (TypeError, ValueError) as e:
                 logger.warning("回填引擎存储：%s@%s 定义不可序列化: %s", fid, version, e)
+                stats["errors"] += 1
+                continue
+            # 卡 A-1：回填与 sync_flow_to_engine 同闸——存量/DB 级写入的
+            # 孤立代理定义不再在每次启动时被重新写成毒丸。
+            reason = _unencodable_reason(fid, version, defn)
+            if reason is not None:
+                logger.warning("回填引擎存储：%s@%s 拒写：%s", fid, version, reason)
                 stats["errors"] += 1
                 continue
 

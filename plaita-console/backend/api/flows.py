@@ -234,6 +234,48 @@ def _gate_runtime_capability(redis: Optional[Redis], row, *, where: str) -> None
         ) from e
 
 
+def _gate_definition_encodable(row) -> None:
+    """发布前置编码闸（卡 A-1 / A129-01）：canonical hash 不可计算 → 422。
+
+    与 #300 能力门同层、同在状态翻转之前：孤立代理转义等不可 UTF-8 编码
+    的定义，此前 ``enqueue_publish`` 吞 ``UnicodeEncodeError``（⊂ValueError）
+    后发布照常成功——outbox 无行、Redis 有键（save 面默认 dumps 不炸）、
+    Python 池读回 hash 即炸、Go 池（G-1 后）拒载：两池皆不可执行却拖到
+    运行期才炸。拒于发布面：版本保持 draft、引擎存储零写入、outbox 零行。
+    不依赖 ``redis``/outbox 是否启用（判据是定义自身）。
+    """
+    try:
+        from ..services.engine_outbox import (
+            DefinitionUnencodableError,
+            ensure_definition_encodable,
+        )
+    except ImportError:
+        from services.engine_outbox import (  # type: ignore
+            DefinitionUnencodableError,
+            ensure_definition_encodable,
+        )
+    try:
+        ensure_definition_encodable(row.flow_id, row.version, row.definition or "")
+    except DefinitionUnencodableError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                "definition_unencodable", str(e),
+                flow_id=row.flow_id, version=row.version,
+            ),
+        ) from e
+
+
+def _publish_gates(redis: Optional[Redis], row, *, where: str) -> None:
+    """发布前置闸合集：状态翻转前与事务内 fresh 行复核（A2R54）共用同一组。
+
+    编码闸（卡 A-1，定义自身判据、零 Redis 往返）先于能力门（#300，
+    查 worker 注册清单）。
+    """
+    _gate_definition_encodable(row)
+    _gate_runtime_capability(redis, row, where=where)
+
+
 def _validate_definition(definition: str) -> None:
     """用 Flow.model_validate 强校验 definition，失败抛 422。"""
     try:
@@ -1016,13 +1058,15 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
             status_code=404,
             detail=error_detail("version_not_found", f"版本不存在: {flow_id}@{req.version}"),
         )
-    _gate_runtime_capability(redis, row, where="publish")
+    # 卡 A-1：编码闸 + plaita#300 能力门同在状态翻转之前（422 结构化拒绝，
+    # 版本保持 draft、引擎存储零写入、outbox 零行）。
+    _publish_gates(redis, row, where="publish")
     try:
         # A2R54-01/02：发布事务内对 fresh 行 re-gate + 条件翻转（并发保存落进
         # 竞窗 → 409，不再静默发布未过门定义/打回已发布行）。
         out = store.publish_version(
             flow_id, req.version, tenant_id=tenant,
-            gate_fn=lambda fresh: _gate_runtime_capability(redis, fresh, where="publish"),
+            gate_fn=lambda fresh: _publish_gates(redis, fresh, where="publish"),
         )
     except LookupError as e:
         raise HTTPException(
@@ -1257,14 +1301,14 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
                 status_code=404, detail=f"版本不存在: {flow_id}@{version}"
             )
         _validate_definition(stored.definition)
-        # plaita#300：导入直发的 publish 与普通发布同一能力门（结构化 422，
-        # 版本保持 draft）。
-        _gate_runtime_capability(redis, stored, where="import.publish")
+        # plaita#300 能力门 + 卡 A-1 编码闸：导入直发的 publish 与普通发布
+        # 同一组前置闸（结构化 422，版本保持 draft）。
+        _publish_gates(redis, stored, where="import.publish")
         try:
             # A2R54-01/02：同普通发布——事务内 re-gate + 条件翻转（竞窗 409）。
             out = _store().publish_version(
                 flow_id, version, tenant_id=tenant,
-                gate_fn=lambda fresh: _gate_runtime_capability(redis, fresh, where="import.publish"),
+                gate_fn=lambda fresh: _publish_gates(redis, fresh, where="import.publish"),
             )
         except LookupError as e:
             raise HTTPException(
