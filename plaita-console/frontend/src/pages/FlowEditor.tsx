@@ -109,6 +109,9 @@ export default function FlowEditor() {
 
   const [version, setVersion] = useState('')
   const [desc, setDesc] = useState('')
+  // plaita#300 需求4：目标 runtime pool——节点面板按池过滤、保存/发布按此
+  // 过能力门。加载版本时随版本行同步（新建流程默认 python）。
+  const [runtime, setRuntime] = useState<'go' | 'python'>('python')
   // 流程输入类型：决定 $INPUT 在试跑/运行时是否可用。默认 object，使
   // $INPUT.xxx 表达式能取到传入参数；加载已有版本时沿用其声明。
   const [inputType, setInputType] = useState<unknown>({ dataType: 'object' })
@@ -204,6 +207,8 @@ export default function FlowEditor() {
         const def = JSON.parse(versionQuery.data.definition || '{}') as Record<string, unknown>
         const layout = JSON.parse(versionQuery.data.layout || '{}') as Record<string, { x: number; y: number }>
         const { nodes: ns, edges: es } = jsonToFlow(def, layout)
+        // plaita#300：面板过滤/保存继承的目标池随版本行走
+        setRuntime(versionQuery.data.runtime === 'go' ? 'go' : 'python')
         baseDefRef.current = def
         // C5-1：记录乐观锁基准（服务端最近保存时间）
         baseVersionRef.current = { version: versionParam, updatedAt: versionQuery.data.updated_at ?? null }
@@ -370,6 +375,8 @@ export default function FlowEditor() {
       return api.saveVersion(flowId!, v.targetVersion, {
         definition: JSON.stringify(def, null, 2),
         layout: JSON.stringify(layout),
+        // plaita#300：目标池随编辑器选择走——go 版本另存新草稿不再静默降级
+        runtime,
         ...(v.baseUpdatedAt ? { base_updated_at: v.baseUpdatedAt } : {}),
         ...(v.force ? { force: true } : {}),
         ...(v.allocateVersion ? { allocate_version: true } : {}),
@@ -381,6 +388,7 @@ export default function FlowEditor() {
       setMsg(`已保存 ${flowId}@${res.version}`)
       // 保存成功后工作版本即目标版本；乐观锁基准随响应前进
       setVersion(res.version)
+      setRuntime(res.runtime === 'go' ? 'go' : 'python')
       baseVersionRef.current = { version: res.version, updatedAt: res.updated_at ?? null }
       useFlowEditor.setState({ dirty: false })
       qc.invalidateQueries({ queryKey: ['flow', flowId] })
@@ -423,6 +431,8 @@ export default function FlowEditor() {
       await api.saveVersion(flowId!, v.targetVersion, {
         definition: JSON.stringify(def, null, 2),
         layout: JSON.stringify(layout),
+        // plaita#300：发布前的保存同样带目标池（能力门按行 runtime 判定）
+        runtime,
         ...(baseVersionRef.current.version === v.targetVersion && baseVersionRef.current.updatedAt
           ? { base_updated_at: baseVersionRef.current.updatedAt }
           : {}),
@@ -668,6 +678,15 @@ export default function FlowEditor() {
           )}
         </select>
         {status && <StatusBadge status={status} />}
+        <select
+          value={runtime}
+          onChange={(e) => setRuntime(e.target.value as 'go' | 'python')}
+          className="input w-28 font-mono"
+          title="目标 runtime pool（plaita#300）：节点面板按池过滤；保存/发布按此过能力门；调度触发的执行按此路由 worker 池"
+        >
+          <option value="python">py 池</option>
+          <option value="go">go 池</option>
+        </select>
         <input
           value={desc}
           onChange={(e) => setDesc(e.target.value)}
@@ -837,7 +856,7 @@ export default function FlowEditor() {
       ) : (
         /* 编辑器主体 */
         <div className="flex-1 flex min-h-0 relative">
-          <NodePalette />
+          <NodePalette runtime={runtime} />
           <FlowCanvas />
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
