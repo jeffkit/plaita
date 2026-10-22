@@ -271,6 +271,33 @@ def _raise_schedule_conflict(latest_updated_at: Optional[str]) -> None:
     )
 
 
+def _raise_if_pin_missing(schedule: dict) -> None:
+    """A2R57-02：级联暂停标注行禁原样复启（幽灵 cron 复活门）。
+
+    force 删版的级联暂停在行上留 ``pinned_version_missing=true``
+    （A2R52-01）：钉版已删，复启即武装幽灵 cron——每 tick 产出
+    ``flow_definition_missing`` 垃圾执行（租户 start 配额空转 + 执行列表
+    噪音，「幽灵触发面随删除同步止住」被一键绕过）。复启门（POST /enable
+    与 PUT {enabled:true}）consult 行上现成标注 → 409 具名拒，零新查询面；
+    修复路径 = 重钉有效版本（可随复启同请求提交，update 的 422 版本门先验、
+    标注随重钉回清）或先解钉（version 空串，随解钉回清标注）再启。标注
+    缺失即健康行，直过。本地档行无该标注（级联暂停时不落自由列），门为
+    no-op。
+    """
+    if not schedule.get("pinned_version_missing"):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=error_detail(
+            "schedule_pinned_version_missing",
+            "调度钉定的流程版本已删除（级联暂停标注在案），不可直接启用——"
+            "请先重钉有效版本（PUT version=<有效版本>）或解钉（version 置空）"
+            "后再启用",
+            conflict="schedule_pinned_version_missing",
+        ),
+    )
+
+
 def _view(schedule: dict) -> dict:
     """API 视图：统一给前端的结构（补计算字段）。"""
     out = dict(schedule)
@@ -512,6 +539,13 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
     if req.version:
         _validate_flow(schedule["flow_id"], req.version, tenant_id=tenant)
 
+    # A2R57-02：复启门——级联暂停行（钉版已删、pinned_version_missing 标注
+    # 在案）不得原样复活。同请求重钉有效版本（req.version 非空，上面 422 门
+    # 已验存在）算修复动作放行；单纯复启/解钉后复启 → 409 先修复钉版。
+    # 暂停（enabled=false）与改名/解钉不入此门（A2R52-01 豁免语义不变）。
+    if req.enabled and not req.version:
+        _raise_if_pin_missing(schedule)
+
     # plaita#300 触发面池路由：version 变化即重盖章 runtime。解析涉及
     # 版本库读，提前到 CAS mutate 之外算好（mutate 只做纯字段赋值）。
     new_runtime = (
@@ -535,6 +569,10 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
             current["version"] = req.version or None
             # plaita#300：随版本重盖章目标池（上面已按新 version 现算）
             current["runtime"] = new_runtime
+            # A2R57-03：显式改钉（重钉过 422 门 / 解钉不再有钉）即解除
+            # 「钉版缺失」标注——钉版面已由本次请求重新裁定，健康行不再
+            # 永久带病征（此前写后全仓零清理点，视图透出假信号）。
+            current.pop("pinned_version_missing", None)
         if req.cron is not None:
             current["cron"] = req.cron
         if req.params is not None:
@@ -613,6 +651,7 @@ def enable(schedule_id: str, request: Request,
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
         if schedule is None:
             raise HTTPException(status_code=404, detail=f"调度不存在: {schedule_id}")
+        _raise_if_pin_missing(schedule)  # A2R57-02：级联暂停行禁原样复启
         schedule["enabled"] = True
         schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
         # plaita#300：启用即重盖章 runtime（本地档执行在进程内，字段惰性）
@@ -624,6 +663,7 @@ def enable(schedule_id: str, request: Request,
                _schedule_detail(result), tenant_id=tenant or "")
         return _view(result)
     schedule = _get_schedule(redis, schedule_id, tenant_id=tenant)
+    _raise_if_pin_missing(schedule)  # A2R57-02：级联暂停行禁原样复启
     schedule["enabled"] = True
     schedule["next_run_at"] = str(next_run_after(schedule["cron"]))
     schedule["updated_at"] = _now_iso()

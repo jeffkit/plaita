@@ -360,7 +360,12 @@ function ScheduleDialog({
       }
       const payload = {
         name: name.trim(),
-        version: version || defaultVersion || undefined,
+        // A2R57-04：编辑态 version 原样透传——空串=显式解钉（跟随 latest），
+        // 不再用 defaultVersion 兜底静默重钉（跟随 latest 行打开编辑时
+        // SELECT 显示 defaultVersion，不动版本直接保存曾把「跟随 latest」
+        // 静默钉成 defaultVersion）。新建仍兜底 defaultVersion（创建面
+        // 既定语义：不选版本=钉当前默认版）。
+        version: editing ? version : version || defaultVersion || undefined,
         cron,
         params,
       }
@@ -481,13 +486,18 @@ function ScheduleDialog({
           <div>
             <label className="block text-caption text-ink-muted mb-1.5">版本</label>
             <select
-              value={version || defaultVersion}
+              value={version || (editing ? '' : defaultVersion)}
               onChange={(e) => setVersion(e.target.value)}
               className="input w-full font-mono"
               disabled={!flowId}
             >
+              {/* A2R57-04：编辑态对 version=null（跟随 latest）行如实显示
+                  占位，不再借位显示 defaultVersion 诱导静默重钉 */}
+              {editing && <option value="">跟随最新（不钉版本）</option>}
               {!flowId && <option value="">先选择流程</option>}
-              {flowId && versions.length === 0 && <option value="">（运行时取最新）</option>}
+              {!editing && flowId && versions.length === 0 && (
+                <option value="">（运行时取最新）</option>
+              )}
               {versions.map((v) => (
                 <option key={v.version} value={v.version}>
                   {v.version}（{v.status === 'published' ? '已发布' : v.status === 'draft' ? '草稿' : v.status}）

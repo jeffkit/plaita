@@ -1,0 +1,186 @@
+.FFF..F.                                                                 [100%]
+=================================== FAILURES ===================================
+___________________ test_02b_repin_leaves_zombie_annotation ____________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=f61e2f5065ea4b7789fc6b270b583d10,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_02b_repin_leaves_zombie_annotation(redis):
+        """重钉+复启后 pinned_version_missing 永远留 True（写后无清理点）。"""
+        client = _client(redis)
+        _seed_published(client)
+        sid = _mk_sched(client, version=VER_PUB)
+        r = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER_PUB}?force=true",
+                          headers=_headers())
+        assert r.status_code == 200, r.text
+        # 重建版本并发布（重钉目标合法化）
+        _seed_published(client)
+        # 重钉（update 校验门：版本存在 → 200）+ 复启
+        r = client.put(f"/api/schedules/{sid}", json={"version": VER_PUB},
+                       headers=_headers())
+        assert r.status_code == 200, r.text
+        r = client.put(f"/api/schedules/{sid}", json={"enabled": True},
+                       headers=_headers())
+        assert r.status_code == 200, r.text
+        row = _row(redis, sid)
+>       assert not row.get("pinned_version_missing"), (
+            "重钉合法版本+复启后 pinned_version_missing 应回清——"
+            f"实际仍 {row.get('pinned_version_missing')}（健康行被永久钉成病行，"
+            "视图假信号，标注写后全仓零清理点）")
+E       AssertionError: 重钉合法版本+复启后 pinned_version_missing 应回清——实际仍 True（健康行被永久钉成病行，视图假信号，标注写后全仓零清理点）
+E       assert not True
+E        +  where True = <built-in method get of dict object at 0x108c77d80>('pinned_version_missing')
+E        +    where <built-in method get of dict object at 0x108c77d80> = {'schedule_id': 'sched-20261023041649748-e22db7', 'tenant_id': 'default', 'name': 's1', 'flow_id': 'fix-flow', ...}.get
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py:196: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  api.flows:flows.py:532 版本删除 force 放行：被钉调度已暂停并标注 pinned_version_missing schedule=sched-20261023041649748-e22db7 flow=fix-flow@1.0.0
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+__________________ test_02c_enable_rearms_ghost_without_gate ___________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=1e1ff6b74326412e9a444ae6c2ce1f65,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_02c_enable_rearms_ghost_without_gate(redis):
+        """enable 对级联暂停行（钉版已删）无门：200 复活幽灵 cron。"""
+        client = _client(redis)
+        _seed_published(client)
+        sid = _mk_sched(client, version=VER_PUB)
+        r = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER_PUB}?force=true",
+                          headers=_headers())
+        assert r.status_code == 200, r.text
+        assert _row(redis, sid)["enabled"] is False, "前置：级联暂停生效"
+    
+        r = client.post(f"/api/schedules/{sid}/enable", headers=_headers())
+>       assert r.status_code in (409, 422), (
+            "正确行为：enable 应拒钉版缺失的幽灵行（行上现成 "
+            f"pinned_version_missing 标注不被 consult）——实际 {r.status_code}："
+            "幽灵 cron 复活")
+E       AssertionError: 正确行为：enable 应拒钉版缺失的幽灵行（行上现成 pinned_version_missing 标注不被 consult）——实际 200：幽灵 cron 复活
+E       assert 200 in (409, 422)
+E        +  where 200 = <Response [200 OK]>.status_code
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py:214: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  api.flows:flows.py:532 版本删除 force 放行：被钉调度已暂停并标注 pinned_version_missing schedule=sched-20261023041649875-a27f42 flow=fix-flow@1.0.0
+WARNING  api.schedules:schedules.py:363 调度行 runtime 解析失败 flow=fix-flow@1.0.0（落默认 python）: 流程 fix-flow@1.0.0 不存在
+__________________ test_02d_update_enabled_door_rearms_ghost ___________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=43064e65986d4f9eae25b55d7a7e5db5,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_02d_update_enabled_door_rearms_ghost(redis):
+        """PUT {enabled:true} 第二门同洞：不触碰 version → 不复查 → 复活。"""
+        client = _client(redis)
+        _seed_published(client)
+        sid = _mk_sched(client, version=VER_PUB)
+        r = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER_PUB}?force=true",
+                          headers=_headers())
+        assert r.status_code == 200, r.text
+    
+        r = client.put(f"/api/schedules/{sid}", json={"enabled": True},
+                       headers=_headers())
+>       assert r.status_code in (409, 422), (
+            "正确行为：复启语义应有门（注释自许「孤儿行仍可改名/暂停/解钉」，"
+            f"复启不在其列）——实际 {r.status_code}")
+E       AssertionError: 正确行为：复启语义应有门（注释自许「孤儿行仍可改名/暂停/解钉」，复启不在其列）——实际 200
+E       assert 200 in (409, 422)
+E        +  where 200 = <Response [200 OK]>.status_code
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py:233: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  api.flows:flows.py:532 版本删除 force 放行：被钉调度已暂停并标注 pinned_version_missing schedule=sched-20261023041649955-745fb4 flow=fix-flow@1.0.0
+__________________ test_03a_import_publish_leaves_stale_stamp __________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=816c775be90f4e09a957e37b093c9ede,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_03a_import_publish_leaves_stale_stamp(redis):
+        """import publish=true 换 runtime → 调度行不重章（唯一调用点只在普通 publish）。"""
+        client = _client(redis)
+        _register_go_worker(redis)
+        _seed_published(client)  # 1.0.0 python published
+        sid = _mk_sched(client, version=None, enabled=True)  # 跟随 latest
+        assert _row(redis, sid)["runtime"] == "python"
+    
+        # 草稿 1.1.0 runtime=go → 晋升包 → import 新版本 2.0.0 publish=true
+        r = client.put(f"/api/flows/{FLOW_ID}/versions/{VER_NEXT}",
+                       json={"definition": _def(), "created_by": "a2r57",
+                             "runtime": "go"}, headers=_headers())
+        assert r.status_code == 200, r.text
+        from services import deployments as deployments_svc
+        store = flow_store.get_flow_store()
+        pkg = deployments_svc.build_promotion_package(store, FLOW_ID, VER_NEXT,
+                                                      tenant_id="default")
+        assert pkg.get("runtime") == "go", f"晋升包应携带 runtime=go: {pkg.get('runtime')}"
+        r = client.post("/api/flows/import-version",
+                        json={"package": pkg, "new_version": "2.0.0",
+                              "publish": True}, headers=_headers())
+        assert r.status_code == 200, r.text
+    
+        ver = store.get_version(FLOW_ID, "2.0.0", tenant_id="default")
+        assert getattr(ver, "runtime", None) == "go", "对照：import 发布版本行应为 go"
+        row = _row(redis, sid)
+>       assert row["runtime"] == "go", (
+            "正确行为：runtime 变更发布后 version=None 调度行应重章为 go"
+            f"（普通 publish 有 _restamp_schedules_for_publish）——实际仍 "
+            f"{row['runtime']!r}：cron 按旧章把 go 版本打进 python 池，"
+            "与 manual（按版本行现值）选池分裂 = A2R50-03 原害从 import 门重开")
+E       AssertionError: 正确行为：runtime 变更发布后 version=None 调度行应重章为 go（普通 publish 有 _restamp_schedules_for_publish）——实际仍 'python'：cron 按旧章把 go 版本打进 python 池，与 manual（按版本行现值）选池分裂 = A2R50-03 原害从 import 门重开
+E       assert 'python' == 'go'
+E         
+E         - go
+E         + python
+
+../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py:295: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=fix-flow@1.0.0）——旧 build worker 部署请尽快升级
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 70 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 12 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:703: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 34 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:865: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_02f_local_force_delete_pauses
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/local_scheduler.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03a_import_publish_leaves_stale_stamp
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03b_normal_publish_restamps_control
+  /Users/kong/.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py:156: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    rd.setex("plaita:registry:flow_worker:go-1", 30,
+
+.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03a_import_publish_leaves_stale_stamp
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:189: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "exported_at": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_02b_repin_leaves_zombie_annotation
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_02c_enable_rearms_ghost_without_gate
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_02d_update_enabled_door_rearms_ghost
+FAILED ../../../.issue-keeper/duty/b2-r87-scripts/test_a2r57_b2_worktree.py::test_03a_import_publish_leaves_stale_stamp
+4 failed, 4 passed, 143 warnings in 1.60s
