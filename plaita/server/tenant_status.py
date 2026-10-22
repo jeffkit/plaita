@@ -111,22 +111,29 @@ def publish_tenant_status(
     status: str,
     *,
     epoch: Optional[str] = None,
-) -> None:
+) -> bool:
     """把租户状态写入共享视图（无 Redis / 无租户 id 时空操作）。
 
     A2R31-02：状态值保持**纯字符串**（旧读侧兼容，灰度「旧值双写」），纪元
     写在独立键 ``plaita:tenant_status:epoch``。两者分开是因为状态 HASH 会被
     Redis 快照回滚，而 epoch 的权威锚点是部署配置；只有分开写，worker 才能
     判断「这条状态属于哪个部署」。
+
+    返回是否成功：Redis 失败 WARNING 并返回 False，由调用方决定语义
+    （A2R53-01：create_tenant 的 active 发布与 #284 世代发布同标
+    fail-closed；其余同步路径维持吞异常只告警）。与
+    :func:`publish_tenant_generation` 同形制。
     """
     if redis_client is None or not tenant_id:
-        return
+        return True
     try:
         redis_client.hset(TENANT_STATUS_KEY, key=tenant_id, value=status)
         if epoch:
             redis_client.set(TENANT_STATUS_EPOCH_KEY, epoch)
-    except Exception as exc:  # noqa: BLE001 — 同步失败不阻断 console 主流程
+    except Exception as exc:  # noqa: BLE001 — 默认不阻断主流程，调用方裁量
         logger.warning("租户 %s 状态同步到 Redis 失败: %s", tenant_id, _scrub_exception_text(exc))
+        return False
+    return True
 
 
 def publish_tenant_status_epoch(redis_client, epoch: Optional[str]) -> None:
