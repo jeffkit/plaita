@@ -231,14 +231,19 @@ def create_tenant(store, tenant_id: str, name: str = "",
             raise TenantError(
                 f"租户 {tenant_id} 创建失败：世代发布失败（拒绝进入 active）"
             )
+        # A2R53-01：active 发布（#255 前代墓碑覆盖点）与世代发布同标——
+        # 也在 commit 前的事务窗口内，失败即回滚建租户。否则墓碑留在短视图，
+        # DB 行 active 而 worker 的 tenant_is_active=False，拦该租户一切
+        # start/resume，自愈只剩下次 console 重启对账（「console active /
+        # 运行面 disabled」拦行窗）。
+        if not _publish_status(redis_client, tenant_id, "active"):
+            raise TenantError(
+                f"租户 {tenant_id} 创建失败：状态发布失败（拒绝留下运行面拦行窗）"
+            )
         session.commit()
         session.refresh(row)
         result = _to_dict(row)
         result["contract_secret_key"] = secret_key  # 仅本次响应返回
-    # plaita#255：删除写下的 disabled 墓碑必须被同名重建覆盖，否则新租户
-    # 在 Redis 短视图里仍是「已停用」而被 worker/调度拦截。active 必须在
-    # 新世代发布成功之后（#284）。
-    _publish_status(redis_client, tenant_id, "active")
     return result
 
 
@@ -314,14 +319,19 @@ def _deployment_epoch() -> Optional[str]:
     return value
 
 
-def _publish_status(redis_client, tenant_id: str, status: str) -> None:
+def _publish_status(redis_client, tenant_id: str, status: str) -> bool:
+    """发布租户状态到 Redis 短视图；返回是否成功（A2R53-01）。
+
+    无客户端 / ImportError 视为成功（与 ``_publish_generation`` 同款口径）：
+    这些部署形态下短视图本就不存在，无拦行窗可言。
+    """
     if redis_client is None:
-        return
+        return True
     try:
         from plaita.server.tenant_status import publish_tenant_status
     except ImportError:
-        return
-    publish_tenant_status(
+        return True
+    return publish_tenant_status(
         redis_client, tenant_id, status, epoch=_deployment_epoch()
     )
 
