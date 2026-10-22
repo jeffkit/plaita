@@ -868,3 +868,4 @@
 - 守恒：既有 `test_engine_outbox` 33P（stats 契约增 `skipped` 键，更新一处全等断言）；console 全量 **1296P/13S**（前值 1285+本轮 10 新增+1 修改，零回归）；e2e+integration **287P/4S**（CI 同参 `--timeout=150`）；unit **8847P/13S/14 deselected/3501 subtests**（与前值全等）；ruff 改动文件零告警；mkdocs `--strict` rc=0。
 - 文档：engine_outbox 模块 docstring「删除协议串行化（#303，口径一）」节 + FlowPublishOutbox 状态机补 deleting + ops-runbook 删除投递语义节改写（#301/#303）+ `/health.engine_outbox.deleting` 字段说明。
 - 教训：负控测试自身的准备顺序 bug（投递轮在 resolve 之前跑导致 1.0.1 已 delivered）被 post 首跑抓住——fixture 顺序也是被测语义的一部分。
+- **终态**：推送 `14529b6` 后 main CI + CI slow lane + Console E2E 三线 **success**；`landing_gate.py ci` **rc=0**（✅ main CI 绿 ✅ Console E2E 绿 ✅ 允许落地）。#303 关单回执另附。
