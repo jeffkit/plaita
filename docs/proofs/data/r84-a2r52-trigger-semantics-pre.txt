@@ -1,0 +1,238 @@
+# r84 A2R52-03/04 pre-fix 红（fix/a2r52-03-04 基线 origin/main 2e59e4d=本席 r83 已合，wt2）
+# 2026-10-23 探针=A2 r56 归档 test_a2r52_axis1_schedule_lifecycle-r56.py（/tmp/b2-r83-probes 存件，ARCHIVE 钉 wt2），
+# stash 修复后于真基线态采集；判红口径=断言正确行为失败即红
+# 结果：6 failed / 1 passed——本轮缺陷面红=01d 集群(暂停调度 trigger 200 照常入队)/01d 本地(同动作 502「查看 console 日志」)/
+# 01e(配额满 502「检查 Redis 与队列配置」)；01a/01b/01c 为 r83 已修面的探针红世界断言（失败点后移=翻转后形态，见 r83 pre/post）；
+# 绿=对照格 create 422
+============================= test session starts ==============================
+collecting ... collected 7 items
+test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version PASSED [ 14%]
+test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version FAILED [ 28%]
+test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule FAILED [ 42%]
+test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite FAILED [ 57%]
+test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule FAILED [ 71%]
+test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502 FAILED [ 85%]
+test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502 FAILED [100%]
+=================================== FAILURES ===================================
+_________________ test_r52_01a_update_pins_nonexistent_version _________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=0232f54b5bd741a499783d310c25f6b8,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_r52_01a_update_pins_nonexistent_version(redis):
+        client = _client(redis)
+        _seed_flow(client)
+        r = _mk_sched(client, version=VER_PUB)
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+        # PUT 钉一个不存在的版本——期望与 create 同口 422；实际 200 即红
+        r2 = client.put(f"/api/schedules/{sid}", json={"version": "9.9.9"},
+                        headers=_headers())
+        print(f"[R52-01a] PUT version=9.9.9 → {r2.status_code} (应 422 与 create 同口)")
+        assert r2.status_code == 422, (
+            f"update 不验版本存在：钉不存在版本返回 {r2.status_code}——"
+            "create 422 / update 200 双标，cron 将按钉死版本触发直至 worker 终态失败"
+        )
+        got = client.get(f"/api/schedules/{sid}", headers=_headers()).json()
+        print(f"[R52-01a] 调度行落库 version={got.get('version')} "
+              f"runtime={got.get('runtime')}（钉死不存在版本已生效）")
+>       assert got.get("version") == "9.9.9", "不存在版本已写入调度行"
+E       AssertionError: 不存在版本已写入调度行
+E       assert '1.0.0' == '9.9.9'
+E         
+E         - 9.9.9
+E         + 1.0.0
+test_a2r52_axis1_pre.py:156: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01a] PUT version=9.9.9 → 422 (应 422 与 create 同口)
+[R52-01a] 调度行落库 version=1.0.0 runtime=python（钉死不存在版本已生效）
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+______________ test_r52_01b_delete_draft_orphans_pinned_schedule _______________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=01349e0e7ff540b5a8c897966e396385,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_r52_01b_delete_draft_orphans_pinned_schedule(redis):
+        client = _client(redis)
+        _seed_flow(client, with_draft=True)
+        r = _mk_sched(client, version=VER_DRAFT, name="pinned")
+        print(f"\n[R52-01b] create 钉 draft {VER_DRAFT} → {r.status_code}（list_versions "
+              f"不过滤 status，draft 可钉）")
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+        # draft 删除无需 force；守卫只扫非终态执行，无 schedule 触点
+        r2 = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER_DRAFT}",
+                           headers=_headers())
+        print(f"[R52-01b] DELETE draft（被调度钉住）→ {r2.status_code} "
+              f"(正确行为应 409 version_pinned_by_schedule)")
+        assert r2.status_code == 409, (
+            f"删除守卫对 schedule 引用零感知：被钉版本删除返回 {r2.status_code}——"
+            "调度孤儿化无任何 CRUD 级信号"
+        )
+        got = client.get(f"/api/schedules/{sid}", headers=_headers()).json()
+        print(f"[R52-01b] 删除后调度行：enabled={got.get('enabled')} "
+              f"version={got.get('version')}（孤儿调度原样保留）")
+>       assert got.get("enabled") is False, "孤儿调度应至少被暂停/标注"
+E       AssertionError: 孤儿调度应至少被暂停/标注
+E       assert True is False
+E        +  where True = <built-in method get of dict object at 0x11732e080>('enabled')
+E        +    where <built-in method get of dict object at 0x11732e080> = {'schedule_id': 'sched-20261023025919027-4cc280', 'tenant_id': 'default', 'name': 'pinned', 'flow_id': 'sched-flow', ...}.get
+test_a2r52_axis1_pre.py:183: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01b] create 钉 draft 2.0.0 → 200（list_versions 不过滤 status，draft 可钉）
+[R52-01b] DELETE draft（被调度钉住）→ 409 (正确行为应 409 version_pinned_by_schedule)
+[R52-01b] 删除后调度行：enabled=True version=2.0.0（孤儿调度原样保留）
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  api.schedules:schedules.py:355 调度行 runtime 解析失败 flow=sched-flow@2.0.0（落默认 python）: 流程 sched-flow@2.0.0 未发布（draft 不能直接 start，请先 publish）
+_________________ test_r52_01c_same_ms_create_silent_overwrite _________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=f6acffac0e904a6faf23b79f7435e62b,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x116e4bce0>
+    def test_r52_01c_same_ms_create_silent_overwrite(redis, monkeypatch):
+        client = _client(redis)
+        _seed_flow(client)
+        monkeypatch.setattr(schedules_api, "datetime", _FrozenDatetime)
+        r1 = _mk_sched(client, version=VER_PUB, name="first")
+        r2 = _mk_sched(client, version=VER_PUB, name="second")
+        print(f"\n[R52-01c] 同毫秒两连 create → id1={r1.json().get('schedule_id')} "
+              f"id2={r2.json().get('schedule_id')} "
+              f"rc={r1.status_code}/{r2.status_code}")
+        assert r1.status_code == 200 and r2.status_code == 200
+>       assert (r1.json()["schedule_id"] == r2.json()["schedule_id"]), (
+            "同毫秒 id 不同（无碰撞）——需复核前提"
+        )
+E       AssertionError: 同毫秒 id 不同（无碰撞）——需复核前提
+E       assert 'sched-202610...000123-440ce9' == 'sched-202610...000123-38c278'
+E         
+E         - sched-20261022120000123-38c278
+E         ?                         ^^ ^^^
+E         + sched-20261022120000123-440ce9
+E         ?                         ^^^ ^^
+test_a2r52_axis1_pre.py:216: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01c] 同毫秒两连 create → id1=sched-20261022120000123-440ce9 id2=sched-20261022120000123-38c278 rc=200/200
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+__________ test_r52_01d_cluster_manual_trigger_fires_paused_schedule ___________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=7c55bfffeef2473093d474b265ee69ad,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_r52_01d_cluster_manual_trigger_fires_paused_schedule(redis):
+        client = _client(redis)
+        _seed_flow(client)
+        r = _mk_sched(client, version=VER_PUB, enabled=False, name="paused")
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+        r2 = client.post(f"/api/schedules/{sid}/trigger", headers=_headers())
+        body = r2.json()
+        print(f"\n[R52-01d/集群] trigger 暂停调度 → {r2.status_code} body={body} "
+              f"(本地档同动作=502；双档语义分裂)")
+>       assert r2.status_code != 200, (
+            "集群档对暂停调度手动触发照常入队 200——与本地档 502 分裂；"
+            "或应统一拒绝（409 paused）或统一放行，不得随模式翻转"
+        )
+E       AssertionError: 集群档对暂停调度手动触发照常入队 200——与本地档 502 分裂；或应统一拒绝（409 paused）或统一放行，不得随模式翻转
+E       assert 200 != 200
+E        +  where 200 = <Response [200 OK]>.status_code
+test_a2r52_axis1_pre.py:242: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01d/集群] trigger 暂停调度 → 200 body={'success': True, 'mode': 'cluster', 'execution_id': None, 'msg_id': '1792695559190-0'} (本地档同动作=502；双档语义分裂)
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  plaita.server.tenant_status:tenant_status.py:62 租户状态闸 fail-open（无状态记录）：tenant=default 按 active 放行（plaita#237 计数）
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  plaita.server.tenant_status:tenant_status.py:62 租户状态闸 fail-open（无状态记录）：tenant=default 按 active 放行（plaita#237 计数）
+_______________ test_r52_01d_local_manual_trigger_paused_is_502 ________________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=b022b237b70d49349896f6225137ffaf,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+    def test_r52_01d_local_manual_trigger_paused_is_502(redis):
+        client = _client(redis, local_mode=True)
+        _seed_flow(client)
+        r = _mk_sched(client, version=VER_PUB, enabled=True, name="local")
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+        r2 = client.post(f"/api/schedules/{sid}/disable", headers=_headers())
+        assert r2.status_code == 200, r2.text
+        r3 = client.post(f"/api/schedules/{sid}/trigger", headers=_headers())
+        print(f"[R52-01d/本地] trigger 暂停调度 → {r3.status_code} "
+              f"detail={r3.json().get('detail')}（语义误导：暂停≠基础设施故障）")
+>       assert r3.status_code == 409, (
+            f"本地档暂停调度手动触发返回 {r3.status_code}（502=基础设施故障语义），"
+            "应为 409/422 具名「调度已暂停」"
+        )
+E       AssertionError: 本地档暂停调度手动触发返回 502（502=基础设施故障语义），应为 409/422 具名「调度已暂停」
+E       assert 502 == 409
+E        +  where 502 = <Response [502 Bad Gateway]>.status_code
+test_a2r52_axis1_pre.py:259: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01d/本地] trigger 暂停调度 → 502 detail=触发失败，请查看 console 日志（语义误导：暂停≠基础设施故障）
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+______________ test_r52_01e_quota_rejection_surfaces_as_redis_502 ______________
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=05c287a0dad94872bbd563df06bae208,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x116ee3550>
+    def test_r52_01e_quota_rejection_surfaces_as_redis_502(redis, monkeypatch):
+        client = _client(redis)
+        _seed_flow(client)
+        r = _mk_sched(client, version=VER_PUB, name="quota")
+        assert r.status_code == 200, r.text
+        sid = r.json()["schedule_id"]
+        import plaita.server.services.schedule_service as ss
+        monkeypatch.setattr(ss, "try_admit_tenant_start",
+                            lambda *a, **k: False)
+        r2 = client.post(f"/api/schedules/{sid}/trigger", headers=_headers())
+        detail = str(r2.json().get("detail", ""))
+        print(f"\n[R52-01e] 配额满 trigger → {r2.status_code} detail={detail!r} "
+              f"(真因=tenant_quota_exhausted，文案指向 Redis)")
+>       assert r2.status_code == 429, (
+            f"配额拒绝被映射为 {r2.status_code} 且文案指向 Redis/队列配置——"
+            "调用方被导向错误排查方向；真因只在 fire history rejection_reason"
+        )
+E       AssertionError: 配额拒绝被映射为 502 且文案指向 Redis/队列配置——调用方被导向错误排查方向；真因只在 fire history rejection_reason
+E       assert 502 == 429
+E        +  where 502 = <Response [502 Bad Gateway]>.status_code
+test_a2r52_axis1_pre.py:280: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[R52-01e] 配额满 trigger → 502 detail='入队失败，请检查 Redis 与任务队列配置' (真因=tenant_quota_exhausted，文案指向 Redis)
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  plaita.server.tenant_status:tenant_status.py:62 租户状态闸 fail-open（无状态记录）：tenant=default 按 active 放行（plaita#237 计数）
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=sched-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  plaita.server.tenant_status:tenant_status.py:62 租户状态闸 fail-open（无状态记录）：tenant=default 按 active 放行（plaita#237 计数）
+../../../Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class Settings(BaseModel):
+b2-r84-probes/test_a2r52_axis1_pre.py: 55 warnings
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+b2-r84-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+b2-r84-probes/test_a2r52_axis1_pre.py: 22 warnings
+    cursor.execute(statement, parameters)
+b2-r84-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+b2-r84-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+FAILED test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+FAILED test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+FAILED test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+FAILED test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+FAILED test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+================== 6 failed, 1 passed, 101 warnings in 3.06s ===================

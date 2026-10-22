@@ -291,6 +291,8 @@ def fire_schedule(
     queue_name: Optional[str] = None,
     trigger_kind: str = "cron",
     due_at: Any = None,
+    *,
+    rejection: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """触发一次调度：入队 Stream + 记录触发历史 + 回写状态字段。
 
@@ -311,6 +313,11 @@ def fire_schedule(
         due_at: 本次到期时点（epoch 毫秒或可转 float 的字符串）。cron 侧由
             ``_fire_if_due`` 传入其判定用的 ``next_run_at``；缺省时回落到调度
             定义里的 ``next_run_at``（见 ``normalized_due_ms``）。manual 忽略。
+        rejection: A2R52-04 出参（可选）。传 dict 时，闸拒绝路径（停用租户 /
+            配额满）在其 ``reason`` 键回写 ``REJECTION_*`` 常量——``None``
+            返回值有多义（入队失败/dedup 收敛/闸拒绝），调用方（console
+            manual 触发）据此区分「配额满 429」与「基础设施 502」，不再让
+            配额满冒充 Redis 故障。cron 调用方不传，行为零变化。
 
     Returns:
         Stream message id；入队失败 / 预算或落盘回滚 / 同键 dedup 收敛 /
@@ -335,6 +342,8 @@ def fire_schedule(
             execution_id="",
             rejection_reason=REJECTION_TENANT_DISABLED,
         )
+        if rejection is not None:
+            rejection["reason"] = REJECTION_TENANT_DISABLED
         return None
     tenant_id = schedule.get("tenant_id") or "default"
     now = datetime.now()
@@ -389,6 +398,8 @@ def fire_schedule(
                 execution_id="",
                 rejection_reason=REJECTION_QUOTA_EXHAUSTED,
             )
+            if rejection is not None:
+                rejection["reason"] = REJECTION_QUOTA_EXHAUSTED
             return None
     else:
         mapped = claim.mapped
@@ -522,7 +533,7 @@ def fire_schedule(
         )
         return fire_schedule(
             redis_client, schedule, queue_name,
-            trigger_kind=trigger_kind, due_at=due_at,
+            trigger_kind=trigger_kind, due_at=due_at, rejection=rejection,
         )
 
     # trigger（A2R44-02）：触发归因三元组单源构造——随占位行落盘（受理窗口内
