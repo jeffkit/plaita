@@ -166,7 +166,8 @@ def test_a1b_delete_vs_reconcile_delivery_no_resurrection(
 
     monkeypatch.setattr(engine_outbox, "purge_target_keys", spy)
 
-    resp = client.delete("/api/flows/race")
+    # #304：published 版本删除需显式 force（本测无在途执行，引用判据放行）
+    resp = client.delete("/api/flows/race?force=true")
     assert resp.status_code == 200
     # 删除窗口内行已置 deleting（tombstone）：对账/投递扫描零命中
     assert set(seen["statuses_mid_delete"]) == {"deleting"}

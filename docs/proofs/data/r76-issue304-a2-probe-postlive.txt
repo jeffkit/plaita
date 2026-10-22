@@ -1,0 +1,44 @@
+runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=lifecycle-flow@1.0.0）——旧 build worker 部署请尽快升级
+runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=lifecycle-flow@1.0.0）——旧 build worker 部署请尽快升级
+runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=lifecycle-flow@2.0.0）——旧 build worker 部署请尽快升级
+runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=rollback-flow@1.0.0）——旧 build worker 部署请尽快升级
+runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=rollback-flow@2.0.0）——旧 build worker 部署请尽快升级
+runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=rollback-flow@3.0.0）——旧 build worker 部署请尽快升级
+create flow: 200 {"flow_id":"lifecycle-flow","tenant_id":"default","author":"","desc":"","created_at":"2026-10-22T10:27:12.156008","updat
+save 1.0.0: 200 {"flow_id":"lifecycle-flow","version":"1.0.0","status":"draft","definition":"{\"id\": \"lifecycle-flow\", \"name\": \"lifecycle-flow\", \"nodes\": [{\"id\": \"s
+publish 1.0.0: 200 {"flow_id":"lifecycle-flow","version":"1.0.0","status":"published","definition":"{\"id\": \"lifecycle-flow\", \"name\": \"lifecycle-flow\", \"nodes\": [{\"id\":
+[PASS] A0 引擎键已同步: exists=1
+[FAIL] P1a 删除 published 版本=200 无守卫: status=409 body={"detail":{"code":"version_published","message":"版本 lifecycle-flow@1.0.0 已发布，不可删除（删除会打断在途执行的恢复链）；如确需删除请显式传 force=true","
+[FAIL] P1f 引擎键已随删: exists=1
+[FAIL] A0b 版本行已删: versions=['1.0.0']
+[PASS] P1b start(latest) 无 published 版本仍受理: status=200 body={"status":"queued","flow_id":"lifecycle-flow","execution_id":"bbc2651a371144bbb2ebcf6264a6b16e","message":"流程启动请求已加入队列","version":"1.0.0"}
+[PASS] P1b-2 占位 queued 行已落（非终态无 TTL，worker poison-ack 后永驻）: row status=queued
+[PASS] P1c 版本已删的挂起执行 resume 仍受理: status=200 body={"status":"resuming","execution_id":"exec-susp-1","resume_type":"continue","message":"恢复请求已加入队列"}
+save 2.0.0: 200
+publish 2.0.0: 200
+[FAIL] P1d 删除新版 2.0.0 = 200: status=409
+[FAIL] P1d-2 start latest 静默改靶旧版 1.0.0: resolved=2.0.0
+save 0.9.0 (draft): 200
+[FAIL] P1e start 显式不存在版本无 404 照常受理: status=404 body={"detail":{"code":"version_not_found","message":"流程 lifecycle-flow@9.9.9 不存在，拒绝入队（#304：入队必败会产生幽灵 queued 行）","flow_id":"lifecycle-flow","version":"9.9.9","exists
+[FAIL] P1e-2 start draft 版本无 4xx 照常受理: status=404 body={"detail":{"code":"version_not_found","message":"流程 lifecycle-flow@0.9.0 未发布（draft 不能直接 start，请先 publish），拒绝入队（#304：入队必败会产生幽灵 queued 行）","flow_id":"lifecycle-fl
+[PASS] P1d-3a 双 published 共存（无 unpublish/互斥）: published=['1.0.0', '2.0.0']
+[PASS] P1d-3b published 版本不可覆盖（409）: status=409
+[FAIL] P1d-3c 删掉 3.0.0 后 latest 回落 2.0.0（改靶静默）: latest_resolved=3.0.0
+
+===== P1 汇总 =====
+PASS  A0 引擎键已同步: exists=1
+FAIL  P1a 删除 published 版本=200 无守卫: status=409 body={"detail":{"code":"version_published","message":"版本 lifecycle-flow@1.0.0 已发布，不可删除（删除会打断在途执行的恢复链）；如确需删除请显式传 force=true","
+FAIL  P1f 引擎键已随删: exists=1
+FAIL  A0b 版本行已删: versions=['1.0.0']
+PASS  P1b start(latest) 无 published 版本仍受理: status=200 body={"status":"queued","flow_id":"lifecycle-flow","execution_id":"bbc2651a371144bbb2ebcf6264a6b16e","message":"流程启动请求已加入队列","version":"1.0.0"}
+PASS  P1b-2 占位 queued 行已落（非终态无 TTL，worker poison-ack 后永驻）: row status=queued
+PASS  P1c 版本已删的挂起执行 resume 仍受理: status=200 body={"status":"resuming","execution_id":"exec-susp-1","resume_type":"continue","message":"恢复请求已加入队列"}
+FAIL  P1d 删除新版 2.0.0 = 200: status=409
+FAIL  P1d-2 start latest 静默改靶旧版 1.0.0: resolved=2.0.0
+FAIL  P1e start 显式不存在版本无 404 照常受理: status=404 body={"detail":{"code":"version_not_found","message":"流程 lifecycle-flow@9.9.9 不存在，拒绝入队（#304：入队必败会产生幽灵 queued 行）","flow_id":"lifecycle-flow","version":"9.9.9","exists
+FAIL  P1e-2 start draft 版本无 4xx 照常受理: status=404 body={"detail":{"code":"version_not_found","message":"流程 lifecycle-flow@0.9.0 未发布（draft 不能直接 start，请先 publish），拒绝入队（#304：入队必败会产生幽灵 queued 行）","flow_id":"lifecycle-fl
+PASS  P1d-3a 双 published 共存（无 unpublish/互斥）: published=['1.0.0', '2.0.0']
+PASS  P1d-3b published 版本不可覆盖（409）: status=409
+FAIL  P1d-3c 删掉 3.0.0 后 latest 回落 2.0.0（改靶静默）: latest_resolved=3.0.0
+DEBUG rollback-flow versions: [('1.0.0', 'published'), ('2.0.0', 'published'), ('3.0.0', 'published')]
+DEBUG lifecycle-flow versions: [('1.0.0', 'published'), ('2.0.0', 'published'), ('0.9.0', 'draft')]

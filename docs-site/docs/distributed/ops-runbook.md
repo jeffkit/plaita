@@ -726,7 +726,7 @@ worker 不同机/不同 Redis 时，人工在目标机跑 `sync_published_to_eng
   2. **目标对账**：delivered 行在目标侧缺 key / hash 不符（被外部删改）→
      打回 pending 重投；删除流程/版本会同步清 outbox，对账不会复活已删
      版本；
-- **删除投递语义（#301/#303）**：`DELETE /flows/{id}` 与
+- **删除投递语义（#301/#303）**：先过 #304 删除前置守卫（见下节），随后 `DELETE /flows/{id}` 与
   `DELETE /flows/{id}/versions/{ver}` 除清 DB 行外，**同步清目标 Redis
   三件**——版本 key、`flow_versions:{fid}` 注册集、`flow_list` 成员（复用
   引擎存储 `delete_flow`，与投递同源配置）。尽力而为：目标不可达时 ERROR
@@ -765,6 +765,42 @@ WARNING + 回退默认（见下方非法值矩阵；`_POLL_SECONDS`/`_RECONCILE_
 非 SQLite 的 `PLAITA_CONSOLE_DB_URL` 显式设置 connect/pool 超时（默认 5s）
 与 PG `lock_timeout=5s`；DB 黑洞/半开时启动在约 5s 内具名失败（不回退
 `create_all` 再阻塞一次），启动日志中的目标 URL 已脱敏。
+
+### 版本删除守卫与定义缺失兜底（#304，2026-10 起） {#版本删除守卫与定义缺失兜底304}
+
+`DELETE /flows/{id}` 与 `DELETE /flows/{id}/versions/{ver}` 在触碰 outbox /
+引擎键**之前**有删除前置守卫，口径为**「状态守卫可 force，引用守卫不可越」**
+（二选一拍板已落档 `api/flows.py` 守卫节）：
+
+- **状态守卫**：删除涉及 published 版本 → 409 `version_published`（与
+  「published 不可覆盖」同口径）；`?force=true` 显式逃生（同执行删除
+  A43-01 的 force 形态）。
+- **引用守卫**：该 flow(+version) 存在**非终态执行**（queued/running/
+  suspended）引用 → 409 `version_in_use`，附 execution 清单（≤20 条 +
+  total）。**force 不可越**——级联取消刻意不采用：取消是异步意图信号，
+  删行+清定义键之后取消路径自身还需要定义键/状态行收口，竞窗内会造出
+  新的孤儿；正确操作序是「先取消 → 待终态 → 再删（published 需 force）」。
+  扫描走租户执行索引；Redis 不可达 → 503 `version_in_use_scan_failed`
+  （fail-closed，不带疑删除）。本地档（无 Redis）引用判据退化为状态守卫，
+  断链兜底交 worker 侧具名终态。
+- 守卫通过后才发生：outbox 目标清理 → 删行 → 引擎定义键清理——**真源
+  清理只在「确认无引用」之后**（#301/#303 的删除协议不变，串在其后）。
+
+**worker 兜底（具名终态）**：定义仍可能因竞窗/直写引擎存储/未发布版本而
+缺失——`start_flow`/`resume_flow` 取定义失败不再走裸 ValueError poison
+ack：执行被终态化 `error`（`error.error_type="flow_definition_missing"`，
+机器可判），start 准入名额同步释放（queued 幽灵行与名额泄漏一并收口）；
+版本恢复/重发后可 `resume_type=retry` 从断点唤醒（G1「error 态可反复
+唤醒」语义保留）。值守口径：**卡死 suspended/queued 行先查
+`error.error_type`**——本节生效后新产生的定义缺失执行必有终态与明细；
+历史陈尸行（修复前产生、无 error 字段）需人工 retry/取消收尸。
+
+**start 具名拒绝**：`POST /api/executions` 显式传 `version` 且该版本
+不存在/非 published → 404 `version_not_found`（detail `exists` 字段区分
+两种情形）——不再照单入队造幽灵 queued 行。latest（version=None）语义
+不变：无 published 仍受理（fail-open 保留），响应带 `warnings`；正常解析
+时响应新增 `version` 字段回显实际靶版本（删最新 published 后改靶旧版可
+直接从响应看出）。
 
 ### 已知缺口（本 runbook 尚未覆盖） {#已知缺口}
 

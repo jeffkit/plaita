@@ -328,17 +328,40 @@ def _enqueue(message: Dict[str, Any], redis: Redis, *, queue_name: Optional[str]
     )
 
 
+class StartVersionNotStartable(Exception):
+    """start 显式指定的版本不可启动：不存在或未发布（#304 具名拒绝路径）。
+
+    只在「存储可达且读成功、该版本确实不可 start」的可判定路径抛出；
+    存储读失败仍走 fail-open 返回 ``None``（存量兜底保留）。调用方：
+    start 端点转 404 ``version_not_found``；``_runtime_queue_for_flow``
+    的全捕获按「取不到」回落默认队列（可达性优先，语义不变）。
+    """
+
+    def __init__(self, flow_id: str, version: str, *, exists: bool):
+        self.flow_id = flow_id
+        self.version = version
+        self.exists = exists  # True=行存在但非 published（draft）；False=行不存在
+        super().__init__(
+            f"流程 {flow_id}@{version} "
+            + ("未发布（draft 不能直接 start，请先 publish）" if exists else "不存在")
+        )
+
+
 def _resolve_start_version(flow_id: str, version: Optional[str],
                            tenant: Optional[str]):
     """start 的版本行解析（#300 能力门/池路由的真源）。
 
-    - 显式 version → 该版本行（不存在返回 ``None``，调用方按存量行为入队）；
+    - 显式 version → 该版本行；**不存在或非 published 时抛
+      ``StartVersionNotStartable``**（#304 具名拒绝：这是可判定路径——
+      存储读成功而行确实不可 start，照单入队只会造出 worker 侧必败的
+      幽灵 queued 行）；
     - ``version=None`` → worker 的 latest 语义：库内 published 版本取最高
-      semver（不可解析时退创建序最后一个）；
+      semver（不可解析时退创建序最后一个）；无 published 返回 ``None``
+      （不阻断，由响应面 warnings 提示）；
     - ``tenant == "default"`` 时回退查 ``tenant_id=""``：历史单租户时代的
       行以空串落库（Redis 命名空间里 ``""``/``default`` 同映 ``plaita``），
       start 面对的是跨代存量，两个别名都要认；
-    - 存储不可用一律 ``None``（门无从谈起，不阻断 start）。
+    - 存储不可用一律 ``None``（fail-open 本体保留，不阻断 start）。
     """
     store = flow_store.get_flow_store()
     try:
@@ -346,6 +369,10 @@ def _resolve_start_version(flow_id: str, version: Optional[str],
             row = store.get_version(flow_id, version, tenant_id=tenant)
             if row is None and tenant == "default":
                 row = store.get_version(flow_id, version, tenant_id="")
+            if row is None:
+                raise StartVersionNotStartable(flow_id, version, exists=False)
+            if row.status != "published":
+                raise StartVersionNotStartable(flow_id, version, exists=True)
             return row
         published = [
             v for v in store.list_versions(flow_id, tenant_id=tenant)
@@ -369,6 +396,8 @@ def _resolve_start_version(flow_id: str, version: Optional[str],
             return parts
 
         return max(published, key=lambda v: (_semver_key(v), v.created_at or datetime.min))
+    except StartVersionNotStartable:
+        raise  # #304：可判定的不可启动路径具名上抛，不吞进 fail-open
     except Exception:  # noqa: BLE001 — 版本库读失败不改变存量 start 行为
         return None
 
@@ -394,6 +423,50 @@ def _runtime_queue_for_flow(flow_id: Any, version: Any,
         return resolve_runtime_queue(getattr(row, "runtime", None))
     except ValueError:
         return None
+
+
+# ---- plaita#304：版本删除守卫的在途引用扫描 ----
+
+class VersionInUseScanError(Exception):
+    """删除守卫的在途引用扫描失败（Redis 不可达等）——fail-closed 信号。
+
+    删除方收到后应拒绝删除（503）：「无法核实无引用」不等于「无引用」，
+    带疑删除会复现 #304 的在途断链。
+    """
+
+
+def find_flow_version_active_executions(
+    redis: Optional[Redis], tenant: Optional[str],
+    flow_id: str, version: Optional[str] = None,
+    *, limit: int = 100,
+) -> List[ExecutionState]:
+    """引用 flow(+version) 的**非终态**执行清单（#304 删除守卫引用判据）。
+
+    ``version=None`` → 该 flow 全部版本（delete_flow 聚合判据）。走租户
+    命名空间的执行索引（``RedisExecutionStorage.list_executions``，悬空
+    成员读时剪枝；``default``/``""`` 同映一个命名空间，无别名漏扫），
+    内存过滤 flow_id/flow_version/非终态。redis 为 None（本地档，执行不
+    经 Redis 索引）→ 返回 []：引用判据退化为状态守卫，断链兜底交
+    worker 侧具名终态。
+
+    Redis 探活失败抛 ``VersionInUseScanError``（fail-closed）；索引读取
+    本身的异常由 list_executions 吞为空列表，与既有列表语义一致。
+    """
+    if redis is None:
+        return []
+    try:
+        redis.ping()
+    except Exception as exc:  # noqa: BLE001 — 探不通即无法核实，交调用方拒绝
+        raise VersionInUseScanError(
+            f"在途执行引用扫描失败（Redis 不可达），删除守卫无法核实: {exc}"
+        ) from exc
+    storage = RedisExecutionStorage(client=redis, namespace=tenant_namespace(tenant))
+    states = storage.list_executions(query={"flow_id": flow_id}) or []
+    return [
+        s for s in states
+        if (version is None or getattr(s, "flow_version", None) == version)
+        and getattr(s, "status", None) not in TERMINAL_EXECUTION_STATUSES
+    ][:limit]
 
 
 # ---- plaita#166：执行表示的读面脱敏 ----
@@ -2100,9 +2173,26 @@ async def start_execution(
     # 占位行/入队**之前**——不支持的节点集在此结构化拒绝（422），绝不产生
     # 「queued 行 + 永不执行」。version=None 时按 worker 的 latest 语义
     # （引擎存储取最高 semver published）解析出版本行再判。
-    version_row = _resolve_start_version(
-        request.flow_id, request.version, tenant
-    )
+    # plaita#304：显式 version 不存在/未发布是可判定路径，结构化拒绝
+    # （404）——照单入队只会造出 worker 侧必败的幽灵 queued 行并占住
+    # 配额名额。存储不可用仍 fail-open（返回 None 走存量入队）。
+    try:
+        version_row = _resolve_start_version(
+            request.flow_id, request.version, tenant
+        )
+    except StartVersionNotStartable as e:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail(
+                "version_not_found",
+                f"流程 {e.flow_id}@{e.version} "
+                + ("未发布（draft 不能直接 start，请先 publish）" if e.exists else "不存在")
+                + "，拒绝入队（#304：入队必败会产生幽灵 queued 行）",
+                flow_id=e.flow_id,
+                version=e.version,
+                exists=e.exists,
+            ),
+        ) from e
     if version_row is not None and redis is not None:
         try:
             gate_flow_nodes(
@@ -2416,12 +2506,26 @@ async def start_execution(
     _audit(http_request, "execution.start", execution_id,
            {"flow_id": request.flow_id, "version": request.version,
             "mode": "queue"}, tenant_id=tenant)
-    return {
+    # plaita#304：响应面可观测——latest 实际解析到哪个版本（删新版后改靶
+    # 旧版时调用方可在响应里直接看到）+ 无 published 时的入队警告
+    # （不阻断：worker 侧将以 flow_definition_missing 具名终态收场）。
+    start_warnings: List[str] = []
+    if request.version is None and version_row is None:
+        start_warnings.append(
+            f"流程 {request.flow_id} 无已发布版本，latest 语义无法解析；"
+            "本次入队将由 worker 以 flow_definition_missing 具名终态收场"
+        )
+    response: Dict[str, Any] = {
         "status": "queued",
         "flow_id": request.flow_id,
         "execution_id": execution_id,
-        "message": "流程启动请求已加入队列"
+        "message": "流程启动请求已加入队列",
     }
+    if version_row is not None:
+        response["version"] = version_row.version
+    if start_warnings:
+        response["warnings"] = start_warnings
+    return response
 
 
 @router.post("/executions/{execution_id}/cancel")

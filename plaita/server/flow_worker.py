@@ -1311,6 +1311,20 @@ class FlowHashMismatchError(ValueError):
     """
 
 
+class FlowDefinitionMissingError(ValueError):
+    """流程定义在引擎存储中缺失（版本被删/未同步/不存在），执行无法推进（#304）。
+
+    刻意继承 ``ValueError``：既有语义下 run() 把它当畸形消息 poison ack。
+    与裸 ValueError 的分界在**捕获方义务**——start/resume 入口捕获到本异常
+    后必须先把执行终态化 error（``error.error_type="flow_definition_missing"``
+    机器可判身份，经 ``_terminalize_definition_missing``）再原样上抛；否则
+    执行行永驻 queued/suspended、start 准入名额不释放——#304 病灶正是
+    「裸 ValueError 直接 poison ack，状态行无人写」。终态化用 error 而非
+    cancelled 与 flow_hash mismatch 同口径：版本恢复/重发后仍可
+    ``resume_type=retry`` 从断点唤醒（G1「error 态可反复唤醒」语义保留）。
+    """
+
+
 class NodeFailureTerminalizedError(ValueError):
     """节点失败已**终态化 error**（非瞬态/预算耗尽）——消息必须 poison ack。
 
@@ -2355,6 +2369,68 @@ class FlowWorker:
             execution_id,
         )
 
+    def _terminalize_definition_missing(
+        self,
+        execution_id: str,
+        flow_id: str,
+        version: Optional[str],
+        state: Optional[ExecutionState],
+        phase: str,
+    ) -> None:
+        """定义缺失的执行终态化 error（#304）：可观测终态 + 配额名额释放。
+
+        调用方（start/resume 入口）捕获 ``FlowDefinitionMissingError`` 后、
+        原样上抛前调用。幂等：``state`` 缺省时现读盘；行不存在或已终态
+        （活 worker 的推进写 / 前次终态化已落）一律不覆写。写盘走
+        ``_persist_state_or_raise``——终态经 ``_release_quota_slot_if_terminal``
+        单一收口释放 start 准入名额，queued 幽灵行与名额泄漏一并收口。
+
+        终态化用 error 与 flow_hash mismatch 同口径：版本恢复/重发后仍可
+        ``resume_type=retry`` 从断点唤醒，不做不可逆处置。
+        """
+        if state is None:
+            try:
+                state = self.execution_storage.load_execution_state(execution_id)
+            except Exception as exc:  # noqa: BLE001 — 读盘瞬断交还重投路径
+                logger.warning(
+                    "定义缺失终态化前读盘失败（交还重投，不终态化）: "
+                    "execution=%s: %s", execution_id, _scrub_exception_text(exc),
+                )
+                return
+            if state is None:
+                # 无状态行（未走 console 占位、就地铸造 id 的 start）：没有
+                # 可观测对象，poison ack 即终局，无幽灵行可言。
+                logger.warning(
+                    "定义缺失且无状态行，跳过终态化: execution=%s flow=%s@%s",
+                    execution_id, flow_id, version or "latest",
+                )
+                return
+        if getattr(state, "status", None) in TERMINAL_EXECUTION_STATUSES:
+            return
+        message = (
+            f"流程定义缺失，执行无法推进（flow_id={flow_id}, "
+            f"version={version or 'latest'}）。版本可能已被删除或未同步到引擎存储。"
+        )
+        logger.error(
+            "执行 %s 的 flow 定义缺失，终态化 error: %s", execution_id, message
+        )
+        state.status = "error"
+        state.error = {
+            "message": message,
+            # 机器可判身份（同 flow_hash mismatch 的落盘纪律）：code 用引擎
+            # 通用 flow 级错误码，error_type 是本判据的 worker 级身份。
+            "code": _FLOW_ERROR_CODE,
+            "error_type": "flow_definition_missing",
+            "flow_id": flow_id,
+            "flow_version": version,
+            "hint": (
+                "确认版本存在且已发布（或重新 publish/重发定义）后，可 "
+                "resume_type=retry 从断点唤醒本执行"
+            ),
+        }
+        state.end_time = datetime.now().isoformat()
+        self._persist_state_or_raise(execution_id, state, phase)
+
     def _handlers_for(self, execution_id: str, enqueued_at: Optional[str] = None) -> list:
         """本次执行要挂的回调列表：用户/观测回调 + 节点耗时采集器 + 事件时间线
         （+ 沙箱生命周期回收，条件装配）。
@@ -2621,7 +2697,10 @@ class FlowWorker:
 
             error_msg = f"找不到流程定义: {flow_id}"
             logger.error(error_msg)
-            raise ValueError(error_msg)
+            # #304：具名子类（仍继承 ValueError）——start/resume 入口据此
+            # 把受影响执行终态化 error，而不是裸 poison ack 留下永驻
+            # queued/suspended 行。
+            raise FlowDefinitionMissingError(error_msg)
 
         # 解析流程定义
         try:
@@ -3184,10 +3263,21 @@ class FlowWorker:
             Dict[str, Any]: 流程执行结果
         """
         # 获取流程定义
-        flow = self.get_flow_definition(flow_id, version)
-        
-        
-        
+        try:
+            flow = self.get_flow_definition(flow_id, version)
+        except FlowDefinitionMissingError:
+            # #304：定义缺失（版本被删/未发布/未同步）不再裸 ValueError
+            # poison ack——console 预铸 id 的 queued 占位行在此终态化 error
+            # （可观测 + start 准入名额经单一收口释放），否则占位行永驻
+            # queued、名额等 TTL 兜底。未预铸 id 的调用没有状态行可写，
+            # 终态化助手内部跳过，poison ack 即终局。
+            if isinstance(execution_id, str) and execution_id.strip():
+                self._terminalize_definition_missing(
+                    execution_id, flow_id, version, None,
+                    phase="flow_definition_missing_start",
+                )
+            raise
+
         logger.info("开始执行流程: %s, 版本: %s", flow_id, version or '最新版本')
         
         try:
@@ -3787,7 +3877,20 @@ class FlowWorker:
         version = state.flow_version
 
         # 获取流程定义
-        flow = self.get_flow_definition(flow_id, version)
+        try:
+            flow = self.get_flow_definition(flow_id, version)
+        except FlowDefinitionMissingError:
+            # #304：定义缺失（版本被删/未同步）不再裸 ValueError poison ack
+            # ——先终态化 error（可观测 + 配额名额释放）再上抛。位置在租约
+            # 前（#33「suspended + continue 不取租约」契约保持）：定义缺失时
+            # 任何 worker 都无法推进本执行，此写要么生效、要么被仍持有缓存
+            # 定义的活 worker 推进覆写（后者证明执行未孤儿化，无害）。
+            # 未持租约 ⇒ fenced 存储按普通写落盘。
+            self._terminalize_definition_missing(
+                execution_id, flow_id, version, state,
+                phase="flow_definition_missing_resume",
+            )
+            raise
 
         # flow 定义指纹（波次二任务②）：worker 的定义 TTLCache 有 300s 窗口、
         # console engine_sync 可直接覆盖 Redis 定义——挂起执行 resume 用
@@ -3854,7 +3957,17 @@ class FlowWorker:
                     execution_id, version, state.flow_version,
                 )
                 version = state.flow_version
-                flow = self.get_flow_definition(flow_id, version)
+                try:
+                    flow = self.get_flow_definition(flow_id, version)
+                except FlowDefinitionMissingError:
+                    # #304：租约内复核换到的新版本定义缺失——同款终态化
+                    # （此时持租约，fenced 写生效），具名上抛走下方专属
+                    # except（不进通用 except 二次终态化）。
+                    self._terminalize_definition_missing(
+                        execution_id, flow_id, version, state,
+                        phase="flow_definition_missing_resume_recheck",
+                    )
+                    raise
                 current_flow_hash = self.get_flow_definition_hash(flow_id, version)
 
             state_status = getattr(state, "status", "") or ""
@@ -4108,6 +4221,11 @@ class FlowWorker:
             # error（可观测终态），原样上抛给 run() 按 ValueError poison
             # ack——重投只会命中 already_terminal 短路，终态化已完成，无意义。
             # 不落进下面的通用 except 二次终态化/包 RuntimeError。
+            raise
+        except FlowDefinitionMissingError:
+            # #304：租约内复核路径的定义缺失——raise 前已终态化 error
+            # （同 FlowHashMismatchError 的纪律），原样上抛 poison ack，
+            # 不进通用 except 二次终态化。
             raise
         except ResumeProtocolError:
             # plaita#240：预检在**状态变更前**抛出的协议错误，必须原样上抛给

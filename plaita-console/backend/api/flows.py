@@ -4,11 +4,11 @@
 - GET    /api/flows                            流程列表
 - POST   /api/flows                            新建流程（仅元信息）
 - GET    /api/flows/{flow_id}                  流程详情 + 版本列表
-- DELETE /api/flows/{flow_id}                  删除流程及其全部版本（#301：同步清目标 Redis 三件）
+- DELETE /api/flows/{flow_id}                  删除流程及其全部版本（#301：同步清目标 Redis 三件；#304：published/在途引用删除守卫）
 - GET    /api/flows/{flow_id}/versions/{ver}   取某版本定义（含 layout）
 - GET    /api/flows/{flow_id}/versions/{ver}/source   codeflow 源码视图（权威 / emit_source 反编译兜底）
 - PUT    /api/flows/{flow_id}/versions/{ver}   保存草稿（Flow.model_validate 强校验）
-- DELETE /api/flows/{flow_id}/versions/{ver}   删除版本（#301：同步清目标 Redis 三件）
+- DELETE /api/flows/{flow_id}/versions/{ver}   删除版本（#301：同步清目标 Redis 三件；#304：published/在途引用删除守卫）
 - POST   /api/flows/{flow_id}/publish          发布版本（draft → published）
 - POST   /api/flows/publish-outbox/{id}/resolve  DLQ 人工出口·resolve（c117-06，置终态留痕）
 - POST   /api/flows/publish-outbox/{id}/discard   DLQ 人工出口·discard（c117-06，放弃并删行）
@@ -18,7 +18,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from redis import Redis
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,17 @@ except ImportError:
         sync_flow_to_engine,
     )
     from auth import ensure_platform_admin, require_auth, tenant_scope
+
+try:  # plaita#304：版本删除守卫的在途引用扫描（执行域助手单点在 executions）
+    from .executions import (
+        VersionInUseScanError,
+        find_flow_version_active_executions,
+    )
+except ImportError:  # pragma: no cover - 平铺布局（cwd=backend）运行时
+    from executions import (  # type: ignore
+        VersionInUseScanError,
+        find_flow_version_active_executions,
+    )
 
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
     from ..error_contract import error_detail, scrubbed_detail
@@ -382,11 +393,99 @@ def get_flow(flow_id: str, request: Request = None):
     )
 
 
+# ---- plaita#304：版本删除前置守卫 ----
+#
+# 口径（二选一已拍板并在此落档）：**状态守卫可 force，引用守卫不可越**。
+#   * 状态守卫：published 版本默认 409 ``version_published``——与既有
+#     「published 不可覆盖」（flow_store.save_definition ValueError→409）
+#     同口径；``force=true`` 显式逃生（同 A43-01 执行删除的 force 形态）。
+#   * 引用守卫：存在**非终态执行**（queued/running/suspended）引用该
+#     flow(+version) → 409 ``version_in_use``，附 execution 清单；force
+#     **不可越**。级联取消刻意不采用：取消是异步意图信号，删行+清定义键
+#     之后取消路径自身还需要定义键/状态行收口，竞窗内会造出新的孤儿；
+#     「先取消 → 待终态 → 再删」是唯一无窗口序，守卫拒绝即引导该序。
+#     定义键清理（remove_*_from_engine）只在守卫通过后发生——「确认无
+#     引用后才清真源」，resume/start 的具名终态（worker 侧）仅作竞窗与
+#     本地档的兜底，不作为常规路径。
+def _enforce_version_delete_guard(
+    redis: Optional[Redis],
+    tenant: Optional[str], flow_id: str,
+    versions: List[Any], *, force: bool,
+) -> None:
+    """delete_flow / delete_version 共用的删除前置守卫（#304）。
+
+    ``versions`` 为本次删除涉及的版本行（delete_version 单行；delete_flow
+    全量行）。不通过即抛 HTTPException，删除动作（含目标侧清理与定义键
+    清理）完全不发生。
+    """
+    published = [v for v in versions if getattr(v, "status", "") == "published"]
+    if published and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "version_published",
+                "版本 "
+                + "、".join(f"{flow_id}@{v.version}" for v in published)
+                + " 已发布，不可删除（删除会打断在途执行的恢复链）；"
+                "如确需删除请显式传 force=true",
+                versions=[v.version for v in published],
+            ),
+        )
+    # 引用判据：delete_version 只扫该版本；delete_flow 聚合该 flow 全部版本
+    #（version=None 一遍扫完）。
+    scan_version = versions[0].version if len(versions) == 1 else None
+    try:
+        active = find_flow_version_active_executions(
+            redis, tenant, flow_id, scan_version
+        )
+    except VersionInUseScanError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail(
+                "version_in_use_scan_failed",
+                "在途执行引用核实失败，拒绝删除（fail-closed）：稍后重试；"
+                f"{e}",
+            ),
+        ) from e
+    if active:
+        listing = [
+            {"execution_id": s.execution_id, "status": s.status,
+             "flow_version": getattr(s, "flow_version", None)}
+            for s in active[:20]
+        ]
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "version_in_use",
+                f"存在 {len(active)} 条非终态执行引用 "
+                f"{flow_id}"
+                + (f"@{scan_version}" if scan_version else "（全部版本）")
+                + "，先取消（POST /api/executions/{id}/cancel）待终态后再删除",
+                executions=listing,
+                total=len(active),
+            ),
+        )
+
+
 @router.delete("/flows/{flow_id}")
 def delete_flow(flow_id: str, request: Request = None,
                 redis: Redis = Depends(get_redis_dep),
+                force: bool = Query(
+                    False,
+                    description="#304：对含 published 版本的 flow 显式强制删除"
+                                "（非终态执行引用仍拒绝，force 不可越）",
+                ),
                 body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
+    # #304：删除前置守卫——任何 published 版本（no force）/任何非终态执行
+    # 引用（force 也不可越）→ 具名 409。守卫通过（或 flow 不存在交由下方
+    # 404）才允许触碰目标侧与定义键。flow 不存在时 list_versions 为空、
+    # 守卫自然放行，404 语义由既有 LookupError 路径保留。
+    _enforce_version_delete_guard(
+        redis, tenant, flow_id,
+        _store().list_versions(flow_id, tenant_id=tenant),
+        force=force,
+    )
     # #301：跨 Redis 部署先清目标侧（与 outbox 投递同源配置）。先清后删：
     # 若下方删除事务失败回滚，已 delivered 的 outbox 行仍在，对账会把 key
     # 重投自愈；反之（先删后清）清理失败会留下无行覆盖的幽灵 key。
@@ -404,7 +503,8 @@ def delete_flow(flow_id: str, request: Request = None,
     if redis is not None:
         remove_flow_from_engine(redis, flow_id, tenant_id=tenant)
     if request is not None:
-        _audit(request, "flow.delete", flow_id, tenant_id=tenant)
+        _audit(request, "flow.delete", flow_id,
+               {"force": force}, tenant_id=tenant)
     return {"success": True, "flow_id": flow_id}
 
 
@@ -528,14 +628,27 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
 @router.delete("/flows/{flow_id}/versions/{version}")
 def delete_version(flow_id: str, version: str, request: Request = None,
                    redis: Redis = Depends(get_redis_dep),
+                   force: bool = Query(
+                       False,
+                       description="#304：对 published 版本显式强制删除"
+                                   "（非终态执行引用仍拒绝，force 不可越）",
+                   ),
                    body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
+    # #304：删除前置守卫——published 默认 409（force 可越）、非终态执行
+    # 引用 409（force 不可越）。前置到目标侧清理与删行之前：守卫拒绝时
+    # outbox/引擎键一律不碰。版本不存在（prior=None）整体跳过守卫、交由
+    # 下方既有 404 路径——不存在的版本没有可守卫的状态/真源。
+    prior = _store().get_version(flow_id, version, tenant_id=tenant)
+    if prior is not None:
+        _enforce_version_delete_guard(
+            redis, tenant, flow_id, [prior], force=force,
+        )
     # #301：同 delete_flow——先清目标侧再删行（失败回滚可对账自愈）。
     # #303：同 delete_flow——全程经删除守卫（互斥锁 + deleting tombstone）。
     with _outbox_delete_guard(flow_id, tenant_id=tenant, version=version):
         _outbox_purge_target(flow_id, tenant_id=tenant, version=version,
                              request=request)
-        prior = _store().get_version(flow_id, version, tenant_id=tenant)
         try:
             _store().delete_version(flow_id, version, tenant_id=tenant)
         except LookupError as e:
@@ -547,6 +660,7 @@ def delete_version(flow_id: str, version: str, request: Request = None,
     if request is not None:
         _audit(request, "flow.delete_version", f"{flow_id}@{version}",
                {"version": version,
+                "force": force,
                 "prior_status": prior.status if prior is not None else None},
                tenant_id=tenant)
     return {"success": True, "flow_id": flow_id, "version": version}

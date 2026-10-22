@@ -478,7 +478,8 @@ def test_delete_api_purges_target_keys(tmp_path, env_enabled,
     sessions = sys.modules["services.flow_store"].session_factory()
     assert engine_outbox.run_delivery_cycle(target_redis, sessions)["delivered"] == 1
     assert _target_state(target_redis, "ghost", "1.0.0")["key"] is True
-    assert client.delete("/api/flows/ghost").status_code == 200
+    # #304：published 版本删除需显式 force（本测无在途执行，引用判据放行）
+    assert client.delete("/api/flows/ghost?force=true").status_code == 200
     assert _target_state(target_redis, "ghost", "1.0.0") == TARGET_CLEAN
 
 

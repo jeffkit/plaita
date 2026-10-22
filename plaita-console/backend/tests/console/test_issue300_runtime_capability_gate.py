@@ -302,12 +302,23 @@ class TestStartGate:
         assert resp.status_code == 422, resp.text
         assert redis.xlen(GO_QUEUE) == 0
 
-    def test_start_unknown_flow_keeps_legacy_behavior(self, redis):
-        # 版本不在 console 库（直接写引擎存储的集成形态）：无定义可判 → 不拦
-        # （保持既有「入队后 worker 侧报 not found」语义，本单不扩 scope）。
+    def test_start_unknown_flow_explicit_version_404(self, redis):
+        # #304 起语义升级（原「本单不扩 scope」的口子由 #304 收）：显式版本
+        # 不在 console 库 → 可判定路径具名拒绝 404 version_not_found——
+        # 拒绝发生在能力门之前，门本身不参与（不会 422/500）。
         client = _client(redis)
         resp = _start(client, "ghost", "9.9.9")
+        assert resp.status_code == 404, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "version_not_found"
+
+    def test_start_unknown_flow_latest_keeps_fail_open(self, redis):
+        # fail-open 本体保留（#304）：latest（version=None）解析不到行 →
+        # 存量「入队后 worker 侧收场」语义不变，响应带 warnings 提示。
+        client = _client(redis)
+        resp = _start(client, "ghost")
         assert resp.status_code == 200, resp.text
+        assert resp.json().get("warnings")
 
 
 class TestManifestMissingFallback:
@@ -424,6 +435,8 @@ class TestCrossTenantIsolation:
         assert detail["error"] == "unsupported_node_types"
         assert detail["runtime"] == "go"
         assert store.get_version("mappy", "1.0.0", tenant_id="tenant-b").status == "draft"
+
+
 # ---------------------------------------------------------------------------
 # #82 复跑（B3 r80）：上面所有 go 池用例的 capability_manifest 都是测试合成的
 #（_register_worker 里 build_capability_manifest 注入）——没有任何用例覆盖
