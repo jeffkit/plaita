@@ -858,3 +858,13 @@
 > **终态**：推送 `c83229d` 后 main CI + CI slow lane + Console E2E 三线
 > **success**；`landing_gate.py ci` **rc=0**（✅ main CI 绿 ✅ Console E2E
 > 绿 ✅ 允许落地）——三连红熔断解除，B2/B4 在途交付恢复落地。
+
+## 第七十五轮 · #303（outbox 删除协议对偶破口——deleting tombstone + 互斥串行化，2026-10-22，B1 修复席）
+
+- 基线：`origin/main` `1dd62a3`（开工 pull 自任务书基线 `bfd0b62`，B2 r74 两单在途已合入）。
+- 机制（A1 r119 实证）：#301「先清目标后删行」防住了「清理失败留幽灵」，防不住对偶方向——DELETE 与投递/对账线程无同步点：delivered 行被对账打回 pending → DELETE 清 key → 投递 poll 重投复活 key → 删行 purge → **key 在/行无/对账永不覆盖/零日志**；对称窗=投递线程已在 `_iter_due_rows` 读出行、DELETE 全程完成后写出 key（同构后果）。
+- 修法（**口径一：删除完成后目标侧不复活**，二选一拍板已写文档）：行级 tombstone + 进程内互斥双保险——`engine_outbox` 新增 `STATUS_DELETING` + `OUTBOX_DELETE_LOCK`（RLock；「单副本约定」b117-03 延伸）；`deleting_guard()`＝锁内标记 deleting（独立事务提交）→ 清目标三件 → 删除事务（purge 行）→ 异常按 (id, 原状态) 快照恢复原状再上抛（404 语义不变）；api/flows.py 两个 DELETE 端点全程入守卫；投递/对账逐行动作前持锁 `_reload_row` 重读行现态（deleting/已删行跳过，对账改 id 扫描+逐行提交，stats 增 `skipped`）；resolve/discard 拒 deleting 行（409 语义）；`stats_snapshot` 增 `deleting` 计数；main.py lifespan 启动恢复 `recover_deleting_rows`（崩溃死在「已标记、未删行」→ 打回 pending 交还常规自愈）。**#301 自愈方向保留**：回滚 → delivered 恢复 → 对账重投收敛（有专测钉住）。
+- 负控先红后绿：新回归 `tests/console/test_issue303_delete_vs_outbox_race.py` **10 用例**——pre **10F**（A1b API 层 seam 注入重放：`{'delivered'} == {'deleting'}` 精确红 + 删行前对账重投日志实拍「outbox 对账重投：race@1.0.0 目标 缺 key」；对称陈旧读窗；真实线程在途投递持锁时删除先行不等待）→ post **10P**；A1 探针 post（`/tmp/r119_outbox_probe_postfix.py`，唯一差异=保真补守卫步、A1b 重放交错不变）：`status_between=deleting / target_key_after_all=0 / row_left=0` 零复活。证据 `docs/proofs/data/r75-outbox-delete-race-negative-control-{pre,post}.txt`。
+- 守恒：既有 `test_engine_outbox` 33P（stats 契约增 `skipped` 键，更新一处全等断言）；console 全量 **1296P/13S**（前值 1285+本轮 10 新增+1 修改，零回归）；e2e+integration **287P/4S**（CI 同参 `--timeout=150`）；unit **8847P/13S/14 deselected/3501 subtests**（与前值全等）；ruff 改动文件零告警；mkdocs `--strict` rc=0。
+- 文档：engine_outbox 模块 docstring「删除协议串行化（#303，口径一）」节 + FlowPublishOutbox 状态机补 deleting + ops-runbook 删除投递语义节改写（#301/#303）+ `/health.engine_outbox.deleting` 字段说明。
+- 教训：负控测试自身的准备顺序 bug（投递轮在 resolve 之前跑导致 1.0.1 已 delivered）被 post 首跑抓住——fixture 顺序也是被测语义的一部分。

@@ -150,6 +150,8 @@ class FlowPublishOutbox(Base):
     状态机：pending（待投/退避中）→ delivered（已送达且读回校验通过）
     / failed（连续失败到上限，DLQ 档；由投递循环按慢速退避自动重排）；
     对账把「delivered 但目标缺 key/hash 不符」打回 pending 重投。
+    deleting（#303 删除协议 tombstone）：删除守卫在清目标 key 前标记，
+    投递/对账一律跳过；删除事务 purge 行，失败回滚恢复原状。
 
     注意**故意不建**指向 flow_versions 的外键：版本删除时由删除路径显式
     清理对应 outbox 行（purge），否则对账会把已删除的版本「复活」进目标

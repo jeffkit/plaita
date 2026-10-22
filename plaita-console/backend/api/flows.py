@@ -15,6 +15,7 @@
 """
 import json
 import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -389,13 +390,16 @@ def delete_flow(flow_id: str, request: Request = None,
     # #301：跨 Redis 部署先清目标侧（与 outbox 投递同源配置）。先清后删：
     # 若下方删除事务失败回滚，已 delivered 的 outbox 行仍在，对账会把 key
     # 重投自愈；反之（先删后清）清理失败会留下无行覆盖的幽灵 key。
-    _outbox_purge_target(flow_id, tenant_id=tenant, request=request)
-    try:
-        _store().delete_flow(flow_id, tenant_id=tenant)
-    except LookupError as e:
-        raise HTTPException(
-            status_code=404, detail=error_detail("flow_not_found", str(e))
-        )
+    # #303：全程经删除守卫（互斥锁 + deleting tombstone）——清 key 后
+    # 投递/对账不可能复活该 key；删除事务失败守卫恢复行原状（自愈保留）。
+    with _outbox_delete_guard(flow_id, tenant_id=tenant):
+        _outbox_purge_target(flow_id, tenant_id=tenant, request=request)
+        try:
+            _store().delete_flow(flow_id, tenant_id=tenant)
+        except LookupError as e:
+            raise HTTPException(
+                status_code=404, detail=error_detail("flow_not_found", str(e))
+            )
     # 引擎运行时存储同步清理（本地模式无 Redis，无需清理）
     if redis is not None:
         remove_flow_from_engine(redis, flow_id, tenant_id=tenant)
@@ -527,15 +531,17 @@ def delete_version(flow_id: str, version: str, request: Request = None,
                    body: Optional[EmptyRequestModel] = None):
     tenant = tenant_scope(request, required=True) if request is not None else ""
     # #301：同 delete_flow——先清目标侧再删行（失败回滚可对账自愈）。
-    _outbox_purge_target(flow_id, tenant_id=tenant, version=version,
-                         request=request)
-    prior = _store().get_version(flow_id, version, tenant_id=tenant)
-    try:
-        _store().delete_version(flow_id, version, tenant_id=tenant)
-    except LookupError as e:
-        raise HTTPException(
-            status_code=404, detail=error_detail("version_not_found", str(e))
-        )
+    # #303：同 delete_flow——全程经删除守卫（互斥锁 + deleting tombstone）。
+    with _outbox_delete_guard(flow_id, tenant_id=tenant, version=version):
+        _outbox_purge_target(flow_id, tenant_id=tenant, version=version,
+                             request=request)
+        prior = _store().get_version(flow_id, version, tenant_id=tenant)
+        try:
+            _store().delete_version(flow_id, version, tenant_id=tenant)
+        except LookupError as e:
+            raise HTTPException(
+                status_code=404, detail=error_detail("version_not_found", str(e))
+            )
     if redis is not None:
         remove_flow_version_from_engine(redis, flow_id, version, tenant_id=tenant)
     if request is not None:
@@ -649,6 +655,26 @@ def _outbox_sessions():
     except ImportError:
         from services.flow_store import session_factory  # type: ignore
     return session_factory()
+
+
+@contextmanager
+def _outbox_delete_guard(flow_id: str, *, tenant_id: str,
+                         version: Optional[str] = None):
+    """#303：删除流程/版本的 outbox 串行化守卫（``engine_outbox.deleting_guard``）。
+
+    进程内互斥锁内先标记行 ``deleting``（tombstone，投递/对账扫描与逐行
+    动作一律跳过）→ 调用方清目标三件 + 删除事务（purge 行）；删除事务
+    失败按快照恢复行原状（#301「先清后删」自愈方向保留）。删除窗口内
+    投递/对账不可能写出 key——口径一：删除完成后目标侧不复活。outbox
+    未启用（同 Redis 部署）时透传（零负担）。
+    """
+    try:
+        from ..services import engine_outbox as _engine_outbox
+    except ImportError:
+        from services import engine_outbox as _engine_outbox  # type: ignore
+    with _engine_outbox.deleting_guard(_outbox_sessions(), tenant_id=tenant_id,
+                                       flow_id=flow_id, version=version):
+        yield
 
 
 def _outbox_purge_target(flow_id: str, *, tenant_id: str,

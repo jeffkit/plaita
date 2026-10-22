@@ -39,12 +39,23 @@ Redis**；console 与 FlowWorker 不同机/不同 Redis 时，「发布成功、
   收尾——清目标三件 + 删行。**后对目标**：目标缺 key / hash 不符（被外部
   删改）打回 pending 重投。版本/流程删除走 ``purge_for`` 显式清理，
   对账不会复活已删版本。
-- **删除投递语义（#301）**：删除流程/版本时除清 DB 行外，同步清**目标
+- **删除投递语义（#301/#303）**：删除流程/版本时除清 DB 行外，同步清**目标
   Redis** 侧引擎存储三件（``{ns}:flow:{fid}:{ver}``、``flow_versions:{fid}``
   注册集、``flow_list`` 成员）——复用 ``RedisFlowStorage.delete_flow``、
   与投递同源配置（``TARGET_REDIS_URL``）。尽力而为：目标不可达 ERROR +
-  留待人工（此时行已 purge、对账不再覆盖，幽灵 key 需手工清理）；先清
-  目标后删行——删除事务失败回滚时，已 delivered 行会被对账重投自愈。
+  留待人工（此时行已 purge、对账不再覆盖，幽灵 key 需手工清理）。
+- **删除协议串行化（#303，口径一：删除完成后目标侧不复活）**：「先清
+  目标、后删行」（#301）防住了清理失败留幽灵，防不住对偶方向——清 key
+  之后、删行 commit 之前，投递/对账线程把 key 复活（打回 pending → 重投），
+  删行 purge 后对账永不覆盖、零日志。收口 = 行级 tombstone + 进程内互斥
+  双保险：删除经 ``deleting_guard`` 全程持 ``OUTBOX_DELETE_LOCK``——锁内
+  先标记行 ``deleting``（独立事务提交；投递/对账扫描与逐行动作对
+  deleting 行一律跳过）→ 清目标三件 → 删除事务（purge 行）；投递/对账
+  逐行动作前也在锁内**重读行现态**（``_reload_row``，防跨事务陈旧读）。
+  删除事务失败回滚 → 守卫按快照恢复行原状（#301「先清后删」的自愈方向
+  保留）；进程死在「已标记、未删行」之间 → 启动恢复
+  ``recover_deleting_rows`` 把 deleting 行打回 pending，交还常规
+  投递/对账自愈（源表仍在 → 重投收敛；源表已删 → source-missing 收尾）。
 - **DLQ 人工出口（c117-06）**：``resolve``（认定无需再投递，置
   ``resolved`` 终态、留痕）/ ``discard``（放弃投递并删行），见
   ``api/flows.py`` 的 ``POST /flows/publish-outbox/{id}/resolve|discard``。
@@ -65,8 +76,10 @@ import json
 import logging
 import math
 import os
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -74,6 +87,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import func, select, delete as sa_delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from plaita.core.url_redaction import _redact_env_value
 from plaita.tenant_context import (
@@ -125,6 +139,16 @@ STATUS_DELIVERED = "delivered"
 STATUS_FAILED = "failed"
 #: DLQ 人工出口终态（c117-06）：不投递、不对账、只留痕。
 STATUS_RESOLVED = "resolved"
+#: 删除协议 tombstone（#303）：删除事务 commit 前的行级「删除中」标记。
+#: 投递/对账扫描与逐行动作对 deleting 行一律跳过——清目标 key 之后、
+#: 删行 commit 之前，任何线程都不得再触碰该行（对偶破口封死）。
+STATUS_DELETING = "deleting"
+
+#: 删除协议与投递/对账的进程内互斥锁（#303）。「单副本约定」（b117-03）
+#: 的延伸：投递/对账线程本就按单 console 副本设计，删除与两线程同进程，
+#: 进程内锁即完整覆盖；删除守卫全程持锁，投递/对账逐行动作前也持锁重读
+#: 行现态——三者在行动粒度上串行，删除窗口内不可能有投递写出 key。
+OUTBOX_DELETE_LOCK = threading.RLock()
 
 last_error_truncate = 300
 
@@ -420,6 +444,154 @@ def purge_target_keys(
         reset_current_tenant(token)
 
 
+# ---- 删除协议串行化（#303：tombstone + 互斥锁） ----
+
+
+def _outbox_scope(tenant_id: str, flow_id: str, version: Optional[str]):
+    """按租户/流程（可选版本）过滤 outbox 行的公共 WHERE。"""
+    stmt = select(FlowPublishOutbox).where(
+        FlowPublishOutbox.tenant_id == (tenant_id or ""),
+        FlowPublishOutbox.flow_id == flow_id,
+    )
+    if version is not None:
+        stmt = stmt.where(FlowPublishOutbox.version == version)
+    return stmt
+
+
+def mark_deleting(
+    session_local: sessionmaker, *, tenant_id: str, flow_id: str,
+    version: Optional[str] = None,
+) -> List[Tuple[int, str]]:
+    """删除协议第 0 步：把相关 outbox 行标记为 ``deleting``（独立事务提交）。
+
+    tombstone 语义：标记一提交，投递/对账的扫描与逐行动作即全部跳过这些
+    行——清目标 key 之后不可能再被重投复活。返回 ``(id, 原状态)`` 快照，
+    供删除事务失败时 :func:`restore_deleting` 精确恢复。调用方必须持有
+    :data:`OUTBOX_DELETE_LOCK`（``deleting_guard`` 已代持）。
+    """
+    with session_local() as session:
+        rows = session.scalars(
+            _outbox_scope(tenant_id, flow_id, version).where(
+                FlowPublishOutbox.status != STATUS_DELETING)
+        ).all()
+        snapshot = [(r.id, r.status) for r in rows]
+        for r in rows:
+            r.status = STATUS_DELETING
+        session.commit()
+    if snapshot:
+        logger.info(
+            "outbox 删除协议：已标记 %d 行 deleting（tombstone）flow=%s@%s（租户 %s）",
+            len(snapshot), flow_id, version or "*", tenant_id or "default",
+        )
+    return snapshot
+
+
+def restore_deleting(
+    session_local: sessionmaker,
+    snapshot: List[Tuple[int, str]],
+    *,
+    tenant_id: str, flow_id: str, version: Optional[str] = None,
+) -> int:
+    """删除事务失败回滚：仍处 ``deleting`` 的行按快照恢复原状态。
+
+    只恢复快照内且仍为 deleting 的行（已 purge 的行自然无需要恢复）；
+    delivered 行恢复 delivered——「先清后删」失败回滚后由对账重投自愈
+    （#301 自愈方向保留）。返回恢复行数。调用方须持锁。
+    """
+    if not snapshot:
+        return 0
+    prior = dict(snapshot)
+    with session_local() as session:
+        rows = session.scalars(
+            _outbox_scope(tenant_id, flow_id, version).where(
+                FlowPublishOutbox.status == STATUS_DELETING)
+        ).all()
+        n = 0
+        for r in rows:
+            before = prior.get(r.id)
+            if before is not None and before != STATUS_DELETING:
+                r.status = before
+                n += 1
+        session.commit()
+    if n:
+        logger.info(
+            "outbox 删除协议回滚：%d 行 deleting 已恢复原状 flow=%s@%s（租户 %s）",
+            n, flow_id, version or "*", tenant_id or "default",
+        )
+    return n
+
+
+def recover_deleting_rows(session_local: sessionmaker) -> int:
+    """启动恢复：一律把 ``deleting`` 行打回 pending（进程崩溃自愈）。
+
+    进程内删除协议不跨进程存活——启动时仍处 deleting 的行 = 上次进程死在
+    「已标记、未删行」之间（删除未 commit，flow_versions/flow_records 源表
+    行仍在）。打回 pending 交还常规机器：投递重投收敛（key 被清过则补齐）；
+    若源表其实已另行删除，对账 source-missing 分支按删除语义收尾。返回恢复
+    行数（供启动日志）。resolved 行被打回属已知取舍：崩溃窗口内无法还原
+    「人工出口」语义，重投为幂等覆盖写，需要时人工再 resolve。
+    """
+    with session_local() as session:
+        rows = session.scalars(
+            select(FlowPublishOutbox).where(
+                FlowPublishOutbox.status == STATUS_DELETING)
+        ).all()
+        for r in rows:
+            r.status = STATUS_PENDING
+            r.next_attempt_at = None
+            r.last_error = (
+                "recovered: 启动时仍处 deleting（上次删除未完成），已打回重投 "
+                f"@ {datetime.utcnow().isoformat()}"
+            )[:last_error_truncate]
+        session.commit()
+        n = len(rows)
+    if n:
+        logger.warning(
+            "outbox 启动恢复：%d 行 deleting（上次删除未完成）已打回 pending",
+            n,
+        )
+    return n
+
+
+@contextmanager
+def deleting_guard(
+    session_local: sessionmaker, *, tenant_id: str, flow_id: str,
+    version: Optional[str] = None,
+):
+    """删除流程/版本的 outbox 串行化守卫（#303）——api 删除端点必须经此。
+
+    锁内三步：标记 deleting（tombstone）→ 调用方清目标三件 + 删除事务
+    （purge 行）→ 异常时按快照恢复行原状再上抛（LookupError→404 等语义
+    不变）。与投递/对账线程的逐行动作同锁串行，删除窗口内投递不可能写出
+    key——**口径一：删除完成后目标侧不复活**。outbox 未启用（同 Redis
+    部署）时透传：无线程、无行，无协议可做。
+    """
+    if not is_enabled():
+        yield
+        return
+    with OUTBOX_DELETE_LOCK:
+        snapshot = mark_deleting(session_local, tenant_id=tenant_id,
+                                 flow_id=flow_id, version=version)
+        try:
+            yield
+        except BaseException:
+            restore_deleting(session_local, snapshot, tenant_id=tenant_id,
+                             flow_id=flow_id, version=version)
+            raise
+
+
+def _reload_row(session: Session, row_id: int) -> Optional[FlowPublishOutbox]:
+    """锁内重读行现态（#303 陈旧读防线）：行已删 → None；否则刷新后返回。"""
+    row = session.get(FlowPublishOutbox, row_id)
+    if row is None:
+        return None
+    try:
+        session.refresh(row)
+    except ObjectDeletedError:
+        return None
+    return row
+
+
 # ---- 投递 ----
 
 
@@ -507,63 +679,78 @@ def run_delivery_cycle(
 ) -> Dict[str, Any]:
     """一轮投递：pending/failed(到期) 行逐条送达目标 Redis，逐行提交。
 
-    返回统计（``scanned/delivered/retried/to_dlq/errors``）。任何意外都被
-    计入 errors 而不抛出——投递线程按 poll 节奏自愈。
+    返回统计（``scanned/delivered/retried/to_dlq/errors/skipped``）。任何
+    意外都被计入 errors 而不抛出——投递线程按 poll 节奏自愈。逐行动作前
+    持 :data:`OUTBOX_DELETE_LOCK` 重读行现态（#303）：删除协议标记的
+    deleting 行、以及已删行（陈旧读命中）一律跳过——清目标 key 之后
+    不可能再被本循环写回。
     """
     now = now or datetime.utcnow()
     limit = limit or batch_size()
     attempts_cap = attempts_cap or max_attempts()
     stats: Dict[str, Any] = {
         "scanned": 0, "delivered": 0, "retried": 0, "to_dlq": 0, "errors": 0,
+        "skipped": 0,
     }
     try:
         with session_local() as session:
             rows = _iter_due_rows(session, limit, now)
             for row in rows:
                 stats["scanned"] += 1
-                reason = _deliver_one(target, row, now)
-                row.attempts = (row.attempts or 0) + 1
-                if reason is None:
-                    row.status = STATUS_DELIVERED
-                    row.delivered_at = now
-                    row.next_attempt_at = None
-                    row.last_error = ""
-                    stats["delivered"] += 1
-                    logger.info(
-                        "outbox 已投递 %s@%s（租户 %s，attempts=%s）",
-                        row.flow_id, row.version, row.tenant_id or "default",
-                        row.attempts,
-                    )
-                else:
-                    row.last_error = reason[:last_error_truncate]
-                    if row.attempts >= attempts_cap:
-                        row.status = STATUS_FAILED
-                        # DLQ 档仍按慢速重排自动补投（封顶 30min），不丢定义。
-                        row.next_attempt_at = now + timedelta(seconds=min(
-                            _failed_requeue_backoff(row.attempts),
-                            _FAILED_REQUEUE_MAX_SECONDS,
-                        ))
-                        stats["to_dlq"] += 1
-                        logger.error(
-                            "outbox 投递转 DLQ：%s@%s（租户 %s）attempts=%s reason=%s；"
-                            "将按慢速重排自动补投，/health.engine_outbox 可观测",
-                            row.flow_id, row.version, row.tenant_id or "default",
-                            row.attempts, reason,
+                with OUTBOX_DELETE_LOCK:
+                    current = _reload_row(session, row.id)
+                    if current is None or current.status not in (
+                            STATUS_PENDING, STATUS_FAILED):
+                        stats["skipped"] += 1
+                        continue
+                    reason = _deliver_one(target, current, now)
+                    current.attempts = (current.attempts or 0) + 1
+                    if reason is None:
+                        current.status = STATUS_DELIVERED
+                        current.delivered_at = now
+                        current.next_attempt_at = None
+                        current.last_error = ""
+                        stats["delivered"] += 1
+                        logger.info(
+                            "outbox 已投递 %s@%s（租户 %s，attempts=%s）",
+                            current.flow_id, current.version,
+                            current.tenant_id or "default",
+                            current.attempts,
                         )
                     else:
-                        row.next_attempt_at = now + timedelta(seconds=min(
-                            _RETRY_BACKOFF_BASE_SECONDS * (2 ** (row.attempts - 1)),
-                            _RETRY_BACKOFF_MAX_SECONDS,
-                        ))
-                        stats["retried"] += 1
-                        logger.warning(
-                            "outbox 投递失败（将退避重试）：%s@%s（租户 %s）"
-                            "attempts=%s/%s reason=%s",
-                            row.flow_id, row.version, row.tenant_id or "default",
-                            row.attempts, attempts_cap, reason,
-                        )
-                    stats["errors"] += 1
-                session.commit()
+                        current.last_error = reason[:last_error_truncate]
+                        if current.attempts >= attempts_cap:
+                            current.status = STATUS_FAILED
+                            # DLQ 档仍按慢速重排自动补投（封顶 30min），不丢定义。
+                            current.next_attempt_at = now + timedelta(seconds=min(
+                                _failed_requeue_backoff(current.attempts),
+                                _FAILED_REQUEUE_MAX_SECONDS,
+                            ))
+                            stats["to_dlq"] += 1
+                            logger.error(
+                                "outbox 投递转 DLQ：%s@%s（租户 %s）attempts=%s "
+                                "reason=%s；将按慢速重排自动补投，/health."
+                                "engine_outbox 可观测",
+                                current.flow_id, current.version,
+                                current.tenant_id or "default",
+                                current.attempts, reason,
+                            )
+                        else:
+                            current.next_attempt_at = now + timedelta(seconds=min(
+                                _RETRY_BACKOFF_BASE_SECONDS
+                                * (2 ** (current.attempts - 1)),
+                                _RETRY_BACKOFF_MAX_SECONDS,
+                            ))
+                            stats["retried"] += 1
+                            logger.warning(
+                                "outbox 投递失败（将退避重试）：%s@%s（租户 %s）"
+                                "attempts=%s/%s reason=%s",
+                                current.flow_id, current.version,
+                                current.tenant_id or "default",
+                                current.attempts, attempts_cap, reason,
+                            )
+                        stats["errors"] += 1
+                    session.commit()
     except Exception as e:  # noqa: BLE001 — 读库/会话级失败：下轮重试
         stats["errors"] += 1
         logger.warning("outbox 投递轮次失败（下轮重试）: %s", e, exc_info=True)
@@ -578,6 +765,90 @@ def _failed_requeue_backoff(attempts: int) -> float:
 
 
 # ---- 对账 ----
+
+
+def _iter_delivered_ids(session: Session, max_rows: int) -> Iterable[int]:
+    """delivered 行 id（id 序、有界）；整行只在锁内动作时重读（``_reload_row``）。"""
+    return session.scalars(
+        select(FlowPublishOutbox.id)
+        .where(FlowPublishOutbox.status == STATUS_DELIVERED)
+        .order_by(FlowPublishOutbox.id.asc())
+        .limit(max_rows)
+    ).all()
+
+
+def _reconcile_one(
+    target: Redis,
+    session: Session,
+    row: FlowPublishOutbox,
+    ns_cache: Dict[str, str],
+    now: datetime,
+    stats: Dict[str, Any],
+) -> bool:
+    """单 delivered 行对账（#302 扩口径）：先对源表、后对目标。
+
+    返回 ``False`` = 连接级中断（剩余行留待下轮）；其余一律 ``True``
+    （含各行分支的记账）。行内变更由调用方在同锁内提交。
+    """
+    tenant = row.tenant_id or ""
+
+    # ---- 1. 源表对账（#302）----
+    source = session.scalars(
+        select(FlowVersion).where(
+            FlowVersion.tenant_id == tenant,
+            FlowVersion.flow_id == row.flow_id,
+            FlowVersion.version == row.version,
+        )
+    ).first()
+    if source is None:
+        if _reconcile_source_missing(target, session, row, tenant, now):
+            stats["source_missing"] += 1
+        else:
+            stats["errors"] += 1
+        return True
+    try:
+        _, source_hash = engine_payload(
+            row.flow_id, row.version, source.definition
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source_hash = None
+    if source_hash != row.definition_hash:
+        _reconcile_definition_drift(session, row, source, source_hash, now)
+        stats["drifted"] += 1
+        return True
+
+    # ---- 2. 目标对账（#299 原口径）----
+    if tenant not in ns_cache:
+        ns_cache[tenant] = tenant_namespace(tenant)
+    key = f"{ns_cache[tenant]}:flow:{row.flow_id}:{row.version}"
+    try:
+        raw = target.get(key)
+    except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+        # 连接级失败：本轮对账到此为止，剩余行留给下轮（不计错）。
+        logger.warning(
+            "outbox 对账中断（目标 Redis 不可达）: %s", e,
+        )
+        return False
+    if raw is not None:
+        actual = _stored_key_hash(raw)
+        if actual == row.definition_hash:
+            return True
+    stats["requeued"] += 1
+    row.status = STATUS_PENDING
+    row.delivered_at = None
+    row.attempts = 0
+    row.next_attempt_at = None
+    missing = raw is None
+    row.last_error = (
+        f"reconcile: 目标 key {'缺失' if missing else 'hash 不符'} "
+        f"({key})，已打回 pending 重投 @ {now.isoformat()}"
+    )[:last_error_truncate]
+    logger.warning(
+        "outbox 对账重投：%s@%s（租户 %s）目标 %s",
+        row.flow_id, row.version, tenant or "default",
+        "缺 key" if missing else "hash 不符",
+    )
+    return True
 
 
 def run_reconcile_cycle(
@@ -600,84 +871,31 @@ def run_reconcile_cycle(
     2. **目标对账**（#299 原口径）：delivered 行在目标 Redis 缺 key /
        hash 不符 → 打回 pending 重投。
 
-    有界（``max_rows``，默认 batch_size）；行多时按 id 序分轮消化。
+    有界（``max_rows``，默认 batch_size）；行多时按 id 序分轮消化。逐行
+    动作前持 :data:`OUTBOX_DELETE_LOCK` 重读行现态（#303）：已进删除协议
+    （deleting）或已被删的行一律跳过——对账不得复活删除中的版本。逐行
+    提交（原为轮末一次提交）。
     """
     now = now or datetime.utcnow()
     max_rows = max_rows or batch_size()
     stats: Dict[str, Any] = {
         "checked": 0, "requeued": 0, "errors": 0,
-        "drifted": 0, "source_missing": 0,
+        "drifted": 0, "source_missing": 0, "skipped": 0,
     }
     try:
         with session_local() as session:
-            rows = session.scalars(
-                select(FlowPublishOutbox)
-                .where(FlowPublishOutbox.status == STATUS_DELIVERED)
-                .order_by(FlowPublishOutbox.id.asc())
-                .limit(max_rows)
-            ).all()
             ns_cache: Dict[str, str] = {}
-            for row in rows:
+            for rid in _iter_delivered_ids(session, max_rows):
                 stats["checked"] += 1
-                tenant = row.tenant_id or ""
-
-                # ---- 1. 源表对账（#302）----
-                source = session.scalars(
-                    select(FlowVersion).where(
-                        FlowVersion.tenant_id == tenant,
-                        FlowVersion.flow_id == row.flow_id,
-                        FlowVersion.version == row.version,
-                    )
-                ).first()
-                if source is None:
-                    if _reconcile_source_missing(target, session, row, tenant, now):
-                        stats["source_missing"] += 1
-                    else:
-                        stats["errors"] += 1
-                    continue
-                try:
-                    _, source_hash = engine_payload(
-                        row.flow_id, row.version, source.definition
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    source_hash = None
-                if source_hash != row.definition_hash:
-                    _reconcile_definition_drift(session, row, source, source_hash, now)
-                    stats["drifted"] += 1
-                    continue
-
-                # ---- 2. 目标对账（#299 原口径）----
-                if tenant not in ns_cache:
-                    ns_cache[tenant] = tenant_namespace(tenant)
-                key = f"{ns_cache[tenant]}:flow:{row.flow_id}:{row.version}"
-                try:
-                    raw = target.get(key)
-                except (RedisConnectionError, RedisTimeoutError, OSError) as e:
-                    # 连接级失败：本轮对账到此为止，剩余行留给下轮（不计错）。
-                    logger.warning(
-                        "outbox 对账中断（目标 Redis 不可达）: %s", e,
-                    )
-                    break
-                if raw is not None:
-                    actual = _stored_key_hash(raw)
-                    if actual == row.definition_hash:
+                with OUTBOX_DELETE_LOCK:
+                    row = _reload_row(session, rid)
+                    if row is None or row.status != STATUS_DELIVERED:
+                        stats["skipped"] += 1
                         continue
-                stats["requeued"] += 1
-                row.status = STATUS_PENDING
-                row.delivered_at = None
-                row.attempts = 0
-                row.next_attempt_at = None
-                missing = raw is None
-                row.last_error = (
-                    f"reconcile: 目标 key {'缺失' if missing else 'hash 不符'} "
-                    f"({key})，已打回 pending 重投 @ {now.isoformat()}"
-                )[:last_error_truncate]
-                logger.warning(
-                    "outbox 对账重投：%s@%s（租户 %s）目标 %s",
-                    row.flow_id, row.version, tenant or "default",
-                    "缺 key" if missing else "hash 不符",
-                )
-            session.commit()
+                    if not _reconcile_one(target, session, row, ns_cache,
+                                          now, stats):
+                        break
+                    session.commit()
     except Exception as e:  # noqa: BLE001 — 读库失败：下轮重试
         stats["errors"] += 1
         logger.warning("outbox 对账轮次失败（下轮重试）: %s", e, exc_info=True)
@@ -831,6 +1049,11 @@ def resolve_row(
         row = _get_scoped_row(session, row_id, tenant_id)
         if row is None:
             return None
+        if row.status == STATUS_DELETING:
+            raise ValueError(
+                "该行处于删除协议中（deleting），不可人工出口；"
+                "删除事务失败会自动恢复行原状，稍后重试"
+            )
         if row.status == STATUS_DELIVERED:
             raise ValueError(
                 "已 delivered 的行无需人工出口；如需下线请走删除流程/版本接口"
@@ -870,6 +1093,11 @@ def discard_row(
         row = _get_scoped_row(session, row_id, tenant_id)
         if row is None:
             return None
+        if row.status == STATUS_DELETING:
+            raise ValueError(
+                "该行处于删除协议中（deleting），不可 discard；"
+                "删除事务失败会自动恢复行原状，稍后重试"
+            )
         if row.status == STATUS_DELIVERED:
             raise ValueError(
                 "已 delivered 的行不可 discard（会失去对账覆盖）；"
@@ -897,13 +1125,14 @@ def stats_snapshot(session_local: sessionmaker) -> Dict[str, Any]:
     c117-06：``resolved`` = 人工 resolve 终态行数。
     """
     snapshot: Dict[str, Any] = {
-        "pending": 0, "failed": 0, "resolved": 0,
+        "pending": 0, "failed": 0, "resolved": 0, "deleting": 0,
         "drift_total": 0,
         "last_delivered_at": None, "last_error": None,
     }
     try:
         with session_local() as session:
-            for status in (STATUS_PENDING, STATUS_FAILED, STATUS_RESOLVED):
+            for status in (STATUS_PENDING, STATUS_FAILED, STATUS_RESOLVED,
+                           STATUS_DELETING):
                 snapshot[status] = session.scalar(
                     select(func.count())
                     .select_from(FlowPublishOutbox)

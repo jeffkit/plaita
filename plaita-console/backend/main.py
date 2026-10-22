@@ -362,6 +362,23 @@ async def lifespan(app: FastAPI):
                     logger.warning(
                         "outbox 目标 Redis 不可达（线程将按轮重连）: %s", exc,
                     )
+                # #303：启动恢复——进程内删除协议不跨进程存活，启动时仍处
+                # deleting 的行 = 上次进程死在「已标记、未删行」之间，一律
+                # 打回 pending 交还常规投递/对账自愈（源表仍在 → 重投收敛；
+                # 源表已删 → 对账 source-missing 收尾）。
+                try:
+                    recovered = engine_outbox.recover_deleting_rows(
+                        _outbox_sessions())
+                    if recovered:
+                        logger.warning(
+                            "outbox 启动恢复：%s 行 deleting（上次删除未完成）"
+                            "已打回 pending", recovered,
+                        )
+                except Exception as exc:  # noqa: BLE001 — 恢复失败不阻断启动
+                    logger.warning(
+                        "outbox 启动恢复失败（deleting 行将保持跳过，"
+                        "重发布会产生新 hash 行）: %s", exc,
+                    )
                 # 启动首遍：对账（delivered 缺 key/hash 不符 → 重投）+ 一轮投递。
                 # 有界由 batch 上限保证；目标不可达时 cycle 内部自愈为空转统计。
                 startup_summary: dict = {}

@@ -1,0 +1,29 @@
+# r75 #303 post 负控（修复树，基线 1dd62a3）
+
+## 新回归 test_issue303_delete_vs_outbox_race.py（pre 10F → post 10P）
+
+10 passed, 91 warnings in 1.47s
+
+## A1 探针 post（/tmp/r119_outbox_probe_postfix.py，唯一差异=保真补守卫步；A1b 重放交错不变）
+```json
+{
+  "status_between": "deleting",
+  "delivery": {
+    "scanned": 1,
+    "delivered": 1,
+    "retried": 0,
+    "to_dlq": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "row_left": 0,
+  "target_key_after_all": 0,
+  "reconcile_would_cover": 2
+}
+```
+
+A1b 判读：status_between=deleting（tombstone 全程压制）；target_key_after_all=0（零复活，口径一达成）；
+row_left=0；reconcile_would_cover 只含 A1a 轴 multi 两行（multi@1.0.0 在探针 A1a 段被版本级 purge 后由对账重投收敛——行与源表均在，属 #301 设计内自愈，非破口）。
+
+## 既有 outbox 套件守恒
+33 passed, 260 warnings in 3.16s

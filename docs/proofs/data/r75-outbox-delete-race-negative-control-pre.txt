@@ -1,0 +1,359 @@
+FFFFFFFFFF                                                               [100%]
+=================================== FAILURES ===================================
+____________ test_a1b_delete_vs_reconcile_delivery_no_resurrection _____________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_a1b_delete_vs_reconcile_d0')
+env_enabled = None
+console_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=2f938067e52b4ffd8ec26148bd6b99c9,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=63fbcd59d32c411aa6ba8aa021c9d2c0,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x104774770>
+
+    def test_a1b_delete_vs_reconcile_delivery_no_resurrection(
+            tmp_path, env_enabled, console_redis: FakeRedis,
+            target_redis: FakeRedis, monkeypatch):
+        """A1b 重放：DELETE 清 key 后、删行 commit 前投递/对账轮插入——不得复活。
+    
+        修复前：对账把 delivered 行打回 pending（key 已清）→ 投递轮重投写回
+        key → 删除事务 purge 行 → key 在/行无/零覆盖（幽灵）。修复后：行在
+        清 key 前已标记 deleting，两轮扫描全跳过；删除终态目标侧无 key。
+        """
+        client = _api_client(tmp_path, console_redis)
+        client.app.state.engine_outbox_target = target_redis
+        assert client.post("/api/flows", json={"flow_id": "race"}).status_code == 200
+        assert client.put("/api/flows/race/versions/1.0.0", json={
+            "definition": _demo_definition("race"), "layout": "{}",
+        }).status_code == 200
+        assert client.post("/api/flows/race/publish",
+                           json={"version": "1.0.0"}).status_code == 200
+        sessions = sys.modules["services.flow_store"].session_factory()
+        assert engine_outbox.run_delivery_cycle(target_redis, sessions)["delivered"] == 1
+        key = "plaita:flow:race:1.0.0"
+        assert target_redis.exists(key)
+    
+        # seam 注入：purge_target_keys 返回后（= DELETE 第一步清 key 完成）、
+        # 删行事务前，投递/对账线程各跑一轮（确定性重放 issue 的交错）。
+        orig_purge = engine_outbox.purge_target_keys
+        seen: dict = {}
+    
+        def spy(flow_id, **kw):
+            result = orig_purge(flow_id, **kw)
+            seen["statuses_mid_delete"] = [r.status for r in _rows(sessions)]
+            seen["reconcile"] = engine_outbox.run_reconcile_cycle(target_redis, sessions)
+            seen["delivery"] = engine_outbox.run_delivery_cycle(target_redis, sessions)
+            seen["key_after_cycles"] = target_redis.exists(key)
+            return result
+    
+        monkeypatch.setattr(engine_outbox, "purge_target_keys", spy)
+    
+        resp = client.delete("/api/flows/race")
+        assert resp.status_code == 200
+        # 删除窗口内行已置 deleting（tombstone）：对账/投递扫描零命中
+>       assert set(seen["statuses_mid_delete"]) == {"deleting"}
+E       AssertionError: assert {'delivered'} == {'deleting'}
+E         
+E         Extra items in the left set:
+E         'delivered'
+E         Extra items in the right set:
+E         'deleting'
+E         Use -v to get more diff
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:172: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=race@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.engine_outbox:engine_outbox.py:675 outbox 对账重投：race@1.0.0（租户 default）目标 缺 key
+____________ test_symmetric_stale_read_delivery_skips_after_delete _____________
+
+store = <services.flow_store.FlowStore object at 0x106aab980>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_symmetric_stale_read_deli0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=873247cdecd449868fba2804812395d8,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106ad29e0>
+
+    def test_symmetric_stale_read_delivery_skips_after_delete(
+            store, sessions, env_enabled, target_redis: FakeRedis, monkeypatch):
+        """对称窗：投递线程已读出行 → DELETE 全程完成 → 投递续写——不得落 key。"""
+        _publish_version(store)  # 行保持 pending（投递轮未跑）
+        now = datetime.utcnow()
+        stale = engine_outbox._iter_due_rows(sessions(), 200, now)
+        assert len(stale) == 1
+    
+        # DELETE 全程（守卫：标记 deleting → 清 key → 删行事务）
+>       with engine_outbox.deleting_guard(sessions, tenant_id="", flow_id="demo"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'deleting_guard'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:192: AttributeError
+_____________ test_delete_waits_for_inflight_delivery_then_purges ______________
+
+store = <services.flow_store.FlowStore object at 0x106fb9130>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_delete_waits_for_inflight0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=1313c6287d544e3f9cac63585145f75a,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106de6b10>
+
+    def test_delete_waits_for_inflight_delivery_then_purges(
+            store, sessions, env_enabled, target_redis: FakeRedis, monkeypatch):
+        """真实线程并发：在途投递持锁期间，删除守卫必须等待，随后清掉其在途 key。"""
+        _publish_version(store)
+        in_flight = threading.Event()
+        release = threading.Event()
+        orig_deliver = engine_outbox._deliver_one
+    
+        def slow_deliver(target, row, now):
+            in_flight.set()
+            assert release.wait(timeout=10), "delivery not released in time"
+            return orig_deliver(target, row, now)
+    
+        monkeypatch.setattr(engine_outbox, "_deliver_one", slow_deliver)
+    
+        delivery_done = threading.Event()
+    
+        def run_delivery():
+            engine_outbox.run_delivery_cycle(target_redis, sessions)
+            delivery_done.set()
+    
+        t = threading.Thread(target=run_delivery, daemon=True)
+        t.start()
+        assert in_flight.wait(timeout=5)
+    
+        delete_done = threading.Event()
+    
+        def do_delete():
+            with engine_outbox.deleting_guard(sessions, tenant_id="", flow_id="demo"):
+                engine_outbox.purge_target_keys("demo", client=target_redis)
+                assert store.delete_version("demo", "1.0.0") is True
+            delete_done.set()
+    
+        t2 = threading.Thread(target=do_delete, daemon=True)
+        t2.start()
+        time.sleep(0.2)
+        # 在途投递未放锁前，删除不得先行（互斥串行化的直接断言）
+        assert not delete_done.is_set()
+        release.set()
+        assert delivery_done.wait(timeout=10)
+>       assert delete_done.wait(timeout=10)
+E       assert False
+E        +  where False = wait(timeout=10)
+E        +    where wait = <threading.Event at 0x106f4b350: unset>.wait
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:248: AssertionError
+________________________ test_cycles_skip_deleting_rows ________________________
+
+store = <services.flow_store.FlowStore object at 0x1070197f0>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_cycles_skip_deleting_rows0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=09d63fbd666b4b26aa7165becd41cf6f,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_cycles_skip_deleting_rows(store, sessions, env_enabled,
+                                       target_redis: FakeRedis):
+        """deleting 行：不进投递扫描（pending/failed 才扫）、不进对账（只扫 delivered）。"""
+        _publish_version(store)
+        engine_outbox.run_delivery_cycle(target_redis, sessions)
+>       assert engine_outbox.mark_deleting(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            sessions, tenant_id="", flow_id="demo") == [(_rows(sessions)[0].id,
+                                                         "delivered")]
+E       AttributeError: module 'services.engine_outbox' has no attribute 'mark_deleting'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:264: AttributeError
+__________________ test_guard_rollback_restores_exact_status ___________________
+
+store = <services.flow_store.FlowStore object at 0x10704ce50>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_guard_rollback_restores_e0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=9abb3066c7d64389b36fab9ed354eff7,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_guard_rollback_restores_exact_status(store, sessions, env_enabled,
+                                                  target_redis: FakeRedis):
+        """删除事务失败：守卫按快照恢复行原状（delivered/pending/resolved 各归位）。"""
+        _publish_version(store)                      # 1.0.0
+        _publish_version(store, version="1.0.1")     # 1.0.1（保持 pending）
+        engine_outbox.run_delivery_cycle(target_redis, sessions)  # 1.0.0 delivered
+        pend = _rows(sessions, version="1.0.1")[0]
+>       engine_outbox.resolve_row(sessions, pend.id, tenant_id="", actor="t")
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:279: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+session_local = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_guard_rollback_restores_e0/outbox-race.db), autoflush=True, expire_on_commit=False)
+row_id = 2, tenant_id = '', actor = 't'
+
+    def resolve_row(
+        session_local: sessionmaker,
+        row_id: int,
+        *,
+        tenant_id: Optional[str] = None,
+        actor: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """DLQ 人工出口·resolve：认定该行无需再投递，置 ``resolved`` 终态。
+    
+        resolved 行不进投递扫描（``_iter_due_rows`` 只取 pending/failed）、
+        不进对账（只扫 delivered），保留行体与失败原因作留痕。delivered 行
+        无需人工出口（下线请走删除流程/版本接口，#301 会清目标三件）→
+        ``ValueError``。租户不匹配/行不存在 → ``None``。
+        """
+        with session_local() as session:
+            row = _get_scoped_row(session, row_id, tenant_id)
+            if row is None:
+                return None
+            if row.status == STATUS_DELIVERED:
+>               raise ValueError(
+                    "已 delivered 的行无需人工出口；如需下线请走删除流程/版本接口"
+                )
+E               ValueError: 已 delivered 的行无需人工出口；如需下线请走删除流程/版本接口
+
+plaita-console/backend/services/engine_outbox.py:835: ValueError
+___________________ test_rollback_self_heal_still_redelivers ___________________
+
+store = <services.flow_store.FlowStore object at 0x1070f9640>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_rollback_self_heal_still_0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=3bfa59acdae547dd82dade66e8c0e0dd,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_rollback_self_heal_still_redelivers(store, sessions, env_enabled,
+                                                 target_redis: FakeRedis):
+        """#301 自愈方向保留：回滚后 delivered 行还在，对账打回 → 重投收敛。"""
+        _publish_version(store)
+        engine_outbox.run_delivery_cycle(target_redis, sessions)
+        assert target_redis.exists("plaita:flow:demo:1.0.0")
+    
+        with pytest.raises(RuntimeError):
+>           with engine_outbox.deleting_guard(sessions, tenant_id="", flow_id="demo"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: module 'services.engine_outbox' has no attribute 'deleting_guard'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:299: AttributeError
+_____________ test_startup_recovery_requeues_crashed_deleting_rows _____________
+
+store = <services.flow_store.FlowStore object at 0x106f4bb90>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_startup_recovery_requeues0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=5ad96651896d4c14a2d547df173b6746,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_startup_recovery_requeues_crashed_deleting_rows(
+            store, sessions, env_enabled, target_redis: FakeRedis):
+        """进程死在「已标记、未删行」之间：启动恢复把 deleting 行打回 pending 自愈。"""
+        _publish_version(store)
+>       engine_outbox.mark_deleting(sessions, tenant_id="", flow_id="demo")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'mark_deleting'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:314: AttributeError
+____________________ test_manual_exit_rejects_deleting_row _____________________
+
+store = <services.flow_store.FlowStore object at 0x106db4350>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_manual_exit_rejects_delet0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+
+    def test_manual_exit_rejects_deleting_row(store, sessions, env_enabled):
+        """删除协议进行中的行不可人工出口（resolve/discard 均拒）。"""
+        _publish_version(store)
+        row = _rows(sessions)[0]
+>       engine_outbox.mark_deleting(sessions, tenant_id="", flow_id="demo")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'mark_deleting'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:329: AttributeError
+_____________________ test_stats_snapshot_counts_deleting ______________________
+
+store = <services.flow_store.FlowStore object at 0x107161bd0>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_stats_snapshot_counts_del0/outbox-race.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+
+    def test_stats_snapshot_counts_deleting(store, sessions, env_enabled):
+        """/health backlog 视图暴露 deleting 行数（删除窗口可观测）。"""
+        _publish_version(store)
+>       assert engine_outbox.stats_snapshot(sessions)["deleting"] == 0
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'deleting'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:339: KeyError
+_________________ test_guard_passthrough_when_outbox_disabled __________________
+
+store = <services.flow_store.FlowStore object at 0x106fb3ac0>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-776/test_guard_passthrough_when_ou0/outbox-race.db), autoflush=True, expire_on_commit=False)
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107367bd0>
+
+    def test_guard_passthrough_when_outbox_disabled(store, sessions, monkeypatch):
+        """同 Redis 部署（outbox 关闭）：守卫透传，不触碰任何状态。"""
+        monkeypatch.delenv(engine_outbox.TARGET_URL_ENV, raising=False)
+        assert not engine_outbox.is_enabled()
+>       with engine_outbox.deleting_guard(sessions, tenant_id="", flow_id="demo"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'deleting_guard'
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:348: AttributeError
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_a1b_delete_vs_reconcile_delivery_no_resurrection
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 42 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 10 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:676: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 10 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 10 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:814: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_a1b_delete_vs_reconcile_delivery_no_resurrection
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_a1b_delete_vs_reconcile_delivery_no_resurrection
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_a1b_delete_vs_reconcile_delivery_no_resurrection
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_delete_waits_for_inflight_delivery_then_purges
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_cycles_skip_deleting_rows
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_guard_rollback_restores_exact_status
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_rollback_self_heal_still_redelivers
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/engine_outbox.py:513: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_a1b_delete_vs_reconcile_delivery_no_resurrection
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/engine_outbox.py:605: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_symmetric_stale_read_delivery_skips_after_delete
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:187: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_delete_waits_for_inflight_delivery_then_purges
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-6 (do_delete)
+  
+  Traceback (most recent call last):
+    File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/threading.py", line 1041, in _bootstrap_inner
+      self.run()
+      ~~~~~~~~^^
+    File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/threading.py", line 992, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/kong/projects/infra4agent/plaita/plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py", line 236, in do_delete
+      with engine_outbox.deleting_guard(sessions, tenant_id="", flow_id="demo"):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  AttributeError: module 'services.engine_outbox' has no attribute 'deleting_guard'
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_a1b_delete_vs_reconcile_delivery_no_resurrection
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_symmetric_stale_read_delivery_skips_after_delete
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_delete_waits_for_inflight_delivery_then_purges
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_cycles_skip_deleting_rows
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_guard_rollback_restores_exact_status
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_rollback_self_heal_still_redelivers
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_startup_recovery_requeues_crashed_deleting_rows
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_manual_exit_rejects_deleting_row
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_stats_snapshot_counts_deleting
+FAILED plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_guard_passthrough_when_outbox_disabled
+10 failed, 83 warnings in 11.52s

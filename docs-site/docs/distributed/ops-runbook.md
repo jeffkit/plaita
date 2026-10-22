@@ -726,21 +726,29 @@ worker 不同机/不同 Redis 时，人工在目标机跑 `sync_published_to_eng
   2. **目标对账**：delivered 行在目标侧缺 key / hash 不符（被外部删改）→
      打回 pending 重投；删除流程/版本会同步清 outbox，对账不会复活已删
      版本；
-- **删除投递语义（#301）**：`DELETE /flows/{id}` 与
+- **删除投递语义（#301/#303）**：`DELETE /flows/{id}` 与
   `DELETE /flows/{id}/versions/{ver}` 除清 DB 行外，**同步清目标 Redis
   三件**——版本 key、`flow_versions:{fid}` 注册集、`flow_list` 成员（复用
   引擎存储 `delete_flow`，与投递同源配置）。尽力而为：目标不可达时 ERROR
   告警且**不阻断删除**——此时行已 purge、对账不再覆盖该 key，目标恢复后
-  需人工清理幽灵 key（或在目标可达后对同 key 重试删除）；先清目标后删行，
-  删除事务失败回滚时已 delivered 行会被对账重投自愈；
+  需人工清理幽灵 key（或在目标可达后对同 key 重试删除）。删除全程经
+  **串行化守卫**（#303，口径一：删除完成后目标侧不复活）：进程内互斥锁
+  与投递/对账线程共用，锁内先把相关 outbox 行标记 `deleting`
+  （tombstone，投递/对账扫描与逐行动作一律跳过且动作前锁内重读行现态）
+  → 清目标三件 → 删除事务（purge 行）——清 key 后不可能被重投复活；
+  删除事务失败回滚时行恢复原状、已 delivered 行仍会被对账重投自愈
+  （#301 方向保留）；进程死在「已标记、未删行」之间 → 启动恢复把
+  deleting 行打回 pending 自愈（`/health.engine_outbox.deleting` 可观测
+  删除窗口）；删除协议进行中的行不可 resolve/discard（409）；
 - **DLQ 人工出口（c117-06）**：`POST /api/flows/publish-outbox/{id}/resolve`
   （认定无需再投递 → `resolved` 终态，留痕）/ `.../discard`（放弃投递并
   删行，仅审计）。delivered 行两者都 409（resolve 无意义 / discard 会失去
   对账覆盖）；跨租户/不存在 → 404；
 - `GET /health` 的 `engine_outbox` 字段暴露 `status/pending/failed/resolved/
-  drift_total/last_delivered_at/last_error` 及当轮对账/投递计数
+  deleting/drift_total/last_delivered_at/last_error` 及当轮对账/投递计数
   （`drift_total` = 源表定义漂移被对账命中的累计次数，>0 即发生过 DB 级
-  定义修改并被自动重投收敛，#302）。
+  定义修改并被自动重投收敛，#302；`deleting` = 删除协议 tombstone 行数，
+  #303）。
 
 每轮投递批量上限 `PLAITA_CONSOLE_ENGINE_OUTBOX_BATCH`（默认 200）。**未配置
 目标 Redis（默认）时 outbox 整体关闭**：不建连、不起线程、publish 零额外
