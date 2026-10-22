@@ -14,6 +14,50 @@ cases:
         page: 1
         size: 20
 
+  # plaita#304 起 start 对「显式版本不存在/未发布」具名拒绝（404）——本套件
+  # 排在 flows-versions 之前，须自备已发布 flow（此前打不存在的 e2e-test-flow
+  # 靠 fail-open 入队，正是 #304 收掉的幽灵 queued 行）。
+  - name: "创建执行套件用流程"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-exec-flow"
+        author: "e2e"
+        desc: "executions suite 已发布流程"
+    expect:
+      status: 200
+      body:
+        flow_id: "e2e-exec-flow"
+
+  - name: "保存执行套件用版本"
+    request:
+      method: PUT
+      url: http://localhost:18080/api/flows/e2e-exec-flow/versions/1.0.0
+      headers:
+        Content-Type: application/json
+      body:
+        definition: '{"id":"e2e-exec-flow","name":"E2E Exec","nodes":[{"id":"start","type":"start","next":"end"},{"id":"end","type":"end","output":"$INPUT.input","result_type":"success"}]}'
+        created_by: "e2e"
+    expect:
+      status: 200
+      body:
+        flow_id: "e2e-exec-flow"
+        version: "1.0.0"
+
+  - name: "发布执行套件用版本"
+    request:
+      method: POST
+      url: http://localhost:18080/api/flows/e2e-exec-flow/publish
+      headers:
+        Content-Type: application/json
+      body:
+        version: "1.0.0"
+    expect:
+      status: 200
+
   - name: "启动流程执行"
     request:
       method: POST
@@ -21,16 +65,32 @@ cases:
       headers:
         Content-Type: application/json
       body:
-        flow_id: "e2e-test-flow"
-        version: "1.0"
+        flow_id: "e2e-exec-flow"
+        version: "1.0.0"
         params:
           input: "test-value"
     expect:
       status: 200
       body:
         status: "queued"
-        flow_id: "e2e-test-flow"
+        flow_id: "e2e-exec-flow"
+        version: "1.0.0"
         message: { exists: true }
+
+  - name: "start 显式不存在的版本具名拒绝（#304）"
+    request:
+      method: POST
+      url: http://localhost:18080/api/executions
+      headers:
+        Content-Type: application/json
+      body:
+        flow_id: "e2e-exec-flow"
+        version: "9.9.9"
+    expect:
+      status: 404
+      body:
+        detail:
+          code: "version_not_found"
 
   - name: "执行列表分页参数生效"
     request:
