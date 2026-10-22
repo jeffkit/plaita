@@ -256,6 +256,14 @@ export default function Executions() {
         </Table>
       </Card>
 
+      {/* A2R55-01：truncated=索引/扫描触界——total 是下界，不得当精确全集 */}
+      {data?.truncated && (
+        <p className="text-center text-caption text-status-warning">
+          结果不完整：索引/扫描触界，共 <span className="font-mono tabular-nums">{total}</span>+
+          条（下界），较早的执行可能未列出
+        </p>
+      )}
+
       {/* 分页 */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-2">

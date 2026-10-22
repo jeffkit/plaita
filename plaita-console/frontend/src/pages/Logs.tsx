@@ -237,6 +237,22 @@ export default function Logs() {
         </div>
       )}
 
+      {/* A2R55-01/A2R28-01：degraded=部分键/条目读取失败、truncated=读取预算
+          触界——空列表不等于「没有日志」，必须显式提示结果不完整（api.ts 契约注释）。
+          SSE 模式下列表走 sseLogs、轮询数据陈旧，不据此横幅。 */}
+      {!(useSSE && isStreaming) && (data?.degraded || data?.truncated) && (
+        <div className="flex items-start gap-2 px-3 py-2 rounded-md bg-status-warning-dim text-status-warning text-caption">
+          <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+          <span>
+            日志结果不完整：
+            {data?.degraded ? '部分数据源读取失败' : ''}
+            {data?.degraded && data?.truncated ? '；' : ''}
+            {data?.truncated ? '读取预算触界，仅返回部分匹配' : ''}
+            （本页 {data?.returned ?? data?.logs.length ?? 0} 条，total 为下界）；缩小筛选范围后重试可获取更完整结果
+          </span>
+        </div>
+      )}
+
       {/* 日志列表：下沉区（inset）+ 数据声道 */}
       <div
         ref={logsContainerRef}

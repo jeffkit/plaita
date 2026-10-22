@@ -346,6 +346,9 @@ export interface ExecutionListResponse {
   total: number
   page: number
   size: number
+  // A2R55-01：索引/扫描触界时列表只是部分结果——truncated=true 时 total
+  // 是下界（无过滤=索引基数），不得当精确全集呈现。
+  truncated?: boolean
 }
 
 export interface QueueInfo {
@@ -540,8 +543,15 @@ export const api = {
     return request('/queues')
   },
 
-  async getQueueDetail(queueName: string): Promise<QueueDetailResponse> {
-    return request(`/queues/${encodeURIComponent(queueName)}`)
+  async getQueueDetail(
+    queueName: string,
+    paging?: { start?: number; startId?: string }
+  ): Promise<QueueDetailResponse> {
+    const searchParams = new URLSearchParams()
+    if (paging?.start != null) searchParams.set('start', String(paging.start))
+    if (paging?.startId) searchParams.set('start_id', paging.startId)
+    const qs = searchParams.toString()
+    return request(`/queues/${encodeURIComponent(queueName)}${qs ? `?${qs}` : ''}`)
   },
 
   // 日志相关
@@ -1103,7 +1113,14 @@ export const api = {
 
   async updateSchedule(
     scheduleId: string,
-    payload: { name?: string; version?: string; cron?: string; params?: Record<string, unknown> }
+    payload: {
+      name?: string
+      version?: string
+      cron?: string
+      params?: Record<string, unknown>
+      /** plaita#198 乐观锁基准：编辑打开时行的 updated_at；不一致返回 409 schedule_stale */
+      expected_updated_at?: string
+    }
   ): Promise<ScheduleInfo> {
     return request(`/schedules/${scheduleId}`, {
       method: 'PUT',
