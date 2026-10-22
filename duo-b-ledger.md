@@ -661,3 +661,56 @@
   `landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit 关闭 #296；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十九轮 · #297/#298（runner 模块级信封 + 孤儿守卫窗口，2026-10-22，B1 修复席）
+
+> 编号碰撞注记：派单写「第六十八轮」，但 68 已由上一轮 #296 占用（同文件
+> 第六十八轮条目），沿用既有「占用即递增」先例记第六十九轮。
+
+- 基线：`origin/main` `eb08fd0`（#43/r75、B2 r70 已并入）；落地门
+  `landing_gate.py ci` rc=0（`eb08fd0` 主 CI + Console E2E 双绿）。
+- **#297（P2）**：`_RUNNER_TEMPLATE` 的 `try` 只包 `run()` 函数体，模块级
+  顶层确定性错误（`raise`/表达式 TypeError/未定义名）在信封外 → runner
+  非零退出无 stdout → 父进程按基础设施失败判可重试，retryTimes=3 实测
+  真实执行 4 次、顶层副作用重复 4 遍；unsafe 档 1 次具名终态；顶层
+  `print` 后 raise 更退化为「not valid JSON」、traceback 丢失。
+  修法：①runner 安装 `sys.excepthook` 把顶层未捕获异常写成与 run() 同形
+  的 `ok=false` 信封（`type` 字段供 `origin_type` 穿透；正常走完用户代码
+  立即还原默认 hook，runner 自身尾巴失败维持基础设施级缺省）；②
+  `_decode_runner_output` 整段 JSON 失败时回退 `_extract_trailing_envelope`
+  （只认 stdout **末尾**的合法信封；信封前 print 不再降级，无合法信封的
+  脏输出仍基础设施可重试、不文本嗅探）。两档终态一致：顶层 TypeError
+  4→1 次、具名 `SandboxEnvelopeError: TypeError: ...`。
+  边界不变：SyntaxError 保存期拦、重命名子类按名字面集、ImportError 可重、
+  顶层 `sys.exit()`/`os._exit()` 不经 excepthook（与修前同形）；JS 模板未改。
+- **#298（P2）**：`evaluate_proposal` 的 A2R46-01 孤儿守卫 `try` 从
+  `evaluate()` 才开始，`save_version` 与响应校验在守卫外；「服务端已落库 +
+  响应缺 `version`/读取响应断连」→ `ConsoleClientError` 穿出 → `run_loop`
+  兜底 outcome 无 `candidate_version` → 无主孤儿版本（W5a/W5b 实测
+  versions_in_lib 含 1.0.1、outcome candidate_version=null）。
+  修法：守卫起点前移到 `save_version` 调用本身；响应异常时
+  `_recover_persisted_version` 回查版本库，仅认领「save 前快照不存在 +
+  definition 逐字一致」的新版本（取最高 semver），降级 failed_iteration +
+  candidate_version + WARNING `version kept as lineage`；未落库/恢复失败/
+  仅有并发写入者不同定义版本时原异常穿出，不猜号、不虚构谱系。
+- 负控（先红后绿，证据 `docs/proofs/data/r69-297-298-negative-control.txt`）：
+  #297 顶层三类型+print 后 raise+顶层表达式/未定义名 pre 全 4 次执行/裸
+  RuntimeError/not valid JSON → post 全 1 次 + 具名；定向 8F/2P/1S →
+  10P/1S。#298 W5a/W5b pre outcome candidate_version=null（`KeyError:
+  'candidate_version'`）→ post 均为 `1.0.1` + WARNING；定向 2F/2P →
+  4P；「未落库不虚构」「并发不同定义不认领」两守恒 pre/post 均绿。
+- 新增测试：`tests/unit/test_issue297_runner_module_scope.py`（10P/1S，
+  docker 无镜像跳过；subprocess 实弹+unsafe 对照+解码边界）；
+  `plaita-ai/tests/test_supervisor.py` +4（两变体 + 两守恒）。
+- 验收：全量 unit `-m "not slow"` **8836P/13S/14 deselected/3501
+  subtests**；e2e+integration **287P/4S**；console **1215P/13S**；
+  plaita-ai（`uv run --isolated --extra all`）**329P/13S/12 subtests**；
+  定向 41P/1S + supervisor 25P；`ci-gate.sh layering|wheel|size` PASS；
+  ruff 新增代码零 BLE001/E722；`mkdocs --strict` rc=0；`landing_gate.py ci`
+  rc=0 后单 commit 推送。
+- 文档：ops-runbook 确定性错误节（信封覆盖模块级、print 污染、#297 前
+  行为）、error-handling 沙箱信封段、MIGRATION「信封覆盖范围」、
+  `evaluate_proposal` docstring；proof
+  `docs/proofs/issue297-298-module-scope-orphan-window.md`。
+- 单 commit 关闭 #297/#298；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。

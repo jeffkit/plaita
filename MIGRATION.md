@@ -12,7 +12,9 @@
 
 **口径（contract）**：node-F2 重试分类把 `ValueError`/`TypeError`/`NameError`/`SyntaxError`（及子类）与 `NodeException` 1001 同列**确定性错误**——同一份节点代码在同一份输入上重跑不可能变对，重试只会烧预算、放大副作用。任意节点的执行异常命中这些类型即**立即按 errorHandler `strategy` 处理，不消耗 retryTimes**（此前仅 `ValueError` 入列；`TypeError`/`NameError`/`SyntaxError` 维持历史「一律可重试」）。与 plaita-go 同集对齐（#43，2026-10-22 owner 裁决：Python 采纳完整确定性集，Go r69 终态不放松）。
 
-**沙箱信封穿透**：`code` 节点 subprocess/docker 后端此前把用户代码异常压成裸 `RuntimeError("类型: 消息")`，内层确定性类型只剩文本前缀、分类打不穿（实测 `is_retryable_error(RuntimeError("ValueError: boom")) == True`——沙箱内 `ValueError` 也被烧满 retryTimes）。现在信封解码抛 `SandboxEnvelopeError`（`RuntimeError` 子类，**错误文本逐字不变**），信封保留的类型名挂 `origin_type` 属性供分类按集对照——落集内不重试；缺型（`Error`）、`KeyError` 等集外类型与基础设施级失败（沙箱无输出/输出非 JSON/无信封非零退出）保持历史可重试缺省。JS 沙箱信封不在该集内，维持历史行为。按属性分类、不做文本嗅探：裸 `RuntimeError("TypeError: …")`（无 `origin_type`）仍可重试。
+**沙箱信封穿透**：`code` 节点 subprocess/docker 后端此前把用户代码异常压成裸 `RuntimeError("类型: 消息")`，内层确定性类型只剩文本前缀、分类打不穿（实测 `is_retryable_error(RuntimeError("ValueError: boom")) == True`——沙箱内 `ValueError` 也被烧满 retryTimes）。现在信封解码抛 `SandboxEnvelopeError`（`RuntimeError` 子类，**错误文本逐字不变**），信封保留的类型名挂 `origin_type` 属性供分类按集对照——落集内不重试；缺型（`Error`）、`KeyError` 等集外类型与基础设施级失败（沙箱无输出/输出无合法信封/无信封非零退出）保持历史可重试缺省。JS 沙箱信封不在该集内，维持历史行为。按属性分类、不做文本嗅探：裸 `RuntimeError("TypeError: …")`（无 `origin_type`）仍可重试。
+
+**信封覆盖范围（plaita#297）**：模块级顶层代码此前在 runner 的 `try` 之外——顶层确定性异常（顶层 `raise`/表达式类型错误/未定义名）走「无信封非零退出」被当作基础设施失败，烧满 `retryTimes` 且顶层副作用重复执行。现在 runner 的 excepthook 把顶层未捕获异常写成与 `run()` 函数体同一形状的 `ok=false` 信封，两档终态一致（具名类型 + 一次即停）；信封前的用户 `print` 输出按 stdout 末尾信封识别，不再退化成「not valid JSON」。受影响的存量 flow：把初始化/副作用写在顶层、依赖重试后成功的定义——现在首次失败即终态（与 `run()` 内同类错误一致）。
 
 - **受影响**：依赖 `TypeError`/`NameError`/`SyntaxError` 被 retryTimes 重试的存量 flow——现在这些错误第一次失败就按 `strategy` 终结（abort 即流程 error 终态）。典型：把「变量未定义/字段缺失当触发条件」写成依赖重试凑对的 code/表达式节点。
 - **迁移步骤**：此类节点改为**显式容错**——配 `errorHandler`（`continue`/`continue_with` + `defaultValue`）承接确定性失败，或把「可能缺失的输入」在节点前用条件分支显式判定；需要重试的瞬态行为改用可重试的错误通道（HTTP 1002/1003 或自定义瞬态异常类型）。分布式 worker 侧同理：确定性失败不再消耗重投预算（`_is_retryable_node_failure` 复用同一分类），首投即终态化。

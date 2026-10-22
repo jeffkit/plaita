@@ -143,7 +143,7 @@ class PollableNode(Node):
 
 只有瞬态错误会被重试（HTTP 节点的 `NodeException` 1002/1003，含 429 限流），重试间隔为指数退避 `min(30s, 1s × 2^n)`。确定性错误不消耗重试次数——同一份代码在同一份输入上重跑不可能变对：`NodeException` 1001（请求生成失败），`ValueError`/`TypeError`/`NameError`/`SyntaxError` **及其子类**，会立即按 `strategy` 处理（节点输出校验钩子 `_validate_output` 抛出的异常除外——它们仍按普通节点异常重试，豁免对整个确定性家族一致生效）。该口径与 plaita-go 同集对齐（#43，2026-10 owner 裁决）。
 
-`code` 节点的 subprocess/docker 沙箱后端把用户代码异常包成 `RuntimeError` 传输（JSON 信封 `ok=false`）；内层类型名以 `origin_type` 属性随 `SandboxEnvelopeError`（`RuntimeError` 子类，错误文本不变）穿透上述分类——信封类型落在确定性集内同样不重试；缺型（`Error`）、`KeyError` 等集外类型与基础设施级失败（沙箱无输出/输出非 JSON/无信封非零退出）保持历史可重试缺省。JS 沙箱信封不在该集内（`ReferenceError` 等类型名体系不同），维持历史行为。
+`code` 节点的 subprocess/docker 沙箱后端把用户代码异常包成 `RuntimeError` 传输（JSON 信封 `ok=false`）；内层类型名以 `origin_type` 属性随 `SandboxEnvelopeError`（`RuntimeError` 子类，错误文本不变）穿透上述分类——信封类型落在确定性集内同样不重试；缺型（`Error`）、`KeyError` 等集外类型与基础设施级失败（沙箱无输出/输出无合法信封/无信封非零退出）保持历史可重试缺省。**信封覆盖 `run()` 函数体与模块级顶层代码**：顶层未捕获异常由 runner 的 excepthook 写成同一形状的信封，确定性顶层错误（顶层 `raise`/表达式类型错误/未定义名）在两档终态一致、只执行一次；信封前的用户 `print` 输出不影响识别（只认 stdout 末尾的信封）。JS 沙箱信封不在该集内（`ReferenceError` 等类型名体系不同），维持历史行为。
 
 ### 超时处理器
 

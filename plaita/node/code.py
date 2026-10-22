@@ -319,7 +319,30 @@ _ALLOWED_LANGUAGES: FrozenSet[str] = frozenset(DEFAULT_SANDBOX_ALLOWED_LANGUAGES
 # ---------------------------------------------------------------------------
 
 _RUNNER_TEMPLATE = textwrap.dedent("""\
-    import sys as _sys, json as _json
+    import sys as _sys, json as _json, os as _os
+
+    def _plaita_emit(_payload, _out=_sys.stdout, _dumps=_json.dumps):
+        _out.write(_dumps(_payload))
+        _out.flush()
+
+    # 模块级用户代码（下面的占位符展开处）在固定尾巴的 try 之外：顶层异常
+    # 若无人接管，进程带着 traceback 非零退出、stdout 没有信封，父进程只能按
+    # 「无信封非零退出」的基础设施失败分类（可重试 ⇒ 确定性顶层错误烧满
+    # retryTimes，顶层副作用重复执行，plaita#297）。excepthook 把顶层未捕获
+    # 异常写成与 run() 函数体完全同形的 ok=false 信封——内层类型名随
+    # ``type`` 字段穿透，重试分类两档一致。用户代码正常走完后立即还原默认
+    # hook：runner 自身尾巴（stdin 非 JSON 等）的失败维持基础设施级缺省。
+    def _plaita_module_excepthook(_exc_type, _exc_value, _exc_tb,
+                                  _emit=_plaita_emit, _exit=_os._exit):
+        try:
+            _emit({"ok": False, "error": str(_exc_value),
+                   "type": _exc_type.__name__})
+        finally:
+            # 跳过 atexit/其他线程的残余写：信封已经是本进程最后的输出，
+            # 父进程按非零退出 + 信封解码（不再落入「无输出」分支）。
+            _exit(1)
+
+    _sys.excepthook = _plaita_module_excepthook
 
     # ---- resource limits (Linux only) ------------------------------------
     try:
@@ -332,6 +355,8 @@ _RUNNER_TEMPLATE = textwrap.dedent("""\
 
     # ---- user code -------------------------------------------------------
     __USER_CODE__
+    _sys.excepthook = _sys.__excepthook__
+
     # ---- run -------------------------------------------------------------
     _input = _json.loads(_sys.stdin.read())
     try:
@@ -392,6 +417,29 @@ def _build_runner_script(user_code: str, mem_bytes: int = 0) -> str:
     return script
 
 
+def _extract_trailing_envelope(raw: str) -> Optional[dict]:
+    """从 stdout 末尾取出 runner 信封；找不到返回 ``None``。
+
+    用户代码的 ``print``/模块级输出写在信封**之前**（runner 保证信封是最后
+    一次写）：顶层 ``print('hello')`` 后抛异常时，raw 是 ``"hello\\n{...}"``，
+    ``json.loads(raw)`` 会失败并把诊断降级成「not valid JSON」（plaita#297）。
+    这里从最后一个 ``{"ok"`` 候选位置用 ``raw_decode`` 解析、且要求信封之后
+    只剩空白——只接受真正的尾巴信封，避免把用户输出的任意 JSON 当信封。
+    """
+    decoder = json.JSONDecoder()
+    idx = raw.rfind('{"ok"')
+    while idx != -1:
+        try:
+            parsed, end = decoder.raw_decode(raw, idx)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(parsed, dict) and "ok" in parsed and not raw[end:].strip():
+                return parsed
+        idx = raw.rfind('{"ok"', 0, idx)
+    return None
+
+
 def _decode_runner_output(raw: str, stderr: str, *, origin_typed: bool = False) -> Any:
     """Parse the JSON envelope written by the runner script.
 
@@ -400,6 +448,9 @@ def _decode_runner_output(raw: str, stderr: str, *, origin_typed: bool = False) 
     裸 ``RuntimeError`` 历史行为。基础设施级失败（无输出/坏 JSON）两语言
     都是无 ``origin_type`` 的裸 ``RuntimeError``，保持历史可重试缺省（与 Go
     ``decodePythonRunnerOutput`` 的注释口径一致）。
+
+    用户代码写脏 stdout（信封前的 print）时按末尾信封解码（#297）；没有
+    合法尾巴信封的脏输出仍是基础设施级失败，不按文本嗅探分类。
     """
     if not raw.strip():
         raise RuntimeError(
@@ -408,10 +459,12 @@ def _decode_runner_output(raw: str, stderr: str, *, origin_typed: bool = False) 
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Sandbox output is not valid JSON: {raw[:200]!r}. "
-            f"Stderr: {stderr[:500] or '(empty)'}"
-        ) from exc
+        envelope = _extract_trailing_envelope(raw)
+        if envelope is None:
+            raise RuntimeError(
+                f"Sandbox output is not valid JSON: {raw[:200]!r}. "
+                f"Stderr: {stderr[:500] or '(empty)'}"
+            ) from exc
 
     if not envelope.get("ok"):
         exc_type = envelope.get("type", "Error")

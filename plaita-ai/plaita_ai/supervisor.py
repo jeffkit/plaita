@@ -25,7 +25,7 @@ from plaita_ai.agent.fot.prompts import format_compile_errors
 from plaita_ai.console_client import ConsoleClient, ConsoleClientError
 from plaita_ai.evals import Dataset, compare, evaluate
 from plaita_ai.flow_runner import compile_flow, get_skill_reference
-from plaita_ai.ops import latest_version, next_patch_version, published_version
+from plaita_ai.ops import latest_version, next_patch_version, parse_semver, published_version
 
 _log = logging.getLogger(__name__)
 
@@ -545,6 +545,71 @@ class Supervisor:
             return result
         return self.evaluate_proposal(flow_id, dataset, proposal, baseline=baseline)
 
+    def _recover_persisted_version(
+        self,
+        flow_id: str,
+        before: Dict[str, Any],
+        definition: str,
+    ) -> Optional[str]:
+        """save 响应丢失后，从版本库认领本次已落库的候选版本（#298）。
+
+        触发窗口是「服务端已落库、但响应阶段异常」：响应缺 ``version`` 字段
+        或连接在读取响应时断开。此时客户端拿不到服务端分配的号，但版本确实
+        在库里——不认领会留下无主孤儿版本（A2R46-01 的审计目标失效）。
+
+        只认领**本次新增且定义逐字一致**的版本：save 之前的版本快照用于排除
+        既有版本，``get_version`` 的 definition 比对用于排除并发迭代/其他
+        写入者刚落的版本。找不到或无法排除多义时返回 ``None``，由调用方
+        原样抛出原异常——绝不猜号、不虚构谱系。查询本身失败也只留 WARNING
+        并返回 ``None``（恢复是尽力而为，不能把原始 save 失败替换成查询失败）。
+        """
+        before_versions = {
+            str(entry.get("version") or "")
+            for entry in (before.get("versions") if isinstance(before, dict) else None) or []
+            if isinstance(entry, dict)
+        }
+        try:
+            after = self.client.get_flow(flow_id)
+        except ConsoleClientError as exc:
+            _log.warning(
+                "save response lost and version recovery GET failed for flow %s: "
+                "%s: %s",
+                flow_id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if not isinstance(after, dict):
+            _log.warning(
+                "save response lost; version recovery GET returned %s for flow %s",
+                type(after).__name__,
+                flow_id,
+            )
+            return None
+        new_versions = [
+            str(entry.get("version") or "")
+            for entry in after.get("versions") or []
+            if isinstance(entry, dict)
+        ]
+        new_versions = [v for v in new_versions if v and v not in before_versions]
+        matches: List[str] = []
+        for version in new_versions:
+            try:
+                view = self.client.get_version(flow_id, version)
+            except ConsoleClientError as exc:
+                _log.warning(
+                    "save response lost; cannot inspect candidate version %s: %s: %s",
+                    version,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            if isinstance(view, dict) and str(view.get("definition") or "") == definition:
+                matches.append(version)
+        if not matches:
+            return None
+        return max(matches, key=lambda v: parse_semver(v) or (-1, -1, -1))
+
     def evaluate_proposal(
         self,
         flow_id: str,
@@ -557,10 +622,12 @@ class Supervisor:
         the reusable half of :meth:`iterate` (the flow template calls it
         directly, with the proposal produced upstream).
 
-        失败迭代的候选版本处置（A2R46-01，补记而非回滚）：版本一经落库，
-        评测/对比段崩溃降级为 ``failed_iteration``，outcome 仍携带
-        ``candidate_version`` 指认已存版本——版本保留在 console 里作谱系
-        （无删除 API，供人类审计），绝不留无主孤儿。
+        失败迭代的候选版本处置（A2R46-01/#298，补记而非回滚）：版本一经落库，
+        评测/对比段崩溃、以及 save 已落库但响应丢失（缺 ``version`` / 连接在
+        读取响应时断开）都降级为 ``failed_iteration``，outcome 仍携带
+        ``candidate_version`` 指认已存版本（响应丢失时回查版本库认领本次同
+        定义新增版本）——版本保留在 console 里作谱系（无删除 API，供人类
+        审计），绝不留无主孤儿。
         """
         policy = self.policy
         baseline = baseline or self.baseline(flow_id, dataset)
@@ -570,6 +637,8 @@ class Supervisor:
             "baseline_avg_score": baseline.get("avg_score"),
         }
 
+        result["rationale"] = proposal.get("rationale", "")
+        definition = str(proposal["definition"])
         # Save as the next patch version so humans can see the lineage.
         #
         # #59：版本号不能由客户端自算 + 无条件 PUT——两个并发迭代读到同一份
@@ -582,21 +651,48 @@ class Supervisor:
         current_latest = latest_version(list(detail.get("versions") or []))
         if not current_latest:
             raise ConsoleClientError(f"flow {flow_id!r} has no versions")
-        saved = self.client.save_version(
-            flow_id,
-            next_patch_version(current_latest),
-            str(proposal["definition"]),
-            created_by=policy.created_by,
-            allocate_version=True,
-        )
-        next_version = str((saved or {}).get("version") or "")
-        if not next_version:
-            raise ConsoleClientError(
-                f"console did not report the allocated version for flow {flow_id!r} "
-                "(allocate_version response missing 'version')"
+
+        # A2R46-01/#298 孤儿守卫从 save 调用本身开始：守卫此前只包住
+        # evaluate/compare，save 已落库但响应缺 ``version``/连接在读取响应时
+        # 断开，异常从守卫外穿出 → run_loop 兜底 outcome 无 candidate_version
+        # → 无主孤儿版本。这里先把「已落库」的候选号认领进结果草稿（正常路径
+        # 用响应号，响应丢失时回查版本库），此后评测/对比段的降级都带着谱系
+        # 指认。
+        try:
+            saved = self.client.save_version(
+                flow_id,
+                next_patch_version(current_latest),
+                definition,
+                created_by=policy.created_by,
+                allocate_version=True,
             )
+            next_version = str((saved or {}).get("version") or "")
+            if not next_version:
+                raise ConsoleClientError(
+                    f"console did not report the allocated version for flow {flow_id!r} "
+                    "(allocate_version response missing 'version')"
+                )
+        except Exception as exc:
+            recovered = self._recover_persisted_version(flow_id, detail, definition)
+            if not recovered:
+                # 版本库没有本次新增的同定义版本：服务端确实没落库（或无法
+                # 无歧义认领），原样抛出——不虚构候选号。
+                raise
+            next_version = recovered
+            result["candidate_version"] = next_version
+            _log.warning(
+                "candidate version %s persisted but save response was lost "
+                "(%s: %s); degraded to failed_iteration (version kept as lineage)",
+                next_version,
+                type(exc).__name__,
+                exc,
+            )
+            result["status"] = "failed_iteration"
+            result["reason"] = (
+                f"candidate save response unavailable: {type(exc).__name__}: {exc}"
+            )[:500]
+            return result
         result["candidate_version"] = next_version
-        result["rationale"] = proposal.get("rationale", "")
 
         # A2R46-01 孤儿候选版本守卫：版本已在上一步落库，此后评测/对比段任何
         # 崩溃（候选自控载荷的序列化残余形状、console 5xx 等）若穿透，run_loop

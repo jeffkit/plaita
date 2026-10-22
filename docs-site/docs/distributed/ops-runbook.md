@@ -971,8 +971,13 @@ redis-cli DEL plaita:execution:nofail:<execution_id>
 （及子类）与 `NodeException` 1001 同列**确定性错误**——首次失败即按 errorHandler
 `strategy` 终结，不消耗 `retryTimes`；分布式 worker 的重投判据（`_is_retryable_node_failure`）
 复用同一分类，**首投即终态化**，不再烧重投/退避预算。`code` 节点 subprocess/docker
-沙箱的用户异常以内层类型名（`origin_type`）穿透分类——沙箱里抛的这四类同样一次即停；
-缺型/`KeyError` 等集外类型与沙箱基础设施级失败（无输出/非 JSON）保持历史可重试。
+沙箱的用户异常（`run()` 函数体与模块级顶层代码同经 runner 信封：顶层未捕获异常由
+runner 的 excepthook 写成 `ok=false` 信封）以内层类型名（`origin_type`）穿透分类——
+沙箱里抛的这四类同样一次即停；信封前的用户 stdout（`print`）不影响信封识别。
+`SyntaxError` 在保存期 `ast.parse` 即被拒绝、运行期不可达；缺型/`KeyError` 等集外
+类型与沙箱基础设施级失败（无输出/无合法信封）保持历史可重试。
+（plaita#297 修复前顶层异常落在信封之外，会被当作基础设施失败烧满 `retryTimes`、
+重复执行顶层副作用；升级后顶层确定性错误同样一次即停。）
 
 **运维会观察到什么**：引擎升级后，「以前靠 retryTimes/消息重投凑过去」的 flow 的
 error 终态变多、DLQ 里 `reason` 出现确定性类型——这不是回归，是重试放大器被摘除

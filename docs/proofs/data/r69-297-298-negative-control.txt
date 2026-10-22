@@ -1,0 +1,119 @@
+# r69 #297/#298 负控证据（2026-10-22，基线 eb08fd0）
+
+## #297 探针：模块级确定性错误（retryTimes=3，repo .venv）
+
+命令：`git stash push -- plaita/node/code.py`（pre）→ `.venv/bin/python /tmp/r116_297_probe.py`
+→ `git stash pop`（post）。每次执行向探针文件追加一个 `x`，计数即真实执行次数。
+
+### pre（r75 模板，HEAD eb08fd0）
+
+```json
+{
+  "module_raise": {
+    "executions": 4,
+    "terminal": "执行节点probe出错了: RuntimeError: Subprocess exited with code 1. Stderr: Traceback (most recent call last):\n  File \"<string>\", line 15, in <module>\n    raise TypeErro",
+    "cause_type": "RuntimeError"
+  },
+  "module_print_raise": {
+    "executions": 4,
+    "terminal": "执行节点probe出错了: RuntimeError: Sandbox output is not valid JSON: 'hello\\n'. Stderr: Traceback (most recent call last):\n  File \"<string>\", line 16, in <module>\n    ",
+    "cause_type": "RuntimeError"
+  },
+  "module_expr": {
+    "executions": 4,
+    "terminal": "执行节点probe出错了: RuntimeError: Subprocess exited with code 1. Stderr: Traceback (most recent call last):\n  File \"<string>\", line 15, in <module>\n    C = 1 + 'a'\n  ",
+    "cause_type": "RuntimeError"
+  }
+}
+```
+
+### post
+
+```json
+{
+  "module_raise": {
+    "executions": 1,
+    "terminal": "执行节点probe出错了: SandboxEnvelopeError: TypeError: module-level",
+    "cause_type": "SandboxEnvelopeError"
+  },
+  "module_print_raise": {
+    "executions": 1,
+    "terminal": "执行节点probe出错了: SandboxEnvelopeError: TypeError: after-print",
+    "cause_type": "SandboxEnvelopeError"
+  },
+  "module_expr": {
+    "executions": 1,
+    "terminal": "执行节点probe出错了: SandboxEnvelopeError: TypeError: unsupported operand type(s) for +: 'int' and 'str'",
+    "cause_type": "SandboxEnvelopeError"
+  }
+}
+```
+
+### 定向 pytest（tests/unit/test_issue297_runner_module_scope.py）
+
+- pre（还原模板）：`8 failed, 2 passed, 1 skipped in 44.05s`
+  （红=模块级 ValueError/TypeError/NameError 三参数、subprocess 终态、print 后异常、
+  顶层表达式/未定义名、两处信封前 stdout 解码；绿=unsafe 档与「非末尾信封仍拒绝」守恒；
+  skip=docker 无镜像）
+- post：`10 passed, 1 skipped in 1.10s`
+
+## #298 探针：save 已落库 + 响应异常（/tmp/r116_orphan_window_probe_repo.py）
+
+命令：`git stash push -- plaita-ai/plaita_ai/supervisor.py`（pre）→ 运行探针 →
+`git stash pop`（post）。两变体都在 `save_version` 真实落库后篡改响应。
+
+### pre
+
+```json
+[
+  {
+    "case": "W5a_server_persisted_response_missing_version",
+    "versions_in_lib": ["1.0.0", "1.0.1"],
+    "iteration_status": "failed_iteration",
+    "candidate_version_in_outcome": null,
+    "final_status": "budget_exhausted"
+  },
+  {
+    "case": "W5b_server_persisted_response_connection_reset",
+    "versions_in_lib": ["1.0.0", "1.0.1"],
+    "iteration_status": "failed_iteration",
+    "candidate_version_in_outcome": null,
+    "final_status": "budget_exhausted"
+  }
+]
+```
+
+（pre 同时打印 `supervisor iteration 1 crashed; degraded to failed_iteration:
+ConsoleClientError: ...`，无 "version kept as lineage"——run_loop 兜底 outcome
+不含 candidate_version。）
+
+### post
+
+```json
+[
+  {
+    "case": "W5a_server_persisted_response_missing_version",
+    "versions_in_lib": ["1.0.0", "1.0.1"],
+    "iteration_status": "failed_iteration",
+    "candidate_version_in_outcome": "1.0.1",
+    "final_status": "budget_exhausted"
+  },
+  {
+    "case": "W5b_server_persisted_response_connection_reset",
+    "versions_in_lib": ["1.0.0", "1.0.1"],
+    "iteration_status": "failed_iteration",
+    "candidate_version_in_outcome": "1.0.1",
+    "final_status": "budget_exhausted"
+  }
+]
+```
+
+（post 同时打印 WARNING：`candidate version 1.0.1 persisted but save response was
+lost (...); degraded to failed_iteration (version kept as lineage)`。）
+
+### 定向 pytest（plaita-ai/tests/test_supervisor.py -k "save_response or save_failure"）
+
+- pre：`2 failed, 2 passed, 21 deselected in 1.21s`
+  （红=两变体 `KeyError: 'candidate_version'`；绿=未落库不虚构候选号、
+  并发写入者不同定义不认领两项守恒）
+- post：`4 passed, 21 deselected in 1.03s`

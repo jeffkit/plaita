@@ -433,3 +433,98 @@ def test_failed_iteration_keeps_candidate_version_lineage(caplog):
         assert "ConsoleClientError" in it["reason"]
     assert "degraded to failed_iteration" in caplog.text
     assert "1.0.1" in caplog.text
+
+
+# -- A2R46-01 残留窗口（#298）：save 响应丢失 ---------------------------------
+
+
+def _corrupt_save_response(client, mode: str) -> None:
+    """save_version 真实落库后篡改响应：W5a 缺 version / W5b 读取阶段断连。"""
+    from plaita_ai.console_client import ConsoleClientError
+
+    original = client.save_version
+
+    def corrupted(*args, **kwargs):
+        original(*args, **kwargs)  # 服务端已落库
+        if mode == "missing_version":
+            return {}
+        raise ConsoleClientError("connection reset while reading response")
+
+    client.save_version = corrupted  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("mode", ["missing_version", "connection_reset"])
+def test_save_response_loss_keeps_candidate_version_lineage(mode, caplog):
+    """#298 负控：落库成功 + 响应异常 → outcome 仍指认 candidate_version。
+
+    pre-fix：异常从孤儿守卫（只包 evaluate 之后）穿出，run_loop 兜底 outcome
+    无 candidate_version，1.0.1 成为无主孤儿；post-fix：save 守卫回查版本库
+    认领本次同定义新增版本，降级 failed_iteration 且保留谱系指认。
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="plaita_ai.supervisor")
+    fake = seed_with_baseline(FakeConsole())
+    client = make_client(fake)
+    _corrupt_save_response(client, mode)
+    sup = Supervisor(
+        client,
+        SupervisorPolicy(max_iterations=1, max_consecutive_failures=2),
+        StaticProposer([{"definition": DEF_V2, "rationale": "x"}]),
+    )
+
+    out = sup.run_loop("demo", make_dataset(cases=1))
+    it = out["iterations"][0]
+    assert it["status"] == "failed_iteration"
+    assert it["candidate_version"] == "1.0.1"
+    assert "candidate save response unavailable" in it["reason"]
+    assert sorted(fake.flows["demo"]["versions"]) == ["1.0.0", "1.0.1"]
+    assert fake.flows["demo"]["versions"]["1.0.1"]["definition"] == DEF_V2
+    assert "version kept as lineage" in caplog.text
+    assert "1.0.1" in caplog.text
+
+
+def test_save_failure_without_persist_reraises_and_claims_nothing():
+    """响应异常但服务端未落库：不虚构候选号，原异常照常穿出（守恒）。"""
+    from plaita_ai.console_client import ConsoleClientError
+
+    fake = seed_with_baseline(FakeConsole())
+    client = make_client(fake)
+
+    def refused(*args, **kwargs):
+        raise ConsoleClientError("save rejected: not persisted")
+
+    client.save_version = refused  # type: ignore[method-assign]
+    sup = Supervisor(
+        client,
+        SupervisorPolicy(max_iterations=1),
+        StaticProposer([{"definition": DEF_V2, "rationale": "x"}]),
+    )
+
+    with pytest.raises(ConsoleClientError, match="not persisted"):
+        sup.iterate("demo", make_dataset(cases=1))
+    assert sorted(fake.flows["demo"]["versions"]) == ["1.0.0"]
+
+
+def test_save_response_loss_does_not_claim_concurrent_writers_version():
+    """新版本存在但定义不同（并发写入者）：排除多义，不认领、原异常穿出。"""
+    from plaita_ai.console_client import ConsoleClientError
+
+    fake = seed_with_baseline(FakeConsole())
+    client = make_client(fake)
+
+    def corrupted(*args, **kwargs):
+        # 本次 save 没有落库；另一个写入者刚落了一个不同定义的 1.0.1
+        fake.put_version("demo", "1.0.1", '{"version": 999}')
+        raise ConsoleClientError("connection reset while reading response")
+
+    client.save_version = corrupted  # type: ignore[method-assign]
+    sup = Supervisor(
+        client,
+        SupervisorPolicy(max_iterations=1),
+        StaticProposer([{"definition": DEF_V2, "rationale": "x"}]),
+    )
+
+    with pytest.raises(ConsoleClientError, match="connection reset"):
+        sup.iterate("demo", make_dataset(cases=1))
+    assert fake.flows["demo"]["versions"]["1.0.1"]["definition"] == '{"version": 999}'
