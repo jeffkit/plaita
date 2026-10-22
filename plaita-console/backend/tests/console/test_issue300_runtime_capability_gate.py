@@ -14,6 +14,7 @@
 配套面：flow_versions.runtime 列（go/python，默认 python）、按 runtime 选
 队列、services 读面透出 capability_manifest。
 """
+import importlib.util
 import json
 import logging
 import sys
@@ -473,6 +474,19 @@ def _register_real_go_worker(redis):
     return entry["metadata"]["capability_manifest"]
 
 
+# sql_query 节点由 **plaita-nodes** 子仓经 ``plaita.nodes`` entry-point 注册
+# （不在 plaita core、不在 console 的 pip 依赖面——CI 只装
+# ``.[dev,lint,all]`` + backend requirements，无 plaita-nodes）。环境缺该包
+# 时 `_save` 对未注册节点 422（test_flows_api::test_save_invalid_definition_422
+# 钉的存量行为）、随后 `_publish` 404 version_not_found——r80 首推 CI 红
+# 的根因（本组用例在装了 plaita-nodes 的环境全绿，已复现核实）。按环境
+# 依赖 skip，不伪装通过。
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("plaita_nodes") is None,
+    reason="sql_query 节点由 plaita-nodes entry-point 注册（CI 环境不装该子仓）",
+)
 class TestRealGoWorkerRegistration:
     def _only_real_go_worker(self, redis):
         redis.delete("plaita:registry:flow_worker:go-1")
