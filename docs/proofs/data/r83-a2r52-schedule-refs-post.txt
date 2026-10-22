@@ -1,0 +1,42 @@
+# r83 A2R52-01/02 post-fix 绿（fix/a2r52-schedule-refs，wt2）
+# 2026-10-23  修复=A2R52-01a update 钉版本同口 422 / A2R52-01b 守卫第三判据 409 version_pinned_by_schedule + force 级联暂停标注 / A2R52-02 id 随机后缀 + hsetnx/唯一约束 409
+
+=== 1) A2 r56 探针复跑（同 pre 探针 sed 换根；判读=缺陷面断言全数翻转）===
+PASSED
+../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version [R52-01a] PUT version=9.9.9 → 422 (应 422 与 create 同口)
+FAILED
+[R52-01b] DELETE draft（被调度钉住）→ 409 (正确行为应 409 version_pinned_by_schedule)
+FAILED
+[R52-01c] 同毫秒两连 create → id1=sched-20261022120000123-ec803d id2=sched-20261022120000123-11d127 rc=200/200
+FAILED
+FAILED
+FAILED
+FAILED
+        print(f"[R52-01a] PUT version=9.9.9 → {r2.status_code} (应 422 与 create 同口)")
+        print(f"[R52-01b] DELETE draft（被调度钉住）→ {r2.status_code} "
+        print(f"\n[R52-01c] 同毫秒两连 create → id1={r1.json().get('schedule_id')} "
+FAILED ../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+FAILED ../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+FAILED ../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+FAILED ../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+FAILED ../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+FAILED ../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+=================== 6 failed, 1 passed, 87 warnings in 1.50s ===================
+
+-- 判读：01a PUT→422(行不被污染,探针尾部红世界断言 version==9.9.9 如期翻转) / 01b DELETE→409 守卫生效(调度健康保留,尾部『应暂停』断言翻转) / 01c 双 id 不同(尾部『需复核前提』翻转)；01d/01e=A2R52-03/04 非本单维持红
+
+=== 2) 新回归 tests/console/test_issue_a2r52_schedule_pin_guard.py ===
+13 passed, 170 warnings in 1.85s
+
+=== 3) 守卫/schedules 家族守恒（10 文件）===
+75 passed, 840 warnings in 14.91s
+
+=== 4) console 全量 ===
+1420 passed, 18 skipped, 13292 warnings in 174.08s (0:02:54)
+
+=== 5) 负控（stash 双文件修点复跑新用例）===
+9 failed / 4 passed——9 红=update 校验/守卫 409(×2)/force 暂停/flow 聚合判据/本地档守卫/同毫秒 id/集群 409/本地 409 全数承重；4 绿=解钉不拦/孤儿可改名/无调度照常删/跨版本不累（非目标行为不变）；本地档撞 id 裸 IntegrityError 500 形态同轮实证（台账 code-read 推断→实弹）
+
+=== 6) 门检 ===
+ruff(0.17.1) flows.py/schedules.py/新测试文件: All checks passed
+mkdocs build (docs venv): Documentation built in 5.04 seconds（仅存量锚点 INFO）

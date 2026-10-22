@@ -16,6 +16,7 @@
 import json
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -410,16 +411,144 @@ def get_flow(flow_id: str, request: Request = None):
 #     定义键清理（remove_*_from_engine）只在守卫通过后发生——「确认无
 #     引用后才清真源」，resume/start 的具名终态（worker 侧）仅作竞窗与
 #     本地档的兜底，不作为常规路径。
+#   * 引用守卫之二（A2R52-01）：**钉版调度**（schedule 是版本的第二类
+#     引用方，#307 执行扫描翻页/#308 FK 级联均未覆盖）→ 409
+#     ``version_pinned_by_schedule`` 附调度清单；force 语义照 published
+#     状态守卫（可越但须显式）——force 放行时被钉调度**级联暂停**并
+#     标注 ``pinned_version_missing``（cron 幽灵触发面随删除同步止住，
+#     降级可观测），调度行本身不删（保用户配置）。
+def _find_pinning_schedules(
+    redis: Optional[Redis], tenant: Optional[str], flow_id: str,
+    scan_version: Optional[str],
+) -> List[tuple]:
+    """A2R52-01：扫「钉版调度」——版本的第二类引用方（schedule 系）。
+
+    双面都扫（守卫两档共用）：集群档 ``plaita:schedules`` HASH、本地档
+    ``local_schedules`` 表（集群部署下该表为空，扫之无害）。只计**钉版行**
+    （version 非空）——version=None 是「跟随最新发布」行，其 dangling 维度
+    属发布面（A2R50-03 另单），不在本判据。tenant 非空时按行归属过滤
+    （flow_id 跨租户可重名，防他租户同 id 调度误挡）。
+
+    返回 ``[(surface, row)]``，surface ∈ {"cluster", "local"}；扫描自身失败
+    fail-closed 503（与 #307 执行扫描同口径——守卫不做 fail-open）。
+    """
+    rows: List[tuple] = []
+    if redis is not None:
+        try:
+            from plaita.server.services.schedule_service import list_schedules
+        except ImportError:  # pragma: no cover - 极简部署无 schedule_service
+            logger.warning("schedule_service 不可用，跳过集群档调度引用扫描")
+        else:
+            try:
+                rows.extend(
+                    ("cluster", r) for r in list_schedules(redis)
+                )
+            except HTTPException:
+                raise
+            except Exception as e:  # noqa: BLE001 — 引用核实失败拒绝删除
+                raise HTTPException(
+                    status_code=503,
+                    detail=error_detail(
+                        "version_pinned_by_schedule_scan_failed",
+                        f"调度引用核实失败，拒绝删除（fail-closed）：稍后重试；{e}",
+                    ),
+                ) from e
+    try:
+        from ..services import local_scheduler
+    except ImportError:  # pragma: no cover - 平铺布局（cwd=backend）运行时
+        from services import local_scheduler  # type: ignore
+    try:
+        rows.extend(
+            ("local", r)
+            for r in local_scheduler.list_schedules(
+                flow_store.get_flow_store(), tenant_id=None
+            )
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 — 引用核实失败拒绝删除
+        raise HTTPException(
+            status_code=503,
+            detail=error_detail(
+                "version_pinned_by_schedule_scan_failed",
+                f"调度引用核实失败，拒绝删除（fail-closed）：稍后重试；{e}",
+            ),
+        ) from e
+
+    tenant_key = tenant or "default"
+    out: List[tuple] = []
+    for surface, row in rows:
+        if row.get("flow_id") != flow_id:
+            continue
+        if (row.get("tenant_id") or "default") != tenant_key:
+            continue
+        version = row.get("version")
+        if not version:
+            continue
+        if scan_version is not None and version != scan_version:
+            continue
+        out.append((surface, row))
+    return out
+
+
+def _pause_pinned_schedules(redis: Optional[Redis], pinned: List[tuple]) -> List[str]:
+    """A2R52-01 force 逃生级联：删版放行时暂停被钉调度并打标注。
+
+    调度行不删（保用户配置），只停触发面（``enabled=False`` +
+    ``next_run_at=""``）+ 集群档行上标注 ``pinned_version_missing=true``
+    （列表/详情视图透出，``_view`` 原样透传）——「孤儿调度每 tick 产出
+    失败执行」的持续伤害随删除放行同步止住。本地档无自由列，标注以
+    WARNING 留痕。单行暂停失败不回滚删除（删除已完成），WARNING 留痕。
+    """
+    paused: List[str] = []
+    for surface, row in pinned:
+        sid = row.get("schedule_id")
+        if not sid:
+            continue
+        try:
+            row["enabled"] = False
+            row["next_run_at"] = ""
+            if surface == "cluster" and redis is not None:
+                from plaita.server.services.schedule_service import SCHEDULES_KEY
+                row["pinned_version_missing"] = True
+                row["updated_at"] = datetime.now().isoformat()
+                redis.hset(
+                    SCHEDULES_KEY, sid, json.dumps(row, ensure_ascii=False)
+                )
+            else:
+                try:
+                    from ..services import local_scheduler
+                except ImportError:  # 平铺布局/顶层包导入（测试脚本模式）
+                    from services import local_scheduler  # type: ignore
+                # 本地档无自由列，pinned_version_missing 不落行——标注以
+                # 上方 WARNING 留痕；enabled/next_run_at 随 update 落库。
+                local_scheduler.update_schedule(
+                    flow_store.get_flow_store(), sid, row, tenant_id=None
+                )
+            paused.append(sid)
+            logger.warning(
+                "版本删除 force 放行：被钉调度已暂停并标注 "
+                "pinned_version_missing schedule=%s flow=%s@%s",
+                sid, row.get("flow_id"), row.get("version"),
+            )
+        except Exception as e:  # noqa: BLE001 — 删除已完成，调度面降级留痕
+            logger.warning(
+                "被钉调度暂停失败（版本已删，调度面遗留孤儿）: %s: %s", sid, e
+            )
+    return paused
+
+
 def _enforce_version_delete_guard(
     redis: Optional[Redis],
     tenant: Optional[str], flow_id: str,
     versions: List[Any], *, force: bool,
-) -> None:
-    """delete_flow / delete_version 共用的删除前置守卫（#304）。
+) -> List[tuple]:
+    """delete_flow / delete_version 共用的删除前置守卫（#304 + A2R52-01）。
 
     ``versions`` 为本次删除涉及的版本行（delete_version 单行；delete_flow
     全量行）。不通过即抛 HTTPException，删除动作（含目标侧清理与定义键
-    清理）完全不发生。
+    清理）完全不发生。通过时返回钉版调度清单（``[(surface, row)]``）——
+    force 放行路径由调用方级联暂停（无钉版时为空表，无需处理）。
     """
     published = [v for v in versions if getattr(v, "status", "") == "published"]
     if published and not force:
@@ -478,6 +607,30 @@ def _enforce_version_delete_guard(
                 total=len(active),
             ),
         )
+    # 引用判据之二（A2R52-01）：钉版调度——force 语义照 published 状态守卫
+    # （可越但须显式）；force 放行时的级联暂停由调用方在删除成功后执行。
+    pinned = _find_pinning_schedules(redis, tenant, flow_id, scan_version)
+    if pinned and not force:
+        listing = [
+            {"schedule_id": r.get("schedule_id"), "name": r.get("name"),
+             "version": r.get("version"), "enabled": bool(r.get("enabled"))}
+            for _, r in pinned[:20]
+        ]
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "version_pinned_by_schedule",
+                f"存在 {len(pinned)} 个调度钉住 "
+                f"{flow_id}"
+                + (f"@{scan_version}" if scan_version else "（钉住该流程的版本）")
+                + "，删除将使调度孤儿化（cron 每 tick 产出失败执行）；"
+                "请先改钉/删除相关调度，或显式传 force=true"
+                "（被钉调度将被暂停并标注 pinned_version_missing）",
+                schedules=listing,
+                total=len(pinned),
+            ),
+        )
+    return pinned
 
 
 @router.delete("/flows/{flow_id}")
@@ -494,7 +647,7 @@ def delete_flow(flow_id: str, request: Request = None,
     # 引用（force 也不可越）→ 具名 409。守卫通过（或 flow 不存在交由下方
     # 404）才允许触碰目标侧与定义键。flow 不存在时 list_versions 为空、
     # 守卫自然放行，404 语义由既有 LookupError 路径保留。
-    _enforce_version_delete_guard(
+    pinned_schedules = _enforce_version_delete_guard(
         redis, tenant, flow_id,
         _store().list_versions(flow_id, tenant_id=tenant),
         force=force,
@@ -512,12 +665,20 @@ def delete_flow(flow_id: str, request: Request = None,
             raise HTTPException(
                 status_code=404, detail=error_detail("flow_not_found", str(e))
             )
+    # A2R52-01：force 放行的钉版调度在删除落地后级联暂停（删除失败 404
+    # 时守卫已拒绝，不会走到这里；暂停失败只 WARNING，不回滚删除）。
+    paused_schedules = (
+        _pause_pinned_schedules(redis, pinned_schedules)
+        if force and pinned_schedules else []
+    )
     # 引擎运行时存储同步清理（本地模式无 Redis，无需清理）
     if redis is not None:
         remove_flow_from_engine(redis, flow_id, tenant_id=tenant)
     if request is not None:
         _audit(request, "flow.delete", flow_id,
-               {"force": force}, tenant_id=tenant)
+               {"force": force, **({"pinned_schedules_paused": paused_schedules}
+                                   if paused_schedules else {})},
+               tenant_id=tenant)
     return {"success": True, "flow_id": flow_id}
 
 
@@ -653,8 +814,9 @@ def delete_version(flow_id: str, version: str, request: Request = None,
     # outbox/引擎键一律不碰。版本不存在（prior=None）整体跳过守卫、交由
     # 下方既有 404 路径——不存在的版本没有可守卫的状态/真源。
     prior = _store().get_version(flow_id, version, tenant_id=tenant)
+    pinned_schedules: List[tuple] = []
     if prior is not None:
-        _enforce_version_delete_guard(
+        pinned_schedules = _enforce_version_delete_guard(
             redis, tenant, flow_id, [prior], force=force,
         )
     # #301：同 delete_flow——先清目标侧再删行（失败回滚可对账自愈）。
@@ -668,13 +830,20 @@ def delete_version(flow_id: str, version: str, request: Request = None,
             raise HTTPException(
                 status_code=404, detail=error_detail("version_not_found", str(e))
             )
+    # A2R52-01：同 delete_flow——force 放行的钉版调度删除落地后级联暂停。
+    paused_schedules = (
+        _pause_pinned_schedules(redis, pinned_schedules)
+        if force and pinned_schedules else []
+    )
     if redis is not None:
         remove_flow_version_from_engine(redis, flow_id, version, tenant_id=tenant)
     if request is not None:
         _audit(request, "flow.delete_version", f"{flow_id}@{version}",
                {"version": version,
                 "force": force,
-                "prior_status": prior.status if prior is not None else None},
+                "prior_status": prior.status if prior is not None else None,
+                **({"pinned_schedules_paused": paused_schedules}
+                   if paused_schedules else {})},
                tenant_id=tenant)
     return {"success": True, "flow_id": flow_id, "version": version}
 
