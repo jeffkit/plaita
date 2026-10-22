@@ -722,7 +722,7 @@
 
 - 基线：`origin/main` `daadc00`；落地门 `landing_gate.py ci` rc=0（main CI +
   Console E2E 双绿，落地前复核 origin/main 未漂移）。
-- **#299（高优 feat，墨者接入）console 侧 outbox 全链**——跨 Redis 部署下
+- **#299（高优 feat，接入方接入）console 侧 outbox 全链**——跨 Redis 部署下
   `engine_sync` 只写 console 所连 Redis，「发布成功、worker 找不到 flow」，
   人工跑 `sync_published_to_engine.py` 是批处理兜底非实时。worker 读穿透
   （issue §2，plaita-go FlowSource 回源）归 B3 后续轮；B2 #300 的 publish
