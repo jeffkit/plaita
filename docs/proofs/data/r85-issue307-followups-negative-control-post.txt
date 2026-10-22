@@ -1,0 +1,23 @@
+== r85 #307 追补负控 post（单次大 limit 穷尽 + strict 坏行具名/503 文案分流）==
+
+--- pytest（新测试 11 + #307 既有 9，修后全绿）---
+20 passed, 106 warnings in 2.38s
+
+--- 实弹剧本（A1 r126 T=1600 原样 + 三盲格；对账：load_calls 9→1 / deser 14400→1600 = 9.0×→1.0×）---
+[pin] plaita.__file__ = /private/tmp/plaita-b3-r85/plaita/__init__.py
+
+===== A126-01: guard scan cost (A1 script, T=1600) =====
+[guard] active=[] load_calls=1 deser_total=1600 max_batch=1600 wall=0.227s
+[single-pass baseline] rows=800 load_calls=1 deser=1600 wall=0.055s
+[ratio] deser 1600/1600=1.0x wall 4.2x
+
+===== A126-02: strict corrupt-row diagnosability =====
+[direct] VersionInUseScanError str_names_exec_bad=True
+[logs] named_state_key=True; sample=['Failed to deserialize state: Expecting value: line 1 column 1 (char 0)', '执行状态坏行（反序列化失败）: state_key=plaita:execution:exec-bad execution_id=exec-bad error=JSONDecodeError: Expecting value: line 1 column 1 (char 0)']
+[api] 3x delete -> [(503, 'version_in_use_scan_failed'), (503, 'version_in_use_scan_failed'), (503, 'version_in_use_scan_failed')]
+[api] 503_names_row=True
+[api] retry_copy_still_misleading=False
+[contrast] non-strict list -> 1 rows (bad row invisible)
+[legit-empty] fresh-tenant delete -> 200 (200=无误伤)
+[legacy-backfill] VersionInUseScanError names_key=True; ready_flag_after=0
+PROOF-DONE

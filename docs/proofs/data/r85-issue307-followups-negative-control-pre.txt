@@ -1,0 +1,215 @@
+== r85 #307 追补负控 pre（基线 d3d3c12，未修复代码，2026-10-23；A126-01 守卫翻页 O(pages×T) + A126-02 strict 坏行三盲）==
+
+--- pytest（新测试文件，修前红格）---
+F.FFFFF.F..                                                              [100%]
+=================================== FAILURES ===================================
+____________________ test_guard_scan_single_call_and_o_of_t ____________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=7d2612c8d5494af68fdadd9501bc7f0a,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x115b84e90>
+
+    def test_guard_scan_single_call_and_o_of_t(redis, monkeypatch):
+        """判据直读：守卫扫描 = 单次 list_executions（大 limit 显式传参），
+        反序列化总量 ≤ T 一次（翻页剧本下是 pages×T）。"""
+        t_total = _seed_tenant_with_tail(redis, 125, 125)
+        calls = _count_loads(monkeypatch)
+        li_kwargs = []
+        orig_li = RedisExecutionStorage.list_executions
+    
+        def spy_li(self, *a, **kw):
+            li_kwargs.append(kw)
+            return orig_li(self, *a, **kw)
+    
+        monkeypatch.setattr(RedisExecutionStorage, "list_executions", spy_li)
+    
+        active = find_flow_version_active_executions(redis, "default", FLOW_ID, VER)
+    
+        assert [s.execution_id for s in active] == ["x-susp-tail"]
+        # 穷尽性成立（尾部挂起命中）且请求数 = 1 次量级
+>       assert calls["n"] == 1, f"list_executions 调了 {calls['n']} 次（翻页回潮）"
+E       AssertionError: list_executions 调了 2 次（翻页回潮）
+E       assert 2 == 1
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:189: AssertionError
+____________________ test_guard_cap_saturation_fail_closed _____________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=045d824093b44d7d8902728762cc0341,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x116ebd370>
+
+    def test_guard_cap_saturation_fail_closed(redis, monkeypatch):
+        """上限饱和 = 结果可能是截断窗 → fail-closed（503），不静默当「核实过」。"""
+        client = _client(redis)
+        _seed_flow(client)
+        cap = 30
+>       monkeypatch.setattr(executions_api, "_GUARD_SCAN_SINGLE_LIMIT", cap)
+E       AttributeError: <module 'api.executions' from '/private/tmp/plaita-b3-r85/plaita-console/backend/api/executions.py'> has no attribute '_GUARD_SCAN_SINGLE_LIMIT'
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:222: AttributeError
+_______________________ test_guard_below_cap_clean_pass ________________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=9046407c8ca84c1fa2c5b97e1b97fce9,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1208f9ae0>
+
+    def test_guard_below_cap_clean_pass(redis, monkeypatch):
+        """对照格：cap-1 条（全终态、无挂起）→ 未触顶 → 正常放行 200。"""
+        client = _client(redis)
+        _seed_flow(client)
+        cap = 30
+>       monkeypatch.setattr(executions_api, "_GUARD_SCAN_SINGLE_LIMIT", cap)
+E       AttributeError: <module 'api.executions' from '/private/tmp/plaita-b3-r85/plaita-console/backend/api/executions.py'> has no attribute '_GUARD_SCAN_SINGLE_LIMIT'
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:242: AttributeError
+_________________ test_strict_scan_exception_names_corrupt_row _________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=8d2e1763e0284443a070fe639666e31b,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_strict_scan_exception_names_corrupt_row(redis):
+        """判据直读：strict 扫描异常具名坏行（state key + execution_id），
+        且不泄坏行值。"""
+        for i in range(3):
+            _seed_exec(redis, f"good-{i}", FLOW_ID, "completed",
+                       BASE + timedelta(minutes=i))
+        _inject_corrupt_row(redis, "exec-bad", backfill_ready=True)
+    
+        with pytest.raises(VersionInUseScanError) as ei:
+            find_flow_version_active_executions(redis, "default", FLOW_ID, VER)
+        msg = str(ei.value)
+>       assert "exec-bad" in msg, f"异常未具名坏行: {msg[:200]!r}"
+E       AssertionError: 异常未具名坏行: '在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)'
+E       assert 'exec-bad' in '在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)'
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:279: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:base.py:255 Failed to deserialize state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:545 Failed to process execution state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:859 Failed to list executions: Expecting value: line 1 column 1 (char 0)
+____________________ test_corrupt_row_log_searchable_by_key ____________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=64bf11075cb2426e95dbce1a330754a9,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x116eb3a10>
+
+    def test_corrupt_row_log_searchable_by_key(redis, caplog):
+        """日志出口：坏行具名进结构化 WARNING，可按 state key 检索。"""
+        _seed_exec(redis, "good-0", FLOW_ID, "completed", BASE)
+        _inject_corrupt_row(redis, "exec-bad", backfill_ready=True)
+    
+        with caplog.at_level(logging.WARNING, logger="plaita"):
+            with pytest.raises(VersionInUseScanError):
+                find_flow_version_active_executions(redis, "default", FLOW_ID, VER)
+        msgs = [r.getMessage() for r in caplog.records]
+>       assert any(f"{STATE_KEY_PREFIX}exec-bad" in m for m in msgs), (
+            f"日志未具名坏行: {msgs[:3]!r}")
+E       AssertionError: 日志未具名坏行: ['Failed to deserialize state: Expecting value: line 1 column 1 (char 0)', 'Failed to process execution state: Expecting value: line 1 column 1 (char 0)', 'Failed to list executions: Expecting value: line 1 column 1 (char 0)']
+E       assert False
+E        +  where False = any(<generator object test_corrupt_row_log_searchable_by_key.<locals>.<genexpr> at 0x1209eecf0>)
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:293: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:base.py:255 Failed to deserialize state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:545 Failed to process execution state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:859 Failed to list executions: Expecting value: line 1 column 1 (char 0)
+____________ test_delete_503_persistent_names_row_no_retry_guidance ____________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=50067901f36c40cb888cb6d7ec5f6c38,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_delete_503_persistent_names_row_no_retry_guidance(redis):
+        """端到端：单坏行 → 503 detail 具名坏行 + 持久文案（不再「稍后重试」）；
+        连删两次结果一致（持久，非瞬态抖动）。"""
+        client = _client(redis)
+        _seed_flow(client)
+        _seed_exec(redis, "good-0", FLOW_ID, "completed", BASE)
+        _inject_corrupt_row(redis, "exec-bad", backfill_ready=True)
+    
+        for _ in range(2):
+            r = client.delete(f"/api/flows/{FLOW_ID}/versions/{VER}?force=true",
+                              headers=_headers())
+            assert r.status_code == 503, r.text
+            assert _detail_code(r) == "version_in_use_scan_failed"
+            msg = _detail_message(r)
+>           assert "exec-bad" in msg, f"503 detail 未具名坏行: {msg[:200]!r}"
+E           AssertionError: 503 detail 未具名坏行: '在途执行引用核实失败，拒绝删除（fail-closed）：稍后重试；在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)'
+E           assert 'exec-bad' in '在途执行引用核实失败，拒绝删除（fail-closed）：稍后重试；在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)'
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:311: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:base.py:255 Failed to deserialize state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:545 Failed to process execution state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:859 Failed to list executions: Expecting value: line 1 column 1 (char 0)
+____________________ test_legacy_backfill_corrupt_key_named ____________________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=2996e6d22d9a40a29bec830f4c57e71b,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_legacy_backfill_corrupt_key_named(redis):
+        """回填路径变体：ready 缺失 + 坏存量键 → 异常同样具名坏行。"""
+        rd = redis
+        rd.set(f"{STATE_KEY_PREFIX}legacy-bad", "\x00garbage{")
+    
+        with pytest.raises(VersionInUseScanError) as ei:
+            find_flow_version_active_executions(rd, "default", FLOW_ID, VER)
+>       assert "legacy-bad" in str(ei.value)
+E       AssertionError: assert 'legacy-bad' in '在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)'
+E        +  where '在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)' = str(VersionInUseScanError('在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)'))
+E        +    where VersionInUseScanError('在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)') = <ExceptionInfo VersionInUseScanError('在途执行引用扫描失败（执行索引读取异常），删除守卫无法核实: Expecting value: line 1 column 1 (char 0)') tblen=2>.value
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py:346: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:base.py:255 Failed to deserialize state: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:495 索引回填跳过反序列化失败的状态 plaita:execution:legacy-bad: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:505 索引回填失败（本次列表退化为零更新，待下次重试）: Expecting value: line 1 column 1 (char 0)
+ERROR    plaita:redis.py:859 Failed to list executions: Expecting value: line 1 column 1 (char 0)
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /private/tmp/plaita-b3-r85/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py: 31 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_delete_endpoint_single_pass_and_guard_verdict
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_cap_saturation_fail_closed
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_below_cap_clean_pass
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_delete_503_persistent_names_row_no_retry_guidance
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_transient_scan_error_keeps_retry_guidance
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_legit_empty_index_delete_not_harmed
+  /private/tmp/plaita-b3-r85/plaita-console/backend/services/flow_store.py:676: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_delete_endpoint_single_pass_and_guard_verdict
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_cap_saturation_fail_closed
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_below_cap_clean_pass
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_delete_503_persistent_names_row_no_retry_guidance
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_transient_scan_error_keeps_retry_guidance
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_legit_empty_index_delete_not_harmed
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_scan_single_call_and_o_of_t
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_cap_saturation_fail_closed
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_guard_below_cap_clean_pass
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_strict_scan_exception_names_corrupt_row
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_corrupt_row_log_searchable_by_key
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_delete_503_persistent_names_row_no_retry_guidance
+FAILED plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py::test_legacy_backfill_corrupt_key_named
+7 failed, 4 passed, 44 warnings in 1.59s
+
+--- 实弹剧本（A1 r126 T=1600 原样 + 三盲格，探针 /tmp/r85_followups_proof.py）---
+[pin] plaita.__file__ = /private/tmp/plaita-b3-r85/plaita/__init__.py
+
+===== A126-01: guard scan cost (A1 script, T=1600) =====
+[guard] active=[] load_calls=9 deser_total=14400 max_batch=1600 wall=0.385s
+[single-pass baseline] rows=800 load_calls=1 deser=1600 wall=0.016s
+[ratio] deser 14400/1600=9.0x wall 24.6x
+
+===== A126-02: strict corrupt-row diagnosability =====
+[direct] VersionInUseScanError str_names_exec_bad=False
+[logs] named_state_key=False; sample=['Failed to deserialize state: Expecting value: line 1 column 1 (char 0)', 'Failed to process execution state: Expecting value: line 1 column 1 (char 0)']
+[api] 3x delete -> [(503, 'version_in_use_scan_failed'), (503, 'version_in_use_scan_failed'), (503, 'version_in_use_scan_failed')]
+[api] 503_names_row=False
+[api] retry_copy_still_misleading=True
+[contrast] non-strict list -> 1 rows (bad row invisible)
+[legit-empty] fresh-tenant delete -> 200 (200=无误伤)
+[legacy-backfill] VersionInUseScanError names_key=False; ready_flag_after=0
+PROOF-DONE

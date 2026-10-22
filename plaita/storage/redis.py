@@ -370,6 +370,23 @@ class ExecutionStateLoadError(RuntimeError):
     """
 
 
+class ExecutionStateCorruptError(ExecutionStateLoadError):
+    """执行状态**数据损坏**（键读得到但反序列化失败）——坏行具名。
+
+    与「读不到」（瞬断/超时，本类父 ``ExecutionStateLoadError``）分流：
+    损坏行是持久缺陷，重试无效。异常消息携带 state key + execution_id +
+    原因摘要（类型名 + 清洗后消息，刻意不含行值）——#307 追补
+    A126-02「三盲」的修口：strict 判据面（删除守卫）据此把坏行具名
+    透传到 503 detail 与结构化日志，非 strict 列表路径维持跳过降级
+    （#307 边界不动）。
+    """
+
+
+def _exc_summary(e: BaseException, limit: int = 300) -> str:
+    """异常原因摘要：类型名 + 清洗后消息（截断）——坏行具名用，不含行值。"""
+    return f"{type(e).__name__}: {_scrub_url_text(e)[:limit]}"
+
+
 class FlowDefinitionLoadError(RuntimeError):
     """流程定义**读取失败**（Redis 瞬断/超时或定义 JSON 损坏）。
 
@@ -485,7 +502,10 @@ class RedisExecutionStorage(ExecutionStorage):
                     # 单键不可读（类型不符/瞬断）不得作废整批回填。
                     logger.error("索引回填跳过不可读的状态键 %s: %s", key_str, _scrub_url_text(e))
                     if strict:
-                        raise
+                        raise ExecutionStateLoadError(
+                            f"索引回填遇不可读状态键（strict 判据面拒绝部分索引）: "
+                            f"{key_str}: {_exc_summary(e)}"
+                        ) from e
                     continue
                 if not data:
                     continue
@@ -496,7 +516,10 @@ class RedisExecutionStorage(ExecutionStorage):
                         "索引回填跳过反序列化失败的状态 %s: %s", key_str, _scrub_url_text(e)
                     )
                     if strict:
-                        raise
+                        raise ExecutionStateCorruptError(
+                            f"索引回填遇损坏状态行（strict 判据面拒绝部分索引，重试无效）: "
+                            f"{key_str}: {_exc_summary(e)}"
+                        ) from e
                     continue
                 pipe.zadd(index_key, {execution_id: execution_start_time_score(state_dict)})
             pipe.set(ready_key, "1")
@@ -529,6 +552,9 @@ class RedisExecutionStorage(ExecutionStorage):
 
         ``strict=True``（#307）：反序列化失败改为上抛——坏行可能是那条
         非终态执行，判据面不得在缺行索引上宣称「核实过无引用」。
+        上抛的是具名 ``ExecutionStateCorruptError``（state key +
+        execution_id + 原因摘要；A126-02）——调用方（删除守卫 → 503）
+        与日志据此可直接定位坏行，不再三处全盲。
         """
         if not execution_ids:
             return []
@@ -542,9 +568,23 @@ class RedisExecutionStorage(ExecutionStorage):
                     states.append(ExecutionState.model_validate(self.deserialize_state(data)))
                     continue
                 except Exception as e:
-                    logger.error("Failed to process execution state: %s", _scrub_url_text(e))
+                    # A126-02：日志与异常都具名坏行（state key + execution_id +
+                    # 原因摘要，不含行值）——此前「Failed to process execution
+                    # state」三处（日志/异常/503）全盲，坏行只能整租户盲查。
+                    # （类型名先取好再进 logger：#151 卫生门只放行
+                    # _scrub_url_text 直包的异常名。）
+                    etype = type(e).__name__
+                    state_key = self.get_namespace_key('execution', execution_id)
+                    logger.warning(
+                        "执行状态坏行（反序列化失败）: state_key=%s execution_id=%s error=%s: %s",
+                        state_key, execution_id, etype, _scrub_url_text(e),
+                    )
                     if strict:
-                        raise
+                        raise ExecutionStateCorruptError(
+                            f"执行状态反序列化失败（数据损坏，重试无效）: "
+                            f"state_key={state_key} execution_id={execution_id} "
+                            f"error={_exc_summary(e)}"
+                        ) from e
                     continue
             stale.append(execution_id)
         if stale:
