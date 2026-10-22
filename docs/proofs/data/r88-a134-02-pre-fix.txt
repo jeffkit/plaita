@@ -1,0 +1,257 @@
+FFFFFF......FFF.                                                         [100%]
+=================================== FAILURES ===================================
+______ test_delete_version_in_window_publish_409_row_and_engine_key_kept _______
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=5a61e4e8201347e494208d5892a4b801,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d0ad940>
+
+    def test_delete_version_in_window_publish_409_row_and_engine_key_kept(
+            redis, monkeypatch):
+        """守卫读 draft → 窗内 publish 翻转 → DELETE：具名 409、行保持 published、引擎键在。
+    
+        修前：200，刚发布行被静默删 + 引擎键被 remove_flow_version_from_engine 清掉。
+        """
+        client = _client(redis)
+        _seed(client)
+        fired = _arm_window(monkeypatch, lambda: _window_publish(redis, "1.0.0"))
+    
+        r = client.delete(f"/api/flows/{FLOW}/versions/1.0.0", headers=_headers())
+        assert fired["n"] == 1
+>       assert r.status_code == 409, r.text
+E       AssertionError: {"success":true,"flow_id":"toctou-flow","version":"1.0.0"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a134_02_delete_publish_toctou.py:206: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:kafka_queue_service.py:27 Kafka库未安装，Kafka队列服务将不可用. 请使用 pip install kafka-python 安装
+_________ test_delete_version_in_window_publish_outbox_row_not_purged __________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=a63d31f1bc0e4bfb920c39e455a26aa4,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+outbox_enabled = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10d9fcd60>
+
+    def test_delete_version_in_window_publish_outbox_row_not_purged(
+            redis, outbox_enabled, monkeypatch):
+        """跨 Redis 形态：窗内 publish 写出的 outbox 行不得被删除事务 purge。
+    
+        修前：删除事务 ``_outbox_purge`` 按 scope 清掉 pending 行 → 定义永不到达
+        目标引擎（#304 FlowDefinitionMissingError 族）。修后：409，行保持 pending。
+        """
+        target = FakeRedis(decode_responses=True)
+        client = _client(redis, target_redis=target)
+        _seed(client)
+        assert _outbox_rows() == []
+        _arm_window(monkeypatch, lambda: _window_publish(redis, "1.0.0"))
+    
+        r = client.delete(f"/api/flows/{FLOW}/versions/1.0.0", headers=_headers())
+>       assert r.status_code == 409, r.text
+E       AssertionError: {"success":true,"flow_id":"toctou-flow","version":"1.0.0"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a134_02_delete_publish_toctou.py:229: AssertionError
+_____ test_delete_version_force_in_window_publish_pinned_409_then_retry_ok _____
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=d1f3b5da41be4717ae9961175515c0e6,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10e198b90>
+
+    def test_delete_version_force_in_window_publish_pinned_409_then_retry_ok(
+            redis, monkeypatch):
+        """force 路径同窗核：force 只越 published 状态守卫，不越快照漂移。
+    
+        守卫观察 draft（force 无事可越）→ 窗内 publish → DELETE 钉在 draft 失配
+        → 409（修前：force 掩护下静默删掉 published 行）。重试 force：守卫看到
+        published、显式放行、快照一致 → 200（force 语义守恒）。
+        """
+        client = _client(redis)
+        _seed(client)
+        fired = _arm_window(monkeypatch, lambda: _window_publish(redis, "1.0.0"))
+    
+        r = client.delete(f"/api/flows/{FLOW}/versions/1.0.0?force=true",
+                          headers=_headers())
+        assert fired["n"] == 1
+>       assert r.status_code == 409, r.text
+E       AssertionError: {"success":true,"flow_id":"toctou-flow","version":"1.0.0"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a134_02_delete_publish_toctou.py:253: AssertionError
+____________ test_delete_flow_in_window_publish_409_nothing_deleted ____________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=a64ea83c18ba4b0c9192d38c5de66856,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10e20c7c0>
+
+    def test_delete_flow_in_window_publish_409_nothing_deleted(redis, monkeypatch):
+        """delete_flow 批量 DELETE 同款：窗内 publish 翻转 → 409，flow 记录与版本行全在。"""
+        client = _client(redis)
+        _seed(client)
+        fired = _arm_window(monkeypatch, lambda: _window_publish(redis, "1.0.0"))
+    
+        r = client.delete(f"/api/flows/{FLOW}", headers=_headers())
+        assert fired["n"] == 1
+>       assert r.status_code == 409, r.text
+E       AssertionError: {"success":true,"flow_id":"toctou-flow"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a134_02_delete_publish_toctou.py:277: AssertionError
+________ test_delete_flow_in_window_new_version_published_409_survivor _________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=dca1f33aa80e4b2c98f9d2a3fbc86f87,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10e179370>
+
+    def test_delete_flow_in_window_new_version_published_409_survivor(
+            redis, monkeypatch):
+        """窗内 import 直发链新建 + 发布 1.0.1（守卫从未见过）→ 幸存者复核 409。
+    
+        修前：批量 DELETE 把守卫没扫过的 published 1.0.1 一并静默删掉。修后：
+        事务整体回滚——1.0.0 draft 与 1.0.1 published 都在、flow 记录在。
+        """
+        client = _client(redis)
+        _seed(client)
+        _arm_window(monkeypatch, lambda: _window_create_and_publish(redis, "1.0.1"))
+    
+        r = client.delete(f"/api/flows/{FLOW}", headers=_headers())
+>       assert r.status_code == 409, r.text
+E       AssertionError: {"success":true,"flow_id":"toctou-flow"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a134_02_delete_publish_toctou.py:296: AssertionError
+________ test_delete_flow_force_in_window_outbox_deleting_rows_restored ________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=406ac66414384ada88354f3ef08636db,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+outbox_enabled = None
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10df7b350>
+
+    def test_delete_flow_force_in_window_outbox_deleting_rows_restored(
+            redis, outbox_enabled, monkeypatch):
+        """#303 删除协议 × A134-02：409 回滚时 deleting 行按快照恢复、窗内新行不动。
+    
+        1.0.0 published+delivered、2.0.0 draft；force 删 flow：守卫放行 →
+        deleting_guard 把 1.0.0 行标 deleting → 窗内 publish 2.0.0（新 pending 行）
+        → 逐行 DELETE：1.0.0@published 命中、2.0.0@draft 失配 → 冲突回滚。
+        终态：两版本行都在、1.0.0 outbox 行恢复 delivered、2.0.0 pending 未被
+        purge；「先清后删」已清的目标键由对账 + 投递自愈（#301 方向守恒）。
+        """
+        target = FakeRedis(decode_responses=True)
+        client = _client(redis, target_redis=target)
+        _seed(client, "1.0.0")
+        _publish_api(client, "1.0.0")
+        sessions = flow_store.session_factory()
+        assert engine_outbox.run_delivery_cycle(target, sessions)["delivered"] == 1
+        assert target.exists(_eng_key("1.0.0")) == 1
+        r = client.put(f"/api/flows/{FLOW}/versions/2.0.0",
+                       json={"definition": _definition()}, headers=_headers())
+        assert r.status_code == 200, r.text
+        assert _outbox_rows() == [("1.0.0", engine_outbox.STATUS_DELIVERED)]
+    
+        seen: dict = {}
+    
+        def hook():
+            seen["mid_window"] = _outbox_rows()  # 1.0.0 已标 deleting
+            _window_publish(redis, "2.0.0")
+    
+        _arm_window(monkeypatch, hook)
+        r = client.delete(f"/api/flows/{FLOW}?force=true", headers=_headers())
+>       assert r.status_code == 409, r.text
+E       AssertionError: {"success":true,"flow_id":"toctou-flow"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a134_02_delete_publish_toctou.py:334: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=toctou-flow@1.0.0）——旧 build worker 部署请尽快升级
+WARNING  services.capability_gate:capability_gate.py:200 runtime pool 无能力清单：runtime=python 池内没有任何带 capability_manifest 的 worker，能力门按兜底放行（flow=toctou-flow@1.0.0）——旧 build worker 部署请尽快升级
+_________ test_store_delete_version_expected_status_mismatch_conflict __________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=0454a60f7aa641d9a00f2190f4f89796,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_store_delete_version_expected_status_mismatch_conflict(redis):
+        store = flow_store.get_flow_store()
+        store.create_flow(FLOW, tenant_id=TENANT)
+        store.save_flow_definition(flow_id=FLOW, version="1.0.0",
+                                   definition=_definition(), tenant_id=TENANT)
+        store.publish_version(FLOW, "1.0.0", tenant_id=TENANT)
+        with pytest.raises(flow_store.VersionConflictError) as ei:
+>           store.delete_version(FLOW, "1.0.0", tenant_id=TENANT,
+                                 expected_status="draft")
+E           TypeError: FlowStore.delete_version() got an unexpected keyword argument 'expected_status'
+
+tests/console/test_a134_02_delete_publish_toctou.py:428: TypeError
+_____________ test_store_delete_version_missing_still_lookup_error _____________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=76d20cba376b42efaa2a8bca2c7b5402,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_store_delete_version_missing_still_lookup_error(redis):
+        store = flow_store.get_flow_store()
+        store.create_flow(FLOW, tenant_id=TENANT)
+        with pytest.raises(LookupError):
+>           store.delete_version(FLOW, "0.0.1", tenant_id=TENANT,
+                                 expected_status="draft")
+E           TypeError: FlowStore.delete_version() got an unexpected keyword argument 'expected_status'
+
+tests/console/test_a134_02_delete_publish_toctou.py:442: TypeError
+____________ test_store_delete_flow_pinned_rows_and_survivor_check _____________
+
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=ba548547d1a24b83ab13aaae4e561a01,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_store_delete_flow_pinned_rows_and_survivor_check(redis):
+        store = flow_store.get_flow_store()
+        store.create_flow(FLOW, tenant_id=TENANT)
+        for v in ("1.0.0", "1.1.0"):
+            store.save_flow_definition(flow_id=FLOW, version=v,
+                                       definition=_definition(), tenant_id=TENANT)
+        store.publish_version(FLOW, "1.0.0", tenant_id=TENANT)
+        # 状态失配：1.0.0 观察为 draft
+        with pytest.raises(flow_store.VersionConflictError):
+>           store.delete_flow(FLOW, tenant_id=TENANT,
+                              expected_versions={"1.0.0": "draft", "1.1.0": "draft"})
+E           TypeError: FlowStore.delete_flow() got an unexpected keyword argument 'expected_versions'
+
+tests/console/test_a134_02_delete_publish_toctou.py:455: TypeError
+=============================== warnings summary ===============================
+config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 89 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 19 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:703: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 47 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 14 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:865: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_no_race_force_published_delete_still_200
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_no_race_delete_flow_mixed_statuses_force_200
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_published_without_force_still_409_version_published
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/engine_outbox.py:695: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_delete_version_in_window_publish_409_row_and_engine_key_kept
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_delete_version_in_window_publish_outbox_row_not_purged
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_delete_version_force_in_window_publish_pinned_409_then_retry_ok
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_in_window_publish_409_nothing_deleted
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_in_window_new_version_published_409_survivor
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_store_delete_version_expected_status_mismatch_conflict
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_store_delete_version_missing_still_lookup_error
+FAILED tests/console/test_a134_02_delete_publish_toctou.py::test_store_delete_flow_pinned_rows_and_survivor_check
+9 failed, 7 passed, 175 warnings in 2.19s

@@ -1,0 +1,5 @@
+delete_version/draft→publish 插窗              status=200 code=-                  row=ABSENT    record=in     outbox=[] engkey=0
+delete_version/outbox 启用                     status=200 code=-                  row=ABSENT    record=in     outbox=[] engkey=0
+delete_version/force+draft→publish 插窗        status=200 code=-                  row=ABSENT    record=in     outbox=[] engkey=0
+delete_flow/draft→publish 插窗                 status=200 code=-                  row=ABSENT    record=ABSENT outbox=[] engkey=0
+delete_flow/窗内新建+发布 1.0.1                    status=200 code=-                  row=ABSENT    record=ABSENT outbox=[] engkey=0

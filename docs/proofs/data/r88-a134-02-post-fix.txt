@@ -1,0 +1,41 @@
+................                                                         [100%]
+=============================== warnings summary ===============================
+config.py:18
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 84 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 19 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:763: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 47 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 14 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:925: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_version_in_window_publish_outbox_row_not_purged
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/engine_outbox.py:695: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_no_race_force_published_delete_still_200
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_no_race_delete_flow_mixed_statuses_force_200
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_published_without_force_still_409_version_published
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py::test_delete_flow_force_in_window_outbox_deleting_rows_restored
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/engine_outbox.py:886: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+16 passed, 173 warnings in 1.99s

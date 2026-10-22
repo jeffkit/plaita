@@ -12,7 +12,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
@@ -397,7 +397,10 @@ class FlowStore:
             session.refresh(record)
             return record
 
-    def delete_flow(self, flow_id: str, tenant_id: Optional[str] = None) -> bool:
+    def delete_flow(
+        self, flow_id: str, tenant_id: Optional[str] = None,
+        *, expected_versions: Optional[Mapping[str, str]] = None,
+    ) -> bool:
         """删除 flow 及其全部版本（级联）。不存在抛 LookupError。
 
         #308：版本行级联显式删除（不靠 DB 级 FK 声明）。相邻面裁量：
@@ -405,6 +408,14 @@ class FlowStore:
         schedule 行与 flows 间本无 FK 声明（从未承诺过级联），且集群档
         schedule 在 Redis、生命周期另有闸；收口语义（含触发中/审计面）
         另立单处理（台账 B123-03，P3）。
+
+        A134-02：``expected_versions``（``{version: status}``，调用方删除守卫
+        观察到的版本快照）给出时，版本行改为**逐行条件 DELETE** 钉在该快照
+        上——任一行 rowcount≠1（状态被并发 publish 翻转 / 行已消失）或删后
+        仍有幸存行（守卫没见过的新版本，如窗内 import 直发）→ 抛
+        VersionConflictError（409 语义），事务整体回滚、零删除、outbox 不
+        purge。守卫判据与删行由此等价于同一快照：窗内翻转使删除具名失败，
+        而非静默删掉刚发布版本。``None`` 保留无条件级联（存量直调方）。
         """
         with self._session_local() as session:
             record = session.scalars(
@@ -415,26 +426,75 @@ class FlowStore:
             ).first()
             if record is None:
                 raise LookupError(f"流程不存在: {flow_id}")
+            row_tenant = record.tenant_id or ""
             # #308：显式级联删版本行——级联语义不能只靠 FK ondelete=CASCADE 的
             # DB 级声明（SQLite 默认不强制外键，而默认部署面恰是 SQLite；残留
             # published 版本会让 start 幽灵入队、同 id 重建撞 409）。先删子行
             # 再删父行、同一事务（与 #303 删除协议同事务语义），PG/MySQL 同样
             # 生效，不依赖连接层 PRAGMA 是否到位。
-            session.execute(
-                delete(FlowVersion).where(
-                    FlowVersion.tenant_id == (record.tenant_id or ""),
-                    FlowVersion.flow_id == flow_id,
+            if expected_versions is None:
+                session.execute(
+                    delete(FlowVersion).where(
+                        FlowVersion.tenant_id == row_tenant,
+                        FlowVersion.flow_id == flow_id,
+                    )
                 )
-            )
+            else:
+                self._delete_versions_pinned(
+                    session, flow_id=flow_id, tenant_id=row_tenant,
+                    expected_versions=expected_versions,
+                )
             session.delete(record)
             # #299：级联删版本的同时清掉发布 outbox，防对账重投已删流程。
             # 租户以行内为准（全量视角删除时入参 tenant_id 可能为 None）。
-            _outbox_purge(session, tenant_id=getattr(record, "tenant_id", "") or "",
-                          flow_id=flow_id)
+            _outbox_purge(session, tenant_id=row_tenant, flow_id=flow_id)
             session.flush()
             assert_tenant_generation(session, tenant_id)
             session.commit()
             return True
+
+    def _delete_versions_pinned(
+        self, session: Session, *, flow_id: str, tenant_id: str,
+        expected_versions: Mapping[str, str],
+    ) -> None:
+        """A134-02：按守卫快照逐行条件删除 + 幸存者复核（事务内，失败即抛）。"""
+        for ver, status in expected_versions.items():
+            result = session.execute(
+                delete(FlowVersion).where(
+                    FlowVersion.tenant_id == tenant_id,
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == ver,
+                    FlowVersion.status == status,
+                )
+            )
+            if result.rowcount == 1:
+                continue
+            current = session.scalars(
+                select(FlowVersion.status).where(
+                    FlowVersion.tenant_id == tenant_id,
+                    FlowVersion.flow_id == flow_id,
+                    FlowVersion.version == ver,
+                )
+            ).first()
+            raise VersionConflictError(
+                f"版本 {flow_id}@{ver} 在删除前已被并发修改"
+                f"（删除快照 {status}，当前 {current or '已消失'}），"
+                "请刷新后重试"
+                + ("；如确需删除已发布版本请显式传 force=true"
+                   if current == "published" else "")
+            )
+        survivors = session.scalars(
+            select(FlowVersion.version).where(
+                FlowVersion.tenant_id == tenant_id,
+                FlowVersion.flow_id == flow_id,
+            )
+        ).all()
+        if survivors:
+            raise VersionConflictError(
+                f"流程 {flow_id} 在删除前新增了版本 "
+                + "、".join(sorted(survivors))
+                + "（不在删除快照内），请刷新后重试"
+            )
 
     # ---- version ----
 
@@ -949,8 +1009,18 @@ class FlowStore:
         return row_[0]
 
     def delete_version(
-        self, flow_id: str, version: str, tenant_id: Optional[str] = None
+        self, flow_id: str, version: str, tenant_id: Optional[str] = None,
+        *, expected_status: Optional[str] = None,
     ) -> bool:
+        """删除单个版本。不存在抛 LookupError。
+
+        A134-02：``expected_status``（调用方删除守卫观察到的状态）给出时，
+        删行改为**条件 DELETE**（谓词含 ``status = :expected``）——守卫判据读
+        与删行之间被并发 publish 翻转（draft→published）即 rowcount=0 → 抛
+        VersionConflictError（409 语义），事务回滚、刚写出的 outbox 行不被
+        purge；与 A2R54-02 对 save/publish 面的「谓词 + rowcount→409」药方
+        同款。``None`` 保留按主键无条件删除（存量直调方）。
+        """
         with self._session_local() as session:
             row = session.scalars(
                 select(FlowVersion).where(
@@ -961,9 +1031,38 @@ class FlowStore:
             ).first()
             if row is None:
                 raise LookupError(f"版本不存在: {flow_id}@{version}")
-            session.delete(row)
+            row_tenant = row.tenant_id or ""
+            if expected_status is None:
+                session.delete(row)
+            else:
+                result = session.execute(
+                    delete(FlowVersion).where(
+                        FlowVersion.tenant_id == row_tenant,
+                        FlowVersion.flow_id == flow_id,
+                        FlowVersion.version == version,
+                        FlowVersion.status == expected_status,
+                    )
+                )
+                if result.rowcount != 1:
+                    current = session.scalars(
+                        select(FlowVersion.status).where(
+                            FlowVersion.tenant_id == row_tenant,
+                            FlowVersion.flow_id == flow_id,
+                            FlowVersion.version == version,
+                        )
+                    ).first()
+                    raise VersionConflictError(
+                        f"版本 {flow_id}@{version} 在删除前已被并发修改"
+                        f"（删除快照 {expected_status}，当前 {current or '已消失'}），"
+                        "请刷新后重试"
+                        + ("；如确需删除已发布版本请显式传 force=true"
+                           if current == "published" else ""),
+                        latest_updated_at=self._stored_updated_at(
+                            session, flow_id, version, tenant_id
+                        ),
+                    )
             # #299：版本删除时同步清 outbox，防对账把已删版本复活进目标 Redis。
-            _outbox_purge(session, tenant_id=getattr(row, "tenant_id", "") or "",
+            _outbox_purge(session, tenant_id=row_tenant,
                           flow_id=flow_id, version=version)
             session.flush()
             assert_tenant_generation(session, tenant_id)
