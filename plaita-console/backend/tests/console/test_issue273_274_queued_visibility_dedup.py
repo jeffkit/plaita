@@ -204,7 +204,7 @@ class TestIssue273QueuedVisibility:
         client = _client(env)
         publish_tenant_quota(env, "default", 5)
 
-        def broken_enqueue(message, redis):
+        def broken_enqueue(message, redis, **kwargs):
             raise ConnectionError("redis down")
 
         monkeypatch.setattr(executions_api, "_enqueue", broken_enqueue)

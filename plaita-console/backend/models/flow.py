@@ -119,6 +119,10 @@ class FlowVersion(Base):
     status = Column(String(16), nullable=False, default="draft")  # draft | published
     definition = Column(Text, nullable=False, default="")
     layout = Column(Text, nullable=False, default="")
+    # plaita#300：目标 runtime pool（go / python）。console 按 runtime 把
+    # start/resume 消息路由到对应队列，publish/start 按池内 worker 能力清单
+    # 做节点支持门。存量版本经迁移补 "python"（历史队列语义即 Python worker）。
+    runtime = Column(String(16), nullable=False, server_default="python", default="python")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     published_at = Column(DateTime, nullable=True)
     created_by = Column(String(128), nullable=False, default="")

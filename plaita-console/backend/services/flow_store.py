@@ -177,6 +177,8 @@ class FlowVersionOut(BaseModel):
     updated_at: Optional[datetime] = None
     # A2R24-07：实体租户（平台全量视角也能说清版本属于谁；导出包用它填源租户）
     tenant_id: str = ""
+    # plaita#300：目标 runtime pool（go/python；默认 python = 历史队列语义）
+    runtime: str = "python"
 
 
 class SaveFlowDefinitionResult(BaseModel):
@@ -396,8 +398,14 @@ class FlowStore:
         base_updated_at: Optional[str] = None,
         force: bool = False,
         allocate_version: bool = False,
+        runtime: Optional[str] = None,
     ) -> SaveFlowDefinitionResult:
         """保存（草稿）版本。已存在的 published 版本不可覆盖。
+
+        ``runtime``（plaita#300）：目标 runtime pool（go/python）。``None`` =
+        不改（新建行走列默认 ``python``，更新既有草稿时保留原值）；显式给出
+        时经 :func:`runtime_pools.normalize_runtime` 校验（非法值 ValueError，
+        API 层映射 422）。
 
         C5-1 乐观并发控制：
         - ``base_updated_at``：调用方所基于版本的 updated_at（ISO 串，来自
@@ -410,6 +418,12 @@ class FlowStore:
           实际版本号经返回值 ``version`` 通告。
         """
         self.ensure_flow(flow_id, tenant_id=tenant_id)
+        if runtime is not None:
+            try:
+                from .runtime_pools import normalize_runtime
+            except ImportError:  # 平铺布局（cwd=backend）运行时
+                from runtime_pools import normalize_runtime  # type: ignore
+            runtime = normalize_runtime(runtime)
         attempts = 3 if allocate_version else 1
         last_exc: Optional[IntegrityError] = None
         for attempt in range(attempts):
@@ -425,6 +439,7 @@ class FlowStore:
                     base_updated_at=base_updated_at,
                     force=force,
                     allocate_version=allocate_version,
+                    runtime=runtime,
                 )
             except IntegrityError as e:
                 # allocate_version 下并发插入撞了唯一约束：重试重新分配版本号
@@ -444,6 +459,7 @@ class FlowStore:
         base_updated_at: Optional[str],
         force: bool,
         allocate_version: bool,
+        runtime: Optional[str] = None,
     ) -> SaveFlowDefinitionResult:
         with self._session_local() as session:
             if allocate_version:
@@ -482,6 +498,7 @@ class FlowStore:
                     status=status,
                     base_updated_at=base_updated_at,
                     force=force,
+                    runtime=runtime,
                 )
                 if not cas_ok:
                     stored = self._stored_updated_at(
@@ -506,6 +523,7 @@ class FlowStore:
                 definition=definition,
                 layout=layout,
                 created_by=created_by,
+                runtime=runtime or "python",
             )
             session.add(row)
             session.flush()
@@ -526,6 +544,7 @@ class FlowStore:
         status: str,
         base_updated_at: Optional[str],
         force: bool,
+        runtime: Optional[str] = None,
     ) -> bool:
         """单条条件 UPDATE 原子完成「基准比对 + 草稿写入 + 基准前进」（#101）。
 
@@ -535,7 +554,9 @@ class FlowStore:
         - ``flow_versions.updated_at`` 列不存在（旧库）：无法 CAS，退化为
           无条件更新（保留历史行为），但 warning 让「无并发保护」可见；
         - ``base_updated_at`` 为 None（存量调用方，未带基准）或 ``force=True``：
-          按设计跳过比对，无条件更新（原行为不变）。
+          按设计跳过比对，无条件更新（原行为不变）；
+        - ``runtime``（#300）为 None 时不碰该列（保留草稿原值）；显式给出时
+          随本次保存更新。
         """
         params: Dict[str, Any] = {
             "definition": definition,
@@ -546,9 +567,12 @@ class FlowStore:
             "fid": flow_id,
             "ver": version,
         }
+        runtime_sql = ", runtime = :runtime" if runtime is not None else ""
+        if runtime is not None:
+            params["runtime"] = runtime
         sql = (
             "UPDATE flow_versions SET definition = :definition, layout = :layout, "
-            "status = :status, updated_at = :ts "
+            f"status = :status{runtime_sql}, updated_at = :ts "
             "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver"
         )
         if not self._updated_at_supported(session):
@@ -782,6 +806,8 @@ class FlowStore:
             # ISO 串 → datetime（解析失败按 None，保持兼容）
             updated_at=datetime.fromisoformat(updated_at) if updated_at else None,
             tenant_id=getattr(row, "tenant_id", "") or "",
+            # 旧库缺列（迁移未跑）时按默认池读，不炸读面（写路径有迁移闸）
+            runtime=getattr(row, "runtime", None) or "python",
         )
 
     # ---- node descriptors ----
