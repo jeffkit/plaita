@@ -42,9 +42,9 @@ Authorization: 会话 cookie 或 X-Admin-API-Key（租户作用域照 tenant_sco
 
 | type | 含义 | 常见 code |
 |------|------|-----------|
-| `node` | 节点级结构 | `graph.no_start` / `graph.orphan` / `graph.cycle` / `graph.dead_end_non_end` / `node.duplicate_id` / `node.switch_no_default` / `reference_target_missing` |
+| `node` | 节点级结构 | `graph.no_start` / `graph.orphan` / `graph.cycle` / `graph.dead_end_non_end` / `node.duplicate_id` / `node.switch_no_default` / `graph.malformed_node`（#309：缺形节点具名报错，零报错剔除已废除） / `reference_target_missing` / `reference_target_unspecified`（#309：reference 既无 flow_id 也无 childFlow）/ `reference_unexecutable_on_runtime`(warning，#309：python 池对 reference 零可执行形状，runtime 请指定 go) |
 | `field` | 字段 schema（与保存/发布同一实现） | `invalid_definition` / `node_schema` / `node_validate` |
-| `edge` | 连线语义 | `edge.unknown_target` / `edge.handle_not_a_branch` / `edge.if_branch_missing` / `edge.ambiguous_multiple` |
+| `edge` | 连线语义 | `edge.unknown_target` / `edge.handle_not_a_branch` / `edge.if_branch_missing` / `edge.ambiguous_multiple`（#309：容器展开态子节点之间的连线不报——已双写进 owner.childFlow，折叠不消费；子节点与其他端点混连仍报） |
 | `capability` | 能力门（#300 同一实现） | `capability.unsupported_node_type` / `capability.pool_manifest_missing`(warning) |
 
 `severity`：`error` 计入 invalid（422）；`warning` 不阻断（ir 规则告警、

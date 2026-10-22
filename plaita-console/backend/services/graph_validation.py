@@ -14,8 +14,12 @@ GraphDTO 是 plaita-console 前端 ``components/flow`` 的 @xyflow/react 编辑�
           "id": "check",               // 画布节点 id = Flow 节点 id
           "type": "plaitaNode",        // xyflow 渲染类型，恒为 plaitaNode
           "position": {"x": 0, "y": 0},// 画布坐标，validate 不消费
-          "parentId": "host",          // 容器展开态子节点标记（有则跳过：
-                                       //   子节点已双写进 owner 的 childFlow）
+          "parentId": "host",          // 容器展开态子节点标记（与
+                                       //   data.isContainerChild 双标记同在时
+                                       //   跳过：子节点已双写进 owner 的
+                                       //   childFlow；半标/宿主缺失由
+                                       //   shape_errors 报 graph.malformed_node
+                                       //   ——#309 零报错剔除不可保留）
           "data": {
             "type": "if",              // plaita 节点类型（start/end/if/switch/...）
             "name": "检查",            // 展示名（可省）
@@ -124,7 +128,11 @@ def _err(type_: str, code: str, message: str, *, node_id: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 def _top_level_nodes(graph: Any) -> List[Dict[str, Any]]:
-    """画布顶层节点（跳过容器展开态子节点——已双写回 owner 的 childFlow）。"""
+    """画布顶层节点（跳过容器展开态子节点——已双写回 owner 的 childFlow）。
+
+    对形状不合法的条目按「缺失」跳过（折叠不抛）；剔除是否合法由
+    :func:`shape_errors` 具名裁决（#309：非法剔除 → error 级，保存被拦）。
+    """
     nodes: List[Dict[str, Any]] = []
     for n in graph.get("nodes") or []:
         if not isinstance(n, dict):
@@ -140,10 +148,101 @@ def _top_level_nodes(graph: Any) -> List[Dict[str, Any]]:
     return nodes
 
 
+def _is_container_child(n: Dict[str, Any], data: Dict[str, Any]) -> bool:
+    """容器子节点标记（宽容读两层：编辑器产 data 层，手造 DTO 可能放节点层）。"""
+    return bool(data.get("isContainerChild") or n.get("isContainerChild"))
+
+
+def _container_child_ids(graph: Dict[str, Any]) -> set:
+    """合法展开态容器子节点 id 集（parentId + isContainerChild 双标记）。
+
+    与 flowConverter ``jsonToGraph`` 的序列化对称：编辑器产出的子节点两者
+    恒同在（data 层 isContainerChild + ownerId）；折叠不消费这类节点的
+    连线（子流程拓扑已双写进 owner 的 childFlow）。
+    """
+    ids: set = set()
+    for n in graph.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        data = n.get("data")
+        if not isinstance(data, dict):
+            continue
+        nid = n.get("id")
+        if (isinstance(nid, str) and nid and n.get("parentId")
+                and _is_container_child(n, data)):
+            ids.add(nid)
+    return ids
+
+
+def shape_errors(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """GraphDTO 节点形状校验——零报错剔除的正面（#309）。
+
+    ``_top_level_nodes``/``graph_to_definition`` 对形状不合法的节点按
+    「缺失」折叠（不抛）；历史上这份剔除零报错——孤立缺形节点 valid=true、
+    照此保存即无声消失。这里逐个具名：凡不是「合法容器子节点」的剔除，
+    一律 ``code=graph.malformed_node``、severity=error → 422，保存被拦。
+
+    合法容器子节点（parentId + isContainerChild 双标记、宿主在图中）不报：
+    已双写进 owner 的 childFlow，折叠跳过是设计语义（与 flowToJson L54 对齐）。
+    """
+    errors: List[Dict[str, Any]] = []
+    nodes = graph.get("nodes") or []
+    known_ids = {n.get("id") for n in nodes
+                 if isinstance(n, dict) and isinstance(n.get("id"), str)}
+    for idx, n in enumerate(nodes):
+        if not isinstance(n, dict):
+            errors.append(_err(
+                "node", "graph.malformed_node",
+                f"nodes[{idx}] 不是对象（xyflow 节点应为 {{id, type, position, "
+                "data}} 形状）；折叠将剔除该条目，照此保存即丢失",
+            ))
+            continue
+        nid = n.get("id") if isinstance(n.get("id"), str) else None
+        where = f"节点 {nid!r}" if nid else f"nodes[{idx}]"
+        data = n.get("data")
+        if not isinstance(data, dict):
+            errors.append(_err(
+                "node", "graph.malformed_node",
+                f"{where} 缺少 data 对象（无 type/fields 可折叠）；"
+                "折叠将剔除该节点，照此保存即丢失",
+                node_id=nid, field="data",
+            ))
+            continue
+        parent = n.get("parentId")
+        is_child = _is_container_child(n, data)
+        if parent and is_child:
+            if parent not in known_ids:
+                errors.append(_err(
+                    "node", "graph.malformed_node",
+                    f"{where} 的容器宿主 {parent!r} 不在图中（陈旧 ownerId）；"
+                    "折叠找不到双写目标，照此保存即丢失",
+                    node_id=nid, field="parentId",
+                ))
+            continue
+        if parent and not is_child:
+            errors.append(_err(
+                "node", "graph.malformed_node",
+                f"{where} 有 parentId {parent!r} 但缺 isContainerChild 标记"
+                "（编辑器产出的展开态子节点两者恒同在）；折叠按子节点剔除，"
+                "照此保存即丢失",
+                node_id=nid, field="isContainerChild",
+            ))
+            continue
+        if is_child and not parent:
+            errors.append(_err(
+                "node", "graph.malformed_node",
+                f"{where} 的 isContainerChild 为真但无 parentId"
+                "（找不到折叠宿主）；折叠将剔除该节点，照此保存即丢失",
+                node_id=nid, field="parentId",
+            ))
+    return errors
+
+
 def graph_to_definition(graph: Dict[str, Any]) -> Dict[str, Any]:
     """GraphDTO → Flow 定义 dict（flowToJson 折叠规则的服务端镜像）。
 
-    形状坏的节点/边按「缺失」处理（不抛）——结构问题由 structure/edge 校验
+    形状坏的节点/边按「缺失」处理（不抛）——是否合法由 :func:`shape_errors`
+    裁决（#309：非法剔除 → error 级 422），连线语义由 :func:`edge_errors`
     报告，这里只负责尽力转换。
     """
     out_nodes: List[Dict[str, Any]] = []
@@ -485,25 +584,42 @@ def edge_errors(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
     折叠语义以 ``flowToJson`` 为契约：if 节点任何非 ``false`` handle 都折进
     ``next``（last-wins）、线性节点只取第一条出边——同组多条边 = 后者静默
     覆盖/丢失，这里前置报 error；end 的出边被引擎整体忽略 → warning。
+
+    容器展开态子节点之间的连线（#309）：子流程拓扑已双写进 owner 的
+    childFlow，折叠只匹配顶层 source、不消费子边（flowConverter
+    ``jsonToGraph`` 把子边推进同一 edges 数组——编辑器自身可产生的形态），
+    不予拒绝。子节点与其余端点混连仍报：折叠要么丢边（child 出边）要么
+    产出悬空 next（指入 child 的 target），都是运行期失败面。
     """
     errors: List[Dict[str, Any]] = []
     top = _top_level_nodes(graph)
     top_ids = {n.get("id") for n in top if isinstance(n.get("id"), str)}
+    child_ids = _container_child_ids(graph)
     node_by_id = {n.get("id"): n for n in top if isinstance(n.get("id"), str)}
     edges = [e for e in graph.get("edges") or [] if isinstance(e, dict)]
 
     for e in edges:
         src, dst = e.get("source"), e.get("target")
+        if src in child_ids and dst in child_ids:
+            continue  # 容器内部连线：已双写进 owner.childFlow，折叠不消费
         if src not in top_ids:
             errors.append(_err("edge", "edge.unknown_source",
                                f"连线 {e.get('id') or ''} 的 source {src!r} 不是顶层节点 id"
                                .strip()))
             continue
         if dst not in top_ids:
-            errors.append(_err("edge", "edge.unknown_target",
-                               f"连线 {e.get('id') or ''} 的 target {dst!r} 不存在"
-                               "（悬空连线，运行期将 NodeNotFoundError）",
-                               node_id=src, field="next"))
+            if dst in child_ids:
+                errors.append(_err(
+                    "edge", "edge.unknown_target",
+                    f"连线 {e.get('id') or ''} 的 target {dst!r} 是容器展开态"
+                    "子节点：折叠后将产生悬空 next（运行期将 NodeNotFoundError）；"
+                    "请连接容器节点本身",
+                    node_id=src, field="next"))
+            else:
+                errors.append(_err("edge", "edge.unknown_target",
+                                   f"连线 {e.get('id') or ''} 的 target {dst!r} 不存在"
+                                   "（悬空连线，运行期将 NodeNotFoundError）",
+                                   node_id=src, field="next"))
 
     out_by_src: Dict[str, List[Dict[str, Any]]] = {}
     for e in edges:
@@ -754,16 +870,32 @@ def _pool_has_no_manifest(runtime: str, redis: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 引用目标的多租户存在性（隔离负控）
+# 引用目标的多租户存在性与形状×池一致性（隔离负控 + #309/A2R51-01）
 # ---------------------------------------------------------------------------
 
-def reference_errors(definition: Dict[str, Any], store: Any,
-                     tenant_id: Optional[str]) -> List[Dict[str, Any]]:
-    """reference 节点的 flow_id 必须在**本租户**可解析。
+#: reference 节点当前**零可执行形状**的 runtime 池（A2R51-01）：python 引擎
+#: 全仓无按 node.flow_id 注入 child_flow 的调度器（named-ref 运行期
+#: plaita/node/child.py arun assert 必死），ReferenceFlow.setup_child_flow
+#: （child.py）又覆写父类丢失 inline childFlow 解析——manifest 的类型级
+#: 条目对 python 是死条目；go 池已转正 reference（plaita-go ir.go:99）。
+#: 引擎补注入器或 manifest 摘除死条目（台账方向②③）落地后同步摘除本表。
+_REFERENCE_DEAD_RUNTIMES = frozenset({"python"})
 
-    不区分「不存在」与「存在但属其他租户」（避免跨租户存在性探测）；引用
-    版本不做校验（版本可在保存/发布时点再落定）。跨定义追引用是 Phase 1
-    的诚实边界：只查存在性，不递归被引用流程的内容。
+
+def reference_errors(definition: Dict[str, Any], store: Any,
+                     tenant_id: Optional[str],
+                     runtime: Optional[str] = None) -> List[Dict[str, Any]]:
+    """reference 节点的目标可解析性（本租户）与形状×池一致性。
+
+    - 既无 flow_id 也无 childFlow → ``reference_target_unspecified``（error）：
+      任何 runtime 都无法解析引用目标（schema 对 reference 豁免 childFlow
+      检查、flow_id Optional——声称的字段校验兜底层不存在，validate 必须自报）；
+    - 目标池对 reference 零可执行形状 → ``reference_unexecutable_on_runtime``
+      （warning，可观测不阻断——台账方向①验收格；validate 通过 ≠ 可在该池
+      运行，runtime 请指定 go）；
+    - 不区分「不存在」与「存在但属其他租户」（避免跨租户存在性探测）；引用
+      版本不做校验（版本可在保存/发布时点再落定）。跨定义追引用是 Phase 1
+      的诚实边界：只查存在性，不递归被引用流程的内容。
     """
     if store is None:
         return []
@@ -776,7 +908,14 @@ def reference_errors(definition: Dict[str, Any], store: Any,
         if flow_id is None:
             flow_id = node.get("flowID")
         if not isinstance(flow_id, str) or not flow_id:
-            continue  # 缺 flow_id 交字段 schema 校验报
+            if not (node.get("childFlow") or node.get("child_flow")):
+                errors.append(_err(
+                    "node", "reference_target_unspecified",
+                    f"reference 节点 {nid!r} 既无 flow_id 也无 childFlow："
+                    "任何 runtime 都无法解析引用目标（运行期必死）",
+                    node_id=nid, field="flow_id",
+                ))
+            continue
         try:
             exists = store.get_flow_record(flow_id, tenant_id=tenant_id) is not None
         except Exception:  # noqa: BLE001 — 存储不可达时不误报引用错误
@@ -787,6 +926,15 @@ def reference_errors(definition: Dict[str, Any], store: Any,
                 f"reference 节点 {nid!r} 引用的流程 {flow_id!r} 在当前租户不存在"
                 "或不可见（不跨租户解析引用）",
                 node_id=nid, field="flow_id",
+            ))
+        if runtime in _REFERENCE_DEAD_RUNTIMES:
+            errors.append(_err(
+                "node", "reference_unexecutable_on_runtime",
+                f"reference 节点 {nid!r}：runtime {runtime!r} 池对 reference 零"
+                "可执行形状（named-ref 无 flow_id 注入器、inline childFlow 被 "
+                "setup_child_flow 覆写丢弃）；请将 runtime 指定为 go 或改用显式"
+                "子流程节点——通过 validate 不代表可在该池运行",
+                node_id=nid, severity=SEVERITY_WARNING,
             ))
     return errors
 
@@ -822,11 +970,12 @@ def validate_graph(graph: Any, *, runtime: str, redis: Any,
 
     definition = graph_to_definition(graph)
     errors: List[Dict[str, Any]] = []
+    errors.extend(shape_errors(graph))
     errors.extend(structure_errors(definition))
     errors.extend(edge_errors(graph))
     errors.extend(field_errors(definition))
     errors.extend(capability_errors(definition, runtime, redis))
-    errors.extend(reference_errors(definition, store, tenant_id))
+    errors.extend(reference_errors(definition, store, tenant_id, runtime=runtime))
     valid = not any(e.get("severity") == SEVERITY_ERROR for e in errors)
     return {"valid": valid, "errors": errors, "definition": definition}
 
@@ -839,6 +988,7 @@ __all__ = [
     "field_errors",
     "graph_to_definition",
     "reference_errors",
+    "shape_errors",
     "structure_errors",
     "validate_graph",
 ]

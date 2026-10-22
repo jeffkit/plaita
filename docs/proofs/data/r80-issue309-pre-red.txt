@@ -1,0 +1,17 @@
+== r80 #309 负控 pre（d3d3c12 基线 worktree 装终版夹具测试，未修复代码，2026-10-22）==
+-- 309 新文件 16 用例 + #305 矩阵 4 行；14F/6P（6P=4 对照格〔orphan/collapsed/child→top/save 不对称〕+2 断言不存在物的范围控〔inline 非unspecified/go 无 warning〕）--
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestMalformedNodeShapeErrors::test_missing_data_key_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestMalformedNodeShapeErrors::test_data_none_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestMalformedNodeShapeErrors::test_container_child_without_parent_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestMalformedNodeShapeErrors::test_parent_without_child_marker_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestMalformedNodeShapeErrors::test_non_dict_node_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestMalformedNodeShapeErrors::test_child_owner_missing_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestExpandedContainerChildEdges::test_expanded_container_graph_valid
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestExpandedContainerChildEdges::test_edge_into_container_child_rejected
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestReferenceShapeRuntimeConsistency::test_reference_without_any_target_422
+FAILED tests/console/test_issue309_graph_validate_hardening.py::TestReferenceShapeRuntimeConsistency::test_named_reference_python_pool_warning
+FAILED tests/console/test_issue305_graph_validate.py::TestConsistencyMatrixIssue309::test_row_malformed_node_loss_alignment
+FAILED tests/console/test_issue305_graph_validate.py::TestConsistencyMatrixIssue309::test_row_expanded_container_save_publish
+FAILED tests/console/test_issue305_graph_validate.py::TestConsistencyMatrixIssue309::test_row_reference_targetless_python
+FAILED tests/console/test_issue305_graph_validate.py::TestConsistencyMatrixIssue309::test_row_reference_named_python_warning_observable
+14 failed, 6 passed, 54 warnings in 1.97s

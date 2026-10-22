@@ -1,0 +1,31 @@
+== r80 #309 post-green（修复后同测试集 + 305 全文件，2026-10-22）==
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+59 passed, 235 warnings in 4.29s
+
+== r124 探针复跑（修复后，runtime=default）==
+[RED-1 missing-data node] valid=False errors=[["node", "graph.malformed_node", "ghost"]]
+[RED-1 missing-data node] definition.nodes=['e', 's']
+[RED-2 data=None + orphan parentId] valid=False errors=[["node", "graph.malformed_node", "ghost2"], ["node", "graph.malformed_node", "ghost3"]]
+[RED-2 data=None + orphan parentId] definition.nodes=['e', 's']
+[RED-3 isContainerChild w/o parentId] valid=False errors=[["node", "graph.malformed_node", "ghost4"]]
+[RED-3 isContainerChild w/o parentId] definition.nodes=['e', 's']
+[GREEN-1 well-formed isolated node] valid=False errors=[["node", "graph.orphan", "lonely"]]
+[GREEN-1 well-formed isolated node] definition.nodes=['e', 'lonely', 's']
+[RED-4 expanded-container child edges] valid=True errors=[]
+[RED-4 expanded-container child edges] definition.nodes=['box', 'e', 's']
+[GREEN-2 collapsed container] valid=True errors=[]
+[GREEN-2 collapsed container] definition.nodes=['box', 'e', 's']
+==== SUMMARY ====
+RED1_valid = False
+RED1_ghost_in_def = False
+RED1_ghost_mentioned = True
+RED2_valid = False
+RED2_mentioned = True
+RED3_valid = False
+RED3_mentioned = True
+GREEN1_orphan_reported = True
+GREEN1_valid = False
+RED4_valid = True
+RED4_edge_errors = []
+GREEN2_valid = True

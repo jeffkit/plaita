@@ -816,6 +816,120 @@ class TestConsistencyMatrix:
         assert pub.status_code == 200, pub.text  # #300 fail-open 同判
 
 
+class TestConsistencyMatrixIssue309:
+    """#309 追加行：缺形图 / 展开容器 / reference 组合。
+
+    - 缺形图：validate 422（graph.malformed_node）⇄ 折叠定义 save+publish
+      200 但节点已丢失——「同因」= 丢失本身，validate 在保存前拦住。
+    - 展开容器：validate 200 ⇄ save+publish 200（V⇒P，折叠语义守恒）。
+    - reference 组合：无目标形状 validate 422 而 save/publish 仍 200（不对称，
+      运行期必死）；named-ref@python validate 200（valid=true）但必带
+      reference_unexecutable_on_runtime warning（python 池零可执行形状，
+      A2R51-01 方向①）。
+    """
+
+    def _ghost_graph(self):
+        g = _plain_graph()
+        g["nodes"].append(
+            {"id": "ghost", "type": "plaitaNode", "position": {"x": 2, "y": 0}})
+        return g
+
+    def _expanded_container_graph(self):
+        box = _node("box", "loop", {
+            "over": "$INPUT.items",
+            "childFlow": {
+                "flow_id": "child",
+                "nodes": [
+                    {"type": "start", "id": "c1", "next": "c2"},
+                    {"type": "end", "id": "c2", "output": "$INPUT",
+                     "resultType": "success"},
+                ],
+            },
+        })
+        children = []
+        for cid, ctype in (("c1", "start"), ("c2", "end")):
+            n = _node(cid, ctype)
+            # flowConverter jsonToGraph 形状：标记在 data 层（非 fields）
+            n["parentId"] = "box"
+            n["extent"] = "parent"
+            n["data"]["isContainerChild"] = True
+            n["data"]["ownerId"] = "box"
+            children.append(n)
+        return _graph(
+            [_node("s", "start"),
+             _node("e", "end", {"output": "$INPUT", "resultType": "success"})]
+            + [box] + children,
+            [_edge("s", "box"), _edge("box", "e"), _edge("c1", "c2")],
+        )
+
+    def _reference_graph(self, fields):
+        return _graph(
+            [_node("s", "start"),
+             _node("ref", "reference", fields),
+             _node("e", "end", {"output": "$INPUT", "resultType": "success"})],
+            [_edge("s", "ref"), _edge("ref", "e")],
+        )
+
+    def test_row_malformed_node_loss_alignment(self, redis):
+        client = _client(redis)
+        resp = _validate(client, self._ghost_graph(), runtime="python")
+        assert resp.status_code == 422, resp.text
+        assert "graph.malformed_node" in _error_codes(resp)
+        definition = resp.json()["detail"]["definition"]
+        # 同因实证：折叠定义已不含 ghost（validate 拒的原因就是保存即丢）
+        assert "ghost" not in [n.get("id") for n in definition["nodes"]]
+        flow_store.get_flow_store().create_flow("m9-ghost", tenant_id="default")
+        save = _save(client, "m9-ghost", definition, runtime="python")
+        assert save.status_code == 200, save.text
+        pub = _publish(client, "m9-ghost")
+        assert pub.status_code == 200, pub.text
+
+    def test_row_expanded_container_save_publish(self, redis):
+        client = _client(redis)
+        resp = _validate(client, self._expanded_container_graph(),
+                         runtime="python")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["valid"] is True, resp.text
+        definition = resp.json()["definition"]
+        # 子节点已折叠进 owner.childFlow
+        box = next(n for n in definition["nodes"] if n["id"] == "box")
+        assert "childFlow" in box
+        flow_store.get_flow_store().create_flow("m10-expanded", tenant_id="default")
+        save = _save(client, "m10-expanded", definition, runtime="python")
+        assert save.status_code == 200, save.text
+        pub = _publish(client, "m10-expanded")
+        assert pub.status_code == 200, pub.text
+
+    def test_row_reference_targetless_python(self, redis):
+        client = _client(redis)
+        resp = _validate(client, self._reference_graph({}), runtime="python")
+        assert resp.status_code == 422, resp.text
+        assert "reference_target_unspecified" in _error_codes(resp)
+        definition = resp.json()["detail"]["definition"]
+        flow_store.get_flow_store().create_flow("m11-ref-none", tenant_id="default")
+        save = _save(client, "m11-ref-none", definition, runtime="python")
+        assert save.status_code == 200, save.text  # 不对称：save 面方向②③收敛
+        pub = _publish(client, "m11-ref-none")
+        assert pub.status_code == 200, pub.text
+
+    def test_row_reference_named_python_warning_observable(self, redis):
+        flow_store.get_flow_store().create_flow("lib-flow", tenant_id="default")
+        client = _client(redis)
+        resp = _validate(client, self._reference_graph({"flow_id": "lib-flow"}),
+                         runtime="python")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["valid"] is True
+        warnings = [e for e in resp.json()["errors"]
+                    if e["code"] == "reference_unexecutable_on_runtime"]
+        assert warnings and warnings[0]["severity"] == "warning"
+        definition = resp.json()["definition"]
+        flow_store.get_flow_store().create_flow("m12-ref-named", tenant_id="default")
+        save = _save(client, "m12-ref-named", definition, runtime="python")
+        assert save.status_code == 200, save.text
+        pub = _publish(client, "m12-ref-named")
+        assert pub.status_code == 200, pub.text
+
+
 # ---------------------------------------------------------------------------
 # 4) 多租户隔离
 # ---------------------------------------------------------------------------
