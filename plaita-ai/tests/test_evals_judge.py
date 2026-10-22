@@ -542,3 +542,31 @@ def test_run_loop_survives_an_evaluate_crash(tmp_path, monkeypatch, caplog):
         assert "RecursionError" in it["reason"]
     assert "RecursionError" in caplog.text
     assert "crashed" in caplog.text
+
+
+# -- 输入侧：judge 请求构造（A2R46-01）-------------------------------------------
+#
+# r73 守了回复解析侧；输入侧的另一半在请求构造：output 由候选 flow 自控，
+# 深嵌套结构让 json.dumps(output) 抛 RecursionError——请求根本没发出去、
+# 不存在任何 verdict，必须与坏回复同口径降级 unavailable，不得穿透。
+
+
+def _deep_output(depth: int = 10008) -> dict:
+    root: dict = {}
+    node = root
+    for _ in range(depth):
+        node["child"] = {}
+        node = node["child"]
+    return root
+
+
+def test_deep_candidate_output_judge_request_degrades(monkeypatch):
+    """深嵌套候选输出：judge 请求构造按不可达降级，请求绝不发出。"""
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("request must never be sent")
+    )
+    verdict = judge_output("rubric", {"q": 1}, _deep_output(), env=FULL_ENV)
+    assert verdict is not None
+    assert verdict["unavailable"] is True
+    assert verdict["ok"] is False
+    assert verdict["score"] == 0.0

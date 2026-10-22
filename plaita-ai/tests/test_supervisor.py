@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from plaita_ai.console_client import ConsoleClient, ConsoleConfig
@@ -336,3 +337,99 @@ def test_regressions_block_promotion_even_when_average_improves(gate):
     assert fake.published["demo"] == "1.0.0"
     detail = client.get_flow("demo")
     assert {v["version"]: v["status"] for v in detail["versions"]}["1.0.1"] == "draft"
+
+
+# -- 输入侧深嵌套与孤儿候选版本（A2R46-01）---------------------------------------
+
+
+def _deep_output(depth: int = 10008) -> dict:
+    root: dict = {}
+    node = root
+    for _ in range(depth):
+        node["child"] = {}
+        node = node["child"]
+    return root
+
+
+def test_deep_candidate_output_never_promotes(monkeypatch):
+    """负控（promote 门面）：深嵌套候选输出让该 case 无判定，两侧均值口径
+    不一致——绝不许在 blind 上 promote。
+
+    pre-fix：候选 evaluate 被 RecursionError 打穿，走 run_loop 兜底
+    failed_iteration（红：既非降级也暴露不出 blind 面）；
+    post-fix：单 case 降级 unavailable → no_improvement + 对账计数，
+    无 promotion_ticket。
+    """
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": DEF_V1}, published="1.0.0")
+
+    def handler(flow_json, input_data):
+        if flow_json == DEF_V2:
+            return {"result": {"text": "good output"}, "nodes": [], "error": None}
+        return {"result": {"text": "bad"}, "nodes": [], "error": None}
+
+    fake.dry_run_handler = handler
+    client = make_client(fake)
+    real_dry_run = client.dry_run
+
+    def deep_dry_run(flow_json, input=None, pinned=None, only_node=None):
+        if flow_json == DEF_V2 and (input or {}).get("i") == 0:
+            return {"result": _deep_output(), "nodes": [], "error": None}
+        return real_dry_run(flow_json, input=input, pinned=pinned, only_node=only_node)
+
+    monkeypatch.setattr(client, "dry_run", deep_dry_run)
+    dataset = expects_good(make_dataset(cases=2))
+    sup = Supervisor(
+        client,
+        SupervisorPolicy(promote_gate="manual"),
+        StaticProposer([{"definition": DEF_V2, "rationale": "deep"}]),
+    )
+    out = sup.run_loop("demo", dataset)
+    it = out["iterations"][0]
+    assert it["status"] == "no_improvement"
+    assert it["unavailable_cases"] == {"baseline": 0, "candidate": 1}
+    assert it["candidate_report"]["unavailable_cases"] == 1
+    assert "not comparable" in it["reason"]
+    assert "promotion_ticket" not in it
+    assert it.get("promoted") is not True
+
+
+class _CandidateVersionUnreadableConsole(FakeConsole):
+    """candidate 版本（非 1.0.0）GET 一律 500：save_version 之后的评测段崩溃。"""
+
+    def handler(self, request):
+        path = request.url.path
+        if request.method == "GET" and "/versions/" in path and not path.endswith("/versions/1.0.0"):
+            return httpx.Response(500, json={"detail": "candidate version read failed"})
+        return super().handler(request)
+
+
+def test_failed_iteration_keeps_candidate_version_lineage(caplog):
+    """负控主体（孤儿候选版本面）：评测段崩溃时 outcome 必须补记 candidate_version。
+
+    版本在 save_version 已落库；异常穿透让 run_loop 兜底新建 outcome 时把这个
+    字段丢掉，库里就留下无主孤儿（实弹：1.0.1/1.0.2 落库但 outcome 无
+    candidate_version）。处置取「补记」不取「回滚」：console 版本无删除 API，
+    版本谱系本来就是给人类审计的——失败候选保留谱系、outcome 指认它。
+    pre-fix：candidate_version 丢失（红）；post-fix：逐迭代指认 + WARNING 留痕。
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="plaita_ai.supervisor")
+    fake = seed_with_baseline(_CandidateVersionUnreadableConsole())
+    dataset = expects_good(make_dataset(cases=1))
+    sup = Supervisor(
+        make_client(fake),
+        SupervisorPolicy(max_iterations=2, max_consecutive_failures=2),
+        StaticProposer([{"definition": DEF_V2, "rationale": "x"} for _ in range(2)]),
+    )
+    out = sup.run_loop("demo", dataset)
+    assert out["final_status"] == "paused"
+    assert [it["status"] for it in out["iterations"]] == ["failed_iteration", "failed_iteration"]
+    # 关键断言：落库的版本必须在 outcome 里指认得到（不成孤儿）
+    assert [it["candidate_version"] for it in out["iterations"]] == ["1.0.1", "1.0.2"]
+    assert sorted(fake.flows["demo"]["versions"]) == ["1.0.0", "1.0.1", "1.0.2"]
+    for it in out["iterations"]:
+        assert "ConsoleClientError" in it["reason"]
+    assert "degraded to failed_iteration" in caplog.text
+    assert "1.0.1" in caplog.text

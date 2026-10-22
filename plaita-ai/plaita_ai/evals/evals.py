@@ -10,6 +10,7 @@ two reports into a promote/rollback verdict.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ from plaita_ai.console_client import ConsoleClient, ConsoleClientError
 from plaita_ai.evals.judges import judge_output
 
 __all__ = ["Case", "Dataset", "load_dataset", "evaluate", "compare"]
+
+_log = logging.getLogger(__name__)
 
 
 class Case:
@@ -109,6 +112,26 @@ def _judge_unavailable(result: Dict[str, Any]) -> bool:
     return isinstance(judge, dict) and bool(judge.get("unavailable"))
 
 
+def _case_blind(result: Dict[str, Any]) -> bool:
+    """This case carries no usable judgment: the judge was unreachable, or the
+    case itself degraded to unavailable (A2R46-01 — a candidate-controlled
+    payload blew up the input-side serialization chain). Either way its
+    ok/score are not evidence and stay out of averages and compare decisions.
+    """
+    return bool(result.get("unavailable")) or _judge_unavailable(result)
+
+
+def _json_safe_output(output: Any) -> Any:
+    """报告要经得起下游 json.dumps（MCP 回复 / proposer prompt / 会话留痕）：
+    候选自控的深嵌套输出不可序列化时以占位符入报告，本体丢弃（A2R46-01）。
+    """
+    try:
+        json.dumps(output, ensure_ascii=False, default=str)
+    except Exception as exc:
+        return f"<unserializable output omitted: {type(exc).__name__}>"
+    return output
+
+
 def assert_score(case: Case, output: Any) -> Dict[str, Any]:
     """Score one output against a case's expect block.
 
@@ -121,7 +144,19 @@ def assert_score(case: Case, output: Any) -> Dict[str, Any]:
     reasons: List[str] = []
     score = 1.0
     expect = case.expect
-    text = json.dumps(output, ensure_ascii=False, default=str) if output is not None else ""
+    try:
+        text = json.dumps(output, ensure_ascii=False, default=str) if output is not None else ""
+    except Exception as exc:
+        # A2R46-01 输入侧：output 是候选 flow 自控的——深嵌套结构（~10k 层约
+        # 20KB）让 json.dumps 抛 RecursionError（RuntimeError 族；r73 只守了
+        # judge 回复侧）。这不是对输出的判定，不能计 0 分：降级 unavailable
+        # 剔出均值（与 judge 不可达同口径），兄弟 case 与整报告保留。
+        return {
+            "ok": False,
+            "score": 0.0,
+            "unavailable": True,
+            "reasons": [f"output not serializable: {type(exc).__name__}: {exc}"[:500]],
+        }
 
     if "contains" in expect:
         needle = str(expect["contains"])
@@ -203,7 +238,23 @@ def evaluate(
                 done = client.wait_execution(execution_id, timeout_s=timeout_s)
                 if str(done.get("status")) not in ("completed", "success", "succeeded"):
                     entry["error"] = f"execution {done.get('status')}"
-                    entry["reasons"] = [json.dumps(done.get("error"), default=str)[:500]]
+                    try:
+                        entry["reasons"] = [json.dumps(done.get("error"), default=str)[:500]]
+                    except Exception as exc:
+                        # A2R46-01 输入侧：错误载荷可嵌候选自控的深结构，
+                        # json.dumps 的 RecursionError 不是判定——单 case 降级
+                        # unavailable，兄弟 case 与整报告保留（降级可观测）。
+                        entry["unavailable"] = True
+                        entry["error"] = f"{type(exc).__name__}: {exc}"[:500]
+                        entry["reasons"] = [
+                            "case unavailable: execution error payload not serializable"
+                        ]
+                        _log.warning(
+                            "eval case %s degraded to unavailable: "
+                            "execution error payload not serializable: %s",
+                            case.id,
+                            exc,
+                        )
                     results.append(entry)
                     continue
                 output = done.get("output")
@@ -216,7 +267,7 @@ def evaluate(
                         pass
                 if done.get("langfuse_trace_url"):
                     entry["langfuse_trace_url"] = done["langfuse_trace_url"]
-            entry["output"] = output
+            entry["output"] = _json_safe_output(output)
             entry.update(assert_score(case, output))
         except ConsoleClientError as exc:
             entry["error"] = str(exc)[:500]
@@ -224,7 +275,8 @@ def evaluate(
         results.append(entry)
 
     judge_unavailable = [r["id"] for r in results if _judge_unavailable(r)]
-    scored = [r for r in results if r.get("judge") != "skipped" and not _judge_unavailable(r)]
+    unavailable = [r["id"] for r in results if r.get("unavailable")]
+    scored = [r for r in results if r.get("judge") != "skipped" and not _case_blind(r)]
     pass_rate = (sum(1 for r in scored if r.get("ok")) / len(scored)) if scored else None
     avg_score = (
         round(sum(float(r.get("score") or 0.0) for r in scored) / len(scored), 4) if scored else None
@@ -240,6 +292,8 @@ def evaluate(
         "avg_score": avg_score,
         # 对账节:judge 不可达的用例既非通过也非否决,已排除出均值,单列计数
         "judge_unavailable_cases": len(judge_unavailable),
+        # 对账节:输入侧序列化降级的用例(A2R46-01)同样非判定、剔出均值,单列计数
+        "unavailable_cases": len(unavailable),
         # 对账节:观测关闭/ dry-run 模式为空列表(execution 模式逐 case 深链)
         "langfuse_traces": traces,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -264,7 +318,7 @@ def compare(base: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
             "candidate_ok": c.get("ok"),
             "delta": delta,
         }
-        blind = _judge_unavailable(b) or _judge_unavailable(c)
+        blind = _case_blind(b) or _case_blind(c)
         if blind:
             # One side had no usable judge → ok/score deltas are not evidence.
             row["judge_unavailable"] = True
