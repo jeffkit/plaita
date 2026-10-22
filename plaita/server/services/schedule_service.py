@@ -13,6 +13,9 @@
 调度定义字段：
 ``schedule_id / name / flow_id / version / cron / params / enabled /
 created_at / updated_at / next_run_at / last_fired_at / last_enqueue_ok``
+（plaita#300 起另有冗余 ``runtime``：console 按目标版本行盖章，cron 派发
+据此选 runtime 池队列——本进程无 console store，跨进程选池只能靠行上冗余；
+旧行无该键走历史派发链，行为零变化。）
 
 触发语义（v1，刻意从简）：
 - 错过的周期**不补偿**：到期后只触发一次，``next_run_at`` 直接跳到当前时间之后
@@ -68,6 +71,41 @@ DEFAULT_QUEUE_NAME = "plaita:flow:queue"
 
 #: 已告警过的 (console_queue, worker_queue) 组合（避免每次派发刷屏）。
 _queue_split_warned: set[tuple[str, str]] = set()
+
+#: 调度行 runtime 冗余不可用时的具名 WARNING 片段（plaita#300 触发面池路由：
+#: 行上 runtime 非法 → 回落历史派发链，降级必须可观测）。
+SCHEDULE_RUNTIME_INVALID_WARNING = "调度行 runtime 非法，回落默认派发队列"
+
+
+def _resolve_schedule_queue(
+    schedule: Dict[str, Any],
+    configured: Optional[str] = None,
+) -> str:
+    """调度触发的派发队列解析（plaita#300 触发面池路由）。
+
+    优先级：显式 ``configured``（service_config["queue_name"] / 调用方显式
+    传参）> **调度行冗余 ``runtime``**（console 在 create/update/enable 时
+    按 flow 版本行盖章，与本进程不可达的 flow_versions.runtime 同源）>
+    历史派发链 ``resolve_dispatch_queue_name``（旧调度行：无 runtime 键，
+    行为零变化）。行上 runtime 非法时具名 WARNING 后回落历史链（降级可
+    观测），绝不静默换道。
+    """
+    explicit = str(configured).strip() if configured else ""
+    if explicit:
+        return explicit
+    runtime = schedule.get("runtime")
+    if runtime:
+        try:
+            from ..runtime_queues import resolve_runtime_queue
+
+            return resolve_runtime_queue(runtime)
+        except ValueError:
+            logger.warning(
+                "%s：schedule=%s runtime=%r（历史派发链接管）",
+                SCHEDULE_RUNTIME_INVALID_WARNING,
+                schedule.get("schedule_id"), runtime,
+            )
+    return resolve_dispatch_queue_name()
 
 
 def resolve_dispatch_queue_name(configured: Optional[str] = None) -> str:
@@ -250,7 +288,7 @@ def _discard_queued_placeholder(
 def fire_schedule(
     redis_client: Redis,
     schedule: Dict[str, Any],
-    queue_name: str,
+    queue_name: Optional[str] = None,
     trigger_kind: str = "cron",
     due_at: Any = None,
 ) -> Optional[str]:
@@ -266,6 +304,10 @@ def fire_schedule(
     与手动 start 同一受理窗口。
 
     Args:
+        queue_name: 派发队列。``None``/空时按调度行冗余 ``runtime`` 解析
+            （plaita#300 触发面池路由：go-runtime flow 落 go 池而非默认池；
+            见 ``_resolve_schedule_queue``）——console manual 触发则显式传
+            按 flow store 现算的池队列（与 POST /executions 同语义）。
         due_at: 本次到期时点（epoch 毫秒或可转 float 的字符串）。cron 侧由
             ``_fire_if_due`` 传入其判定用的 ``next_run_at``；缺省时回落到调度
             定义里的 ``next_run_at``（见 ``normalized_due_ms``）。manual 忽略。
@@ -275,6 +317,8 @@ def fire_schedule(
         闸拒绝（停用租户、配额满——留 rejected fire_record，B44-01）返回 None。
     """
     schedule_id = schedule["schedule_id"]
+    if not queue_name:
+        queue_name = _resolve_schedule_queue(schedule)
     # 租户状态闸（plaita#27）：停用租户的调度不再入队。状态来自 console 发布
     # 的 Redis 短视图；缺失/无记录 = active（fail-open，见 tenant_status 模块）。
     # 拒绝留痕（B44-01）：拒绝也落 fire_record（rejected + 原因）——否则
@@ -1009,7 +1053,10 @@ class ScheduleService(BaseExtendedService):
 
         # due_at 显式传本次判定用的到期时点：幂等键必须锚在 due 上，而不是
         # 触发墙钟（见 fire_schedule / 模块 docstring）。
-        queue_name = resolve_dispatch_queue_name(self._explicit_queue_name)
+        # plaita#300 触发面池路由：调度行冗余 runtime（console create/update/
+        # enable 盖章）决定池——本进程无 console store，跨进程选池只能靠行上
+        # 冗余；旧行无 runtime 走历史派发链，行为零变化。
+        queue_name = _resolve_schedule_queue(schedule, self._explicit_queue_name)
         self.queue_name = queue_name
         fire_schedule(
             self._redis_client, schedule, queue_name,

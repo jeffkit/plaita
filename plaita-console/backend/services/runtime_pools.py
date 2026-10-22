@@ -1,73 +1,23 @@
-"""runtime pool 路由（plaita#300）：flow_versions.runtime → 派发队列。
+"""runtime pool 路由（plaita#300）——console 侧再导出。
 
-## 池模型
-
-- ``python``：历史池，队列经 ``plaita.runtime_config.resolve_queue_name("console")``
-  解析（``PLAITA_CONSOLE_TASK_QUEUE`` 覆盖继续生效）——存量部署零行为变化；
-- ``go``：``PLAITA_CONSOLE_GO_TASK_QUEUE`` 覆盖，缺省 ``plaita:flow:queue:go``
-  （Go worker 以 ``PLAITA_QUEUE_NAME`` 指到同一队列，部署侧对齐）；
-- 任意其他 runtime：env ``PLAITA_CONSOLE_RUNTIME_QUEUES``（JSON 映射）显式
-  给队列，未给的键按 ``plaita:flow:queue:{runtime}`` 推导。
-
-``target_instance_id`` 语义不变：同池内的容量路由（capacity/dispatcher），
-池间隔离由「不同 runtime → 不同 Stream」表达，不改 queue/lease 协议。
+解析真值自第七十五轮起下沉到 :mod:`plaita.server.runtime_queues`（server 层）：
+cron 调度循环是独立 plaita server 进程，触发面按 runtime 选池必须与 console
+start/publish 共享同一份 runtime→队列映射，而依赖方向（core ← server ←
+console）不允许 server 反向 import 本包。本模块保留既有 import 面
+（``normalize_runtime`` / ``resolve_runtime_queue`` / 取值域与 env 常量），
+全部为再导出——**不要在这里加第二份映射逻辑**。
 """
 from __future__ import annotations
 
-import json
-import os
-from typing import Optional
-
-#: 合法 runtime 值（flow_versions.runtime 的取值域；保存路径据此 422）。
-VALID_RUNTIMES = ("go", "python")
-
-#: 默认 runtime（存量版本迁移值；历史队列语义即 Python worker 池）。
-DEFAULT_RUNTIME = "python"
-
-GO_QUEUE_ENV = "PLAITA_CONSOLE_GO_TASK_QUEUE"
-RUNTIME_QUEUES_ENV = "PLAITA_CONSOLE_RUNTIME_QUEUES"
-
-DEFAULT_GO_QUEUE = "plaita:flow:queue:go"
-
-
-def normalize_runtime(runtime: Optional[str]) -> str:
-    """校验/归一 runtime 值；``None``/空 → 默认 ``python``，非法值抛 ``ValueError``。"""
-    value = str(runtime or "").strip() or DEFAULT_RUNTIME
-    if value not in VALID_RUNTIMES:
-        raise ValueError(
-            f"非法 runtime {value!r}；可选值: {list(VALID_RUNTIMES)}"
-        )
-    return value
-
-
-def _env_runtime_queues() -> dict:
-    raw = os.environ.get(RUNTIME_QUEUES_ENV, "").strip()
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def resolve_runtime_queue(runtime: Optional[str]) -> str:
-    """runtime → 派发队列名（使用点解析 env，模块导入期零求值，A56-02 同纪律）。"""
-    value = normalize_runtime(runtime)
-    if value == DEFAULT_RUNTIME:
-        from plaita.runtime_config import resolve_queue_name
-
-        return resolve_queue_name("console")
-    explicit = _env_runtime_queues().get(value)
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-    if value == "go":
-        go_queue = os.environ.get(GO_QUEUE_ENV, "").strip()
-        if go_queue:
-            return go_queue
-        return DEFAULT_GO_QUEUE
-    return f"plaita:flow:queue:{value}"
-
+from plaita.server.runtime_queues import (
+    DEFAULT_GO_QUEUE,
+    DEFAULT_RUNTIME,
+    GO_QUEUE_ENV,
+    RUNTIME_QUEUES_ENV,
+    VALID_RUNTIMES,
+    normalize_runtime,
+    resolve_runtime_queue,
+)
 
 __all__ = [
     "DEFAULT_GO_QUEUE",
