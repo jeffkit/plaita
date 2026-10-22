@@ -220,7 +220,7 @@ def test_force_delete_after_guard_xdels_late_carrier(env, monkeypatch):
     real_enqueue = executions_api._enqueue
     first = {"done": False, "id": None}
 
-    def gated_enqueue(message, redis):
+    def gated_enqueue(message, redis, **kwargs):
         if message.get("type") == "start" and not first["done"]:
             first["done"] = True
             first["id"] = message["execution_id"]

@@ -57,7 +57,17 @@ except ImportError:  # 平铺布局（cwd=backend）运行时
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
     from ..error_contract import error_detail, scrubbed_detail
 except ImportError:
-    from error_contract import error_detail, scrubbed_detail  # type: ignore
+    from error_contract import error_detail, scrubbed_detail
+
+try:  # plaita#300：publish/start 能力门 + runtime pool 路由
+    from ..services.capability_gate import UnsupportedNodeTypesError, gate_flow_nodes
+    from ..services.runtime_pools import resolve_runtime_queue
+except ImportError:
+    from services.capability_gate import (  # type: ignore
+        UnsupportedNodeTypesError,
+        gate_flow_nodes,
+    )
+    from services.runtime_pools import resolve_runtime_queue  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +305,7 @@ def get_local_executor(request: Request):
     return None
 
 
-def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
+def _enqueue(message: Dict[str, Any], redis: Redis, *, queue_name: Optional[str] = None) -> str:
     """把 start/resume 消息写入任务队列 Stream。
 
     FlowWorker 以 Redis Stream 消费组（XREADGROUP）消费；
@@ -303,8 +313,11 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
     消息永远到不了 worker。统一走 XADD。
 
     B2R31-01：新生产消息写当前三维代际（增量信封字段；旧消费者忽略）。
+
+    plaita#300：``queue_name`` 显式给出时按其派发（runtime pool 路由——
+    flow_versions.runtime 决定池）；None 走默认队列解析（存量行为零变化）。
     """
-    queue = _task_queue_name()
+    queue = queue_name or _task_queue_name()
     from plaita.runtime_config import envelope_for_stream
     from plaita.server.tenant_status import read_tenant_generation
 
@@ -313,6 +326,74 @@ def _enqueue(message: Dict[str, Any], redis: Redis) -> str:
         tenant_generation=read_tenant_generation(redis, message.get("tenant_id")),
         **envelope_for_stream(queue, role="console"),
     )
+
+
+def _resolve_start_version(flow_id: str, version: Optional[str],
+                           tenant: Optional[str]):
+    """start 的版本行解析（#300 能力门/池路由的真源）。
+
+    - 显式 version → 该版本行（不存在返回 ``None``，调用方按存量行为入队）；
+    - ``version=None`` → worker 的 latest 语义：库内 published 版本取最高
+      semver（不可解析时退创建序最后一个）；
+    - ``tenant == "default"`` 时回退查 ``tenant_id=""``：历史单租户时代的
+      行以空串落库（Redis 命名空间里 ``""``/``default`` 同映 ``plaita``），
+      start 面对的是跨代存量，两个别名都要认；
+    - 存储不可用一律 ``None``（门无从谈起，不阻断 start）。
+    """
+    store = flow_store.get_flow_store()
+    try:
+        if version:
+            row = store.get_version(flow_id, version, tenant_id=tenant)
+            if row is None and tenant == "default":
+                row = store.get_version(flow_id, version, tenant_id="")
+            return row
+        published = [
+            v for v in store.list_versions(flow_id, tenant_id=tenant)
+            if v.status == "published"
+        ]
+        if not published and tenant == "default":
+            published = [
+                v for v in store.list_versions(flow_id, tenant_id="")
+                if v.status == "published"
+            ]
+        if not published:
+            return None
+
+        def _semver_key(v):
+            parts = []
+            for piece in str(v.version).split("."):
+                try:
+                    parts.append((0, int(piece)))
+                except ValueError:
+                    parts.append((1, piece))
+            return parts
+
+        return max(published, key=lambda v: (_semver_key(v), v.created_at or datetime.min))
+    except Exception:  # noqa: BLE001 — 版本库读失败不改变存量 start 行为
+        return None
+
+
+def _runtime_queue_for_flow(flow_id: Any, version: Any,
+                            tenant: Optional[str]) -> Optional[str]:
+    """执行行携带的 flow_id+version → 该 flow 的池队列（#300 池路由）。
+
+    复用 start 的版本解析（显式 version；``None`` 走 latest published 同语义）。
+    任何一步取不到（行无版本号/版本已删/非法值）返回 ``None``，调用方回落
+    默认队列——resume/cancel/recovery 的可达性优先于池精确性。
+    """
+    if not flow_id:
+        return None
+    try:
+        row = _resolve_start_version(str(flow_id), str(version) if version else None,
+                                     tenant)
+    except Exception:  # noqa: BLE001 — 路由查询失败不阻断 resume/cancel
+        return None
+    if row is None:
+        return None
+    try:
+        return resolve_runtime_queue(getattr(row, "runtime", None))
+    except ValueError:
+        return None
 
 
 # ---- plaita#166：执行表示的读面脱敏 ----
@@ -756,7 +837,15 @@ async def _dedup_hit_row_response(
                 "dedup_key": request.dedup_key,
             }
             try:
-                recovery_msg_id = _enqueue(recovery_message, redis)
+                # plaita#300：补入队与首投同池（按行/请求的 version 解析 runtime）。
+                # 不重过能力门——补入队是完成一次已过门的 start，门后移会悬挂
+                # 已存在的 queued 行。
+                recovery_msg_id = _enqueue(
+                    recovery_message, redis,
+                    queue_name=_runtime_queue_for_flow(
+                        request.flow_id, request.version, tenant
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001 — reservation 到期后可重试
                 logger.error(
                     "queued 占位行补入队失败（reservation 保留，重试可再补）: "
@@ -2007,6 +2096,43 @@ async def start_execution(
     execution_id = uuid.uuid4().hex
     tenant = tenant_scope(http_request, required=True)
 
+    # plaita#300：publish/start 能力门 + 池路由。在幂等认领/配额占用/queued
+    # 占位行/入队**之前**——不支持的节点集在此结构化拒绝（422），绝不产生
+    # 「queued 行 + 永不执行」。version=None 时按 worker 的 latest 语义
+    # （引擎存储取最高 semver published）解析出版本行再判。
+    version_row = _resolve_start_version(
+        request.flow_id, request.version, tenant
+    )
+    if version_row is not None and redis is not None:
+        try:
+            gate_flow_nodes(
+                redis, getattr(version_row, "runtime", None) or "python",
+                version_row.definition,
+                flow_id=request.flow_id, version=version_row.version,
+            )
+        except UnsupportedNodeTypesError as e:
+            detail = dict(e.detail)
+            raise HTTPException(
+                status_code=422,
+                detail=error_detail(
+                    "unsupported_node_types",
+                    (
+                        f"流程 {request.flow_id}@{version_row.version} 含目标 "
+                        f"runtime {detail.get('runtime')} 不支持的节点类型: "
+                        f"{', '.join(detail.get('unsupported') or [])}"
+                    ),
+                    **detail,
+                ),
+            ) from e
+    start_queue: Optional[str] = None
+    if version_row is not None:
+        try:
+            start_queue = resolve_runtime_queue(
+                getattr(version_row, "runtime", None)
+            )
+        except ValueError:
+            start_queue = None
+
     # start 幂等键生产侧认领（plaita#274/#280/#285/r59）：token 化 Lua 状态机。
     # 命中后区分「行/载体已可读」与「在途认领」：前者幂等返回，后者异步等行；
     # A 失去认领（过期/墓碑/被接管）时不得再写行/入队/覆盖 owner，更不能
@@ -2215,7 +2341,7 @@ async def start_execution(
     # 写入任务队列 Stream（FlowWorker 消费组消费）
     enqueued_msg_id: Optional[str] = None
     try:
-        enqueued_msg_id = _enqueue(message, redis)
+        enqueued_msg_id = _enqueue(message, redis, queue_name=start_queue)
     except Exception:
         # 入队失败回滚名额，防泄漏（否则该 execution 的名额要等 TTL 才自愈）；
         # 占位行同步清掉，不留无人消费的幽灵 queued 行（清理失败留 ERROR）。
@@ -2371,6 +2497,7 @@ async def cancel_execution(
                 "timestamp": datetime.now().isoformat(),
             },
             redis,
+            queue_name=_runtime_queue_for_flow(flow_id, info.get("flow_version"), tenant),
         )
         _now = datetime.now().isoformat()
         cancelled_row = dict(info)
@@ -2423,7 +2550,8 @@ async def cancel_execution(
         "data": None,
         "timestamp": datetime.now().isoformat()
     }
-    _enqueue(message, redis)
+    _enqueue(message, redis,
+             queue_name=_runtime_queue_for_flow(flow_id, info.get("flow_version"), tenant))
 
     if status == "suspended":
         # 挂起执行保持现状（已验证路径，设计稿 §3.5 兼容红线）：直接写
@@ -2647,7 +2775,9 @@ async def resume_execution(
     if isinstance(request.params, dict) and request.params:
         message["params"] = dict(request.params)
 
-    _enqueue(message, redis)
+    _enqueue(message, redis,
+             queue_name=_runtime_queue_for_flow(flow_id, data.get("flow_version"),
+                                                resume_tenant))
     _audit(http_request, "execution.resume", execution_id,
            {"resume_type": request.resume_type, "mode": "queue"},
            tenant_id=resume_tenant)

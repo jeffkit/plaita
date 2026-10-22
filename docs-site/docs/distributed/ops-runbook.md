@@ -137,7 +137,9 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_WORKER_CONCURRENCY` | `1`；非整数 → 启动 `ValueError`；`0`/负 → 构造时钳 1 | `startup`（argparse/构造） | N 个消费线程 | 非整数是原始 traceback 退出，不是友好告警；0/负不是“停用” |
 | `PLAITA_CAPACITY_STALE_SECONDS` | `90`；≤0/NaN/inf/非法 → 90 + WARNING | `call`（每次判定） | 容量快照新鲜期 | 0 回默认，不是关闭判定 |
 | `PLAITA_CONSOLE_DISPATCH_SHADOW` | `true`；`0/false/no/off`（大小写不敏感）→ false | `call`（每次 plan） | 只影响影子决策标签；真正入队是单独的 `dispatch_one` | 其他任何值（含拼写错误）都是 true |
-| `PLAITA_CONSOLE_TASK_QUEUE` | `plaita:flow:queue` | `call` | console 生产侧队列：手动启动 / 立即触发 / 容量派发 / 调度派发同源（A56-02/B2R31-02） | **空串 = 配置错误**（启动预检与四个读取点统一拒绝，不再得到空 Stream 键）；新旧并行时两处 env 必须一起改 |
+| `PLAITA_CONSOLE_TASK_QUEUE` | `plaita:flow:queue` | `call` | console 生产侧队列：手动启动 / 立即触发 / 容量派发 / 调度派发同源（A56-02/B2R31-02）；#300 起是 **python 池**的队列 | **空串 = 配置错误**（启动预检与四个读取点统一拒绝，不再得到空 Stream 键）；新旧并行时两处 env 必须一起改 |
+| `PLAITA_CONSOLE_GO_TASK_QUEUE` | `plaita:flow:queue:go` | `call` | #300：go 池（`flow_versions.runtime="go"`）的派发队列；Go worker 以 `PLAITA_QUEUE_NAME` 指到同一键 | 与 python 池不同 Stream——混池即「不串池」破坏；改值需与 Go worker 部署同步 |
+| `PLAITA_CONSOLE_RUNTIME_QUEUES` | 未设 | `call` | #300：runtime→队列 JSON 映射（如 `{"go":"plaita:flow:queue:go"}`），优先于单池 env；未覆盖的 runtime 按 `plaita:flow:queue:{runtime}` 推导 | 非法 JSON 被忽略（按未设）；`python` 键不生效（恒走 `PLAITA_CONSOLE_TASK_QUEUE` 解析） |
 | `PLAITA_DISPATCH_LEDGER_KEY` | `plaita:dispatch:ledger` | `call` | 派发台账键 | 空白 → 默认；改键后旧台账不再被读 |
 | `PLAITA_DISPATCHER_ID` | 主机名 | `call` | 台账 actor 标识 | 空白 → 主机名；多实例同主机名会混账 |
 | `PLAITA_WORKER_LANGFUSE` | 未设；仅**精确 `1`** 开启 | `startup` | 初始化 LangfuseCallback | `true` 不生效；缺 extra/凭据只告警 |

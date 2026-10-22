@@ -48,7 +48,17 @@ except ImportError:
 try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
     from ..error_contract import error_detail, scrubbed_detail
 except ImportError:
-    from error_contract import error_detail, scrubbed_detail  # type: ignore
+    from error_contract import error_detail, scrubbed_detail
+
+try:  # plaita#300：runtime 能力门 + 池路由取值域
+    from ..services.capability_gate import UnsupportedNodeTypesError, gate_flow_nodes
+    from ..services.runtime_pools import normalize_runtime
+except ImportError:
+    from services.capability_gate import (  # type: ignore
+        UnsupportedNodeTypesError,
+        gate_flow_nodes,
+    )
+    from services.runtime_pools import normalize_runtime  # type: ignore
 
 try:  # A2R24-09：SSE 路由的 OpenAPI 媒体类型声明
     from ..streaming import EventStreamResponse
@@ -90,6 +100,8 @@ class VersionSummaryView(BaseModel):
 
     version: str
     status: str
+    # plaita#300：目标 runtime pool（go/python），节点面板/列表按池过滤展示
+    runtime: str = "python"
     created_at: Optional[str] = None
     published_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -113,6 +125,8 @@ class VersionView(BaseModel):
     status: str
     definition: str = ""
     layout: str = ""
+    # plaita#300：目标 runtime pool（go/python）——发布/启动能力门的判定池
+    runtime: str = "python"
     created_at: Optional[str] = None
     published_at: Optional[str] = None
     created_by: str = ""
@@ -126,6 +140,11 @@ class SaveVersionRequest(StrictRequestModel):
     definition: str = Field(..., description="Flow 定义 JSON 字符串")
     layout: str = Field("{}", description="画布坐标 JSON 字符串")
     created_by: str = Field("", description="保存人")
+    # plaita#300：目标 runtime pool（go/python）。None = 不改（新建为 python，
+    # 更新既有草稿保留原值）；非法值 422。
+    runtime: Optional[str] = Field(
+        None, description="目标 runtime pool（go/python）；缺省不改/默认 python"
+    )
     # C5-1 乐观并发：调用方所基于版本的 updated_at（ISO 串）；不一致返回
     # 409（conflict=version_stale，带 latest_updated_at）。force=True 绕过。
     base_updated_at: Optional[str] = Field(None, description="乐观锁基准 updated_at")
@@ -151,6 +170,47 @@ def get_redis_dep(request: Request) -> Redis:
 def _check_semver(version: str) -> None:
     if not validation.is_semver(version):
         raise HTTPException(status_code=422, detail=f"非法 semver 版本号: {version}")
+
+
+def _check_runtime(runtime: Optional[str]) -> None:
+    """runtime 取值域闸（plaita#300）：非法值 422（保存入口 fail-fast）。"""
+    if runtime is None:
+        return
+    try:
+        normalize_runtime(runtime)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail=error_detail("invalid_runtime", str(e))
+        )
+
+
+def _gate_runtime_capability(redis: Optional[Redis], row, *, where: str) -> None:
+    """发布链路共用能力门（plaita#300）：不支持的节点集 → 422 结构化错误。
+
+    ``redis=None``（本地单机档：无 registry、执行在 console 进程内）跳过——
+    门的数据源是 worker 注册清单，本地档不存在远端 worker。
+    """
+    if redis is None:
+        return
+    try:
+        gate_flow_nodes(
+            redis, getattr(row, "runtime", None) or "python", row.definition,
+            flow_id=row.flow_id, version=row.version,
+        )
+    except UnsupportedNodeTypesError as e:
+        detail = dict(e.detail)
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                "unsupported_node_types",
+                (
+                    f"流程 {row.flow_id}@{row.version} 含目标 runtime "
+                    f"{detail.get('runtime')} 不支持的节点类型: "
+                    f"{', '.join(detail.get('unsupported') or [])}"
+                ),
+                **detail,
+            ),
+        ) from e
 
 
 def _validate_definition(definition: str) -> None:
@@ -303,6 +363,7 @@ def get_flow(flow_id: str, request: Request = None):
         VersionSummaryView(
             version=v.version,
             status=v.status,
+            runtime=getattr(v, "runtime", None) or "python",
             created_at=v.created_at.isoformat() if v.created_at else None,
             published_at=v.published_at.isoformat() if v.published_at else None,
             updated_at=v.updated_at.isoformat() if v.updated_at else None,
@@ -358,6 +419,7 @@ def get_version(flow_id: str, version: str, request: Request = None):
         status=out.status,
         definition=out.definition,
         layout=out.layout,
+        runtime=getattr(out, "runtime", None) or "python",
         created_at=out.created_at.isoformat() if out.created_at else None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
@@ -406,6 +468,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
     tenant = tenant_scope(request, required=True) if request is not None else ""
     _check_semver(version)
     _validate_definition(req.definition)
+    _check_runtime(req.runtime)
     store = _store()
     # 确保 flow 记录存在
     if store.get_flow_record(flow_id, tenant_id=tenant) is None:
@@ -422,6 +485,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
             base_updated_at=req.base_updated_at,
             force=req.force,
             allocate_version=req.allocate_version,
+            runtime=req.runtime,
         )
     except flow_store.VersionConflictError as e:
         # C5-1：结构化 409——前端据此弹「加载最新 / 强制覆盖」
@@ -448,6 +512,7 @@ def save_version(flow_id: str, version: str, req: SaveVersionRequest,
         status=out.status,
         definition=out.definition,
         layout=out.layout,
+        runtime=getattr(out, "runtime", None) or "python",
         created_at=out.created_at.isoformat() if out.created_at else None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
@@ -511,6 +576,15 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
     store = _store()
     if store.get_flow_record(flow_id, tenant_id=tenant) is None:
         raise HTTPException(status_code=404, detail=f"流程不存在: {flow_id}")
+    # plaita#300：能力门在状态机 draft→published **之前**——不支持的节点集
+    # 结构化拒绝（422），版本保持 draft、引擎存储零写入（不入队后失败）。
+    row = store.get_version(flow_id, req.version, tenant_id=tenant)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail("version_not_found", f"版本不存在: {flow_id}@{req.version}"),
+        )
+    _gate_runtime_capability(redis, row, where="publish")
     try:
         out = store.publish_version(flow_id, req.version, tenant_id=tenant)
     except LookupError as e:
@@ -547,6 +621,7 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
         status=out.status,
         definition=out.definition,
         layout=out.layout,
+        runtime=getattr(out, "runtime", None) or "python",
         created_at=out.created_at.isoformat() if out.created_at else None,
         published_at=out.published_at.isoformat() if out.published_at else None,
         created_by=out.created_by,
@@ -707,6 +782,9 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
                 status_code=404, detail=f"版本不存在: {flow_id}@{version}"
             )
         _validate_definition(stored.definition)
+        # plaita#300：导入直发的 publish 与普通发布同一能力门（结构化 422，
+        # 版本保持 draft）。
+        _gate_runtime_capability(redis, stored, where="import.publish")
         try:
             out = _store().publish_version(flow_id, version, tenant_id=tenant)
         except LookupError as e:

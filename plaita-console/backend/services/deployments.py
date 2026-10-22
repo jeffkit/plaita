@@ -183,6 +183,8 @@ def build_promotion_package(store, flow_id: str, version: str,
         "definition_hash_v2": canonical_definition_hash(definition_obj),
         "definition_hash_version": PROMOTION_HASH_VERSION,
         "layout": record_out.layout,
+        # plaita#300：目标 runtime pool 随包晋升（旧包缺此键 → 导入侧默认 python）
+        "runtime": getattr(record_out, "runtime", None) or "python",
         "exported_from": current_environment(),
         "exported_at": datetime.utcnow().isoformat(),
     }
@@ -226,6 +228,17 @@ def import_promotion_package(store, package: Dict[str, Any],
         layout = ""
     if not isinstance(layout, str):
         raise PromotionValidationError("晋升包 layout 必须是 JSON 字符串")
+    # plaita#300：runtime 随包晋升；缺键（旧包）= 默认池 python，非法值拒绝。
+    runtime = package.get("runtime")
+    if runtime is not None:
+        try:
+            from .runtime_pools import normalize_runtime
+        except ImportError:
+            from runtime_pools import normalize_runtime  # type: ignore
+        try:
+            runtime = normalize_runtime(runtime)
+        except ValueError as e:
+            raise PromotionValidationError(f"晋升包 runtime 非法: {e}") from e
 
     # 先校验指纹（被篡改的包得到具名 400），再做 Flow schema 校验。
     verify_package_hash(package)
@@ -269,6 +282,7 @@ def import_promotion_package(store, package: Dict[str, Any],
         created_by="promotion",
         tenant_id=tenant_id,
         force=force,
+        runtime=runtime,
     )
     return {
         "flow_id": flow_id,

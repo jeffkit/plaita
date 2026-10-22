@@ -20,6 +20,8 @@ from plaita.redis_client import (
     HEALTH_SOCKET_TIMEOUT_SECONDS,
     make_redis_client,
 )
+# plaita#300：registry metadata 里的 worker 能力清单统一解析器（形状闸同源）
+from plaita.server.capability import manifest_from_metadata
 
 try:
     from ..auth import ensure_platform_admin, require_auth
@@ -57,6 +59,12 @@ class ServiceInfo(RedactedResponseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="配置信息")
     active_tasks: int = Field(default=0, description="当前处理的任务数")
     last_heartbeat: Optional[str] = Field(None, description="最后心跳时间")
+    # plaita#300：worker 能力清单（engine/ir_contract_version/supported/
+    # unsupported/features）——自 metadata.capability_manifest 投影，缺清单
+    # （旧 build）为 None。metadata 内原样保留，旧读者不受影响。
+    capability_manifest: Optional[Dict[str, Any]] = Field(
+        None, description="worker 能力清单（null=未声明，旧 build worker）"
+    )
 
 
 class ServiceListResponse(RedactedResponseModel):
@@ -136,9 +144,10 @@ def get_redis(request: Request) -> Redis:
 
 
 def parse_service_data(data: str) -> Optional[ServiceInfo]:
-    """解析服务数据"""
+    """解析服务数据（含 #300 capability_manifest 投影）"""
     try:
         info = json.loads(data)
+        info["capability_manifest"] = manifest_from_metadata(info.get("metadata"))
         return ServiceInfo(**info)
     except Exception:
         return None

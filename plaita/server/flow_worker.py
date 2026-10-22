@@ -80,6 +80,7 @@ from plaita.server.capacity import (
     normalize_target_instance_id,
     target_mismatch,
 )
+from plaita.server.capability import python_worker_manifest
 from plaita.server.control import ControlMixin, ControlListener
 from plaita.server.alerts import WebhookAlerter
 from plaita.server.metrics import (
@@ -4991,6 +4992,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "dlq_max_len": self._runtime_config.dlq_max_len,
                     "deployment_epoch": self._runtime_config.deployment_epoch,
                     "tenant_status_epoch": self._tenant_status_epoch,
+                    # plaita#300：worker 能力清单（engine/IR 契约代际/节点白名单）。
+                    # supported 由进程默认 NodeRegistry **自动生成**（本构造点之前
+                    # 已完成 PLAITA_NODE_MODULES / CodeNode 注册，清单如实反映本
+                    # 进程可执行集合）；console 读面透出、publish/start 能力门消费。
+                    "capability_manifest": python_worker_manifest(),
                     # plaita#158：本字典会被 registry.register() 原样 ``SETEX`` **持久化**
                     # 进 ``plaita:registry:flow_worker:<instance_id>``——注册键名与
                     # metadata 键语义不变（仍是 ``redis_url``），只有它的**值**是掩码

@@ -38,6 +38,20 @@ queue/redis/group/dlq/预算/安全开关，并计算三个**互不替代**的�
 启动日志 `event=config.effective` 与 registry metadata / 容量块都带这三个值；
 `GET /api/cluster/config` 与 `GET /api/cluster/instances` 可核对混跑。
 
+**能力清单（capability manifest，#300）**：worker 注册时把
+`capability_manifest` 写进 registry metadata（`plaita:registry:flow_worker:<id>`
+的 `metadata.capability_manifest`）——`engine`（python 侧固定 `python`）、
+`ir_contract_version`、`supported_node_types`（**由进程默认 NodeRegistry 自动
+生成**，内置 + `plaita.nodes` 插件 + 启动期显式注册的 CodeNode 等，不手写
+第二份）、`unsupported_node_types`（Python 侧恒空：对未注册类型的拒绝发生
+在解析期，「这条 flow 哪些节点不被支持」由 console 能力门按清单现算）、
+`features`（`suspend`/`checkpoint`/`hitl_await`）。console `/api/services`
+读面投影为顶层 `capability_manifest` 字段，publish/start 能力门
+（`plaita-console/backend/services/capability_gate.py`）按池内全部清单的
+`supported_node_types` **交集**校验 flow 节点集合；目标池内没有任何清单
+（旧 build worker）时门 fail-open 放行并打 WARNING——发布/启动行为与上线前
+一致，混池能力升级完成后建议尽快让全部 worker 升到带清单的 build。
+
 **消费规则**：
 
 1. 首投与 reclaim 同判：两端都非 `legacy` 且 `config_family` 不同 → 不执行；

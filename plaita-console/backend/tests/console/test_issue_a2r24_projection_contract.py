@@ -115,8 +115,9 @@ class TestProjectionParity:
         for key in ("flow_id", "tenant_id", "author", "desc", "created_at", "updated_at"):
             assert detail[key] == list_row[key], key
         assert detail["versions"][0]["version"] == "0.0.1"
+        # plaita#300：版本摘要新增 runtime（目标 runtime pool，go/python）
         assert set(detail["versions"][0]) == {
-            "version", "status", "created_at", "published_at", "updated_at"
+            "version", "status", "runtime", "created_at", "published_at", "updated_at"
         }
 
     def test_credential_detail_has_list_fields(self, credential_client):
