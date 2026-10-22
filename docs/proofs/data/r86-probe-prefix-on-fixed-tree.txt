@@ -1,0 +1,9 @@
+flow_versions.updated_at 列不可用，草稿保存退化为无并发保护的覆盖写（flow=f1@0.0.1）——乐观锁 #101 失效，请升级库结构
+
+=== A2R54 probe output ===
+[RED-HIT] A2R54-01 门快照TOCTOU：未过门的 D2 被发布 | published=published definition=D2-UNGATED
+[GREEN-HIT] 对照绿1 无竞窗：门对象==发布对象 | published=published definition=D1
+[RED-MISS] A2R54-02 CAS状态盲写：已发布行被打回draft+改定义 | cas_ok=False status=published definition=D1 published_at残留=True
+[GREEN-HIT] 对照绿2 无窗口：published 检查拦截保存 | blocked=True status=published definition=D1
+[GREEN-MISS] 佐证 legacy降级(列缺)：同样打回draft | cas_ok=False status=published definition=D1
+TOTAL: 1 red / 2 green/proof

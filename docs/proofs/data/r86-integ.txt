@@ -1,0 +1,19 @@
+........................................................................ [ 33%]
+........................................................................ [ 67%]
+......................................................................   [100%]
+=============================== warnings summary ===============================
+tests/unit/test_registry.py::TestServiceRegistryIntegration::test_full_lifecycle
+  /private/tmp/plaita-b3-r86/plaita/server/registry.py:236: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+tests/unit/test_registry.py::TestServiceRegistryIntegration::test_full_lifecycle
+  /private/tmp/plaita-b3-r86/plaita/server/registry.py:371: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+tests/unit/test_registry.py::TestServiceRegistryIntegration::test_full_lifecycle
+  /private/tmp/plaita-b3-r86/plaita/server/registry.py:312: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(key, 5, service_info.to_json())  # 5秒后过期
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+214 passed, 2 skipped, 8963 deselected, 3 warnings in 36.68s
+integ-rc=0

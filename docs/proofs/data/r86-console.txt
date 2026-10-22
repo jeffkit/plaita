@@ -1,0 +1,6 @@
+  /private/tmp/plaita-b3-r86/plaita-console/backend/tests/console/test_wave12_cancel_api.py:70: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "start_time": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1399 passed, 14 skipped, 13643 warnings in 173.95s (0:02:53)
+console-rc=0

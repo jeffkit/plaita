@@ -719,10 +719,24 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
         )
     _gate_runtime_capability(redis, row, where="publish")
     try:
-        out = store.publish_version(flow_id, req.version, tenant_id=tenant)
+        # A2R54-01/02：发布事务内对 fresh 行 re-gate + 条件翻转（并发保存落进
+        # 竞窗 → 409，不再静默发布未过门定义/打回已发布行）。
+        out = store.publish_version(
+            flow_id, req.version, tenant_id=tenant,
+            gate_fn=lambda fresh: _gate_runtime_capability(redis, fresh, where="publish"),
+        )
     except LookupError as e:
         raise HTTPException(
             status_code=404, detail=error_detail("version_not_found", str(e))
+        )
+    except flow_store.VersionConflictError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "version_stale", str(e),
+                conflict="version_stale",
+                latest_updated_at=e.latest_updated_at,
+            ),
         )
     # 发布即同步到引擎运行时存储：FlowWorker 从这里解析定义，
     # 不同步则「发布成功、启动必失败」。本地单机模式无 Redis：
@@ -939,10 +953,23 @@ def import_version(req: ImportPromotionRequest, request: Request = None,
         # 版本保持 draft）。
         _gate_runtime_capability(redis, stored, where="import.publish")
         try:
-            out = _store().publish_version(flow_id, version, tenant_id=tenant)
+            # A2R54-01/02：同普通发布——事务内 re-gate + 条件翻转（竞窗 409）。
+            out = _store().publish_version(
+                flow_id, version, tenant_id=tenant,
+                gate_fn=lambda fresh: _gate_runtime_capability(redis, fresh, where="import.publish"),
+            )
         except LookupError as e:
             raise HTTPException(
                 status_code=404, detail=error_detail("version_not_found", str(e))
+            )
+        except flow_store.VersionConflictError as e:
+            raise HTTPException(
+                status_code=409,
+                detail=error_detail(
+                    "version_stale", str(e),
+                    conflict="version_stale",
+                    latest_updated_at=e.latest_updated_at,
+                ),
             )
         sync_flow_to_engine(redis, flow_id, out.version, out.definition, tenant_id=tenant)
         try:
