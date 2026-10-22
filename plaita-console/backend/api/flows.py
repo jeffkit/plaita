@@ -68,13 +68,16 @@ from plaita.storage.redis import ExecutionStateCorruptError
 
 try:  # plaita#300：runtime 能力门 + 池路由取值域
     from ..services.capability_gate import UnsupportedNodeTypesError, gate_flow_nodes
-    from ..services.runtime_pools import normalize_runtime
+    from ..services.runtime_pools import DEFAULT_RUNTIME, normalize_runtime
 except ImportError:
     from services.capability_gate import (  # type: ignore
         UnsupportedNodeTypesError,
         gate_flow_nodes,
     )
-    from services.runtime_pools import normalize_runtime  # type: ignore
+    from services.runtime_pools import (  # type: ignore
+        DEFAULT_RUNTIME,
+        normalize_runtime,
+    )
 
 try:  # A2R24-09：SSE 路由的 OpenAPI 媒体类型声明
     from ..streaming import EventStreamResponse
@@ -538,6 +541,89 @@ def _pause_pinned_schedules(redis: Optional[Redis], pinned: List[tuple]) -> List
     return paused
 
 
+def _restamp_schedules_for_publish(
+    redis: Optional[Redis],
+    tenant: Optional[str],
+    flow_id: str,
+    version: str,
+    runtime_raw: Any,
+) -> int:
+    """A2R50-03：发布成功后按发布版本行现值重盖同 flow 调度行的 runtime 章。
+
+    #300 的行上章只在 create/update/enable 盖（publish 全路径零调度触点，
+    r50 台账静态+行为双证）——version=None（跟随 latest）的调度在发布不同
+    runtime 新版本后，cron 按行上陈旧章选池（``_resolve_schedule_queue``）、
+    manual trigger 按版本行现值选池，两面分裂（go 版本被 cron 反复打进
+    python 池节点级失败）。publish 是 runtime 变更唯一入口，在此源头闭窗，
+    章语义恢复「盖章值 = 生效版本行 runtime」——与 create/update/enable
+    同口径，值域仍经 ``normalize_runtime``（runtime_queues 单源）。
+
+    范围：同 flow、同租户、生效版本 = 本次发布版本的行——``version`` 空
+    （跟随 latest，生效版本随本次发布切换）与钉在本次发布版本上的行（幂等
+    重发布顺带自愈 legacy 缺章行）；钉在**其他**版本的行生效版本未变，不碰。
+    集群档专用：本地档调度表无 runtime 列、触发在进程内不走队列，行上章无
+    语义（``redis=None`` 直接跳过）。
+
+    写入走 ``cas_update_schedule``（WATCH/MULTI 原子、只回写改动字段），
+    **不碰 ``updated_at``**——重章是服务端路由校正而非用户编辑，不参与 #198
+    乐观锁竞争。best-effort：扫描/单行失败只 WARNING 不回滚发布（与删除
+    级联暂停同口径），陈旧窗留待下次发布/重启用收敛。返回重章行数。
+    """
+    if redis is None:
+        return 0
+    try:
+        runtime = normalize_runtime(runtime_raw)
+    except ValueError:
+        logger.warning(
+            "发布版本 runtime 非法 flow=%s@%s runtime=%r（重章落默认 %s）",
+            flow_id, version, runtime_raw, DEFAULT_RUNTIME,
+        )
+        runtime = DEFAULT_RUNTIME
+    try:
+        from plaita.server.services.schedule_service import (
+            cas_update_schedule,
+            list_schedules,
+        )
+
+        rows = list_schedules(redis)
+    except Exception as e:  # noqa: BLE001 — 发布已完成，重章降级留痕
+        logger.warning(
+            "发布后调度行重章扫描失败 flow=%s@%s（陈旧章留待下次发布/重启用"
+            "收敛）: %s", flow_id, version, e,
+        )
+        return 0
+    tenant_key = tenant or "default"
+    restamped = 0
+    for row in rows:
+        if row.get("flow_id") != flow_id:
+            continue
+        if (row.get("tenant_id") or "default") != tenant_key:
+            continue
+        if row.get("version") not in (None, "", version):
+            continue
+        sid = row.get("schedule_id")
+        if not sid or row.get("runtime") == runtime:
+            continue
+
+        def _apply(current: dict) -> None:
+            current["runtime"] = runtime
+
+        try:
+            if cas_update_schedule(redis, sid, _apply) is not None:
+                restamped += 1
+        except Exception as e:  # noqa: BLE001 — 单行失败不回滚发布
+            logger.warning(
+                "调度行重章失败 schedule=%s flow=%s@%s: %s",
+                sid, flow_id, version, e,
+            )
+    if restamped:
+        logger.info(
+            "发布后调度行重章 flow=%s@%s runtime=%s：重盖 %s 行",
+            flow_id, version, runtime, restamped,
+        )
+    return restamped
+
+
 def _enforce_version_delete_guard(
     redis: Optional[Redis],
     tenant: Optional[str], flow_id: str,
@@ -910,8 +996,15 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
     # 发布即同步到引擎运行时存储：FlowWorker 从这里解析定义，
     # 不同步则「发布成功、启动必失败」。本地单机模式无 Redis：
     # 执行走 console 进程内（SQLite 定义），无需同步。
+    schedules_restamped = 0
     if redis is not None:
         sync_flow_to_engine(redis, flow_id, out.version, out.definition, tenant_id=tenant)
+        # A2R50-03：publish 是 runtime 变更唯一入口——随发布重盖同 flow 调度
+        # 行的陈旧章（此前只在 create/update/enable 盖，version=None 调度在
+        # 换 runtime 发布后 cron 按旧章错池、与 manual 按版本行现值分裂）。
+        schedules_restamped = _restamp_schedules_for_publish(
+            redis, tenant, flow_id, out.version, getattr(out, "runtime", None)
+        )
     if request is not None:
         try:
             from ..config import get_settings
@@ -919,7 +1012,8 @@ def publish_flow(flow_id: str, req: PublishRequest, request: Request = None,
             from config import get_settings
         env = get_settings().console_env
         _audit(request, "flow.publish", f"{flow_id}@{out.version}",
-               {"env": env}, tenant_id=tenant)
+               {"env": env, "schedules_restamped": schedules_restamped},
+               tenant_id=tenant)
         # 部署记录（切片 C）
         try:
             from ..services import deployments as deployments_svc
