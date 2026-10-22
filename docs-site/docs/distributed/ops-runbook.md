@@ -743,7 +743,11 @@ worker 不同机/不同 Redis 时，人工在目标机跑 `sync_published_to_eng
 - **DLQ 人工出口（c117-06）**：`POST /api/flows/publish-outbox/{id}/resolve`
   （认定无需再投递 → `resolved` 终态，留痕）/ `.../discard`（放弃投递并
   删行，仅审计）。delivered 行两者都 409（resolve 无意义 / discard 会失去
-  对账覆盖）；跨租户/不存在 → 404；
+  对账覆盖）；跨租户/不存在 → 404。人工出口与删除协议/投递/对账同锁
+  （A2R50-02：出口的检查与写在 `OUTBOX_DELETE_LOCK` 内全程串行，锁内
+  重读行现态）——出口与 `mark_deleting` 的竞窗不再可能盖掉 tombstone
+  或抢删行（否则删除事务失败回滚后被出口动过的行不可恢复，published
+  版本永久失去投递/对账载体），竞窗内命中 tombstone 一律 409 具名拒；
 - `GET /health` 的 `engine_outbox` 字段暴露 `status/pending/failed/resolved/
   deleting/drift_total/last_delivered_at/last_error` 及当轮对账/投递计数
   （`drift_total` = 源表定义漂移被对账命中的累计次数，>0 即发生过 DB 级
