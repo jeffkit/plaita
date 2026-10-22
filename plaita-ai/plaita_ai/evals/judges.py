@@ -109,11 +109,19 @@ def judge_output(
         "Answer with a single JSON object only: "
         '{"ok": true|false, "score": 0.0-1.0, "reason": "one sentence"}.'
     )
-    user = (
-        f"Rubric:\n{rubric}\n\n"
-        f"Input:\n{json.dumps(input_data, ensure_ascii=False, default=str)}\n\n"
-        f"Output:\n{json.dumps(output, ensure_ascii=False, default=str)}"
-    )
+    try:
+        user = (
+            f"Rubric:\n{rubric}\n\n"
+            f"Input:\n{json.dumps(input_data, ensure_ascii=False, default=str)}\n\n"
+            f"Output:\n{json.dumps(output, ensure_ascii=False, default=str)}"
+        )
+    except Exception as e:
+        # A2R46-01 输入侧：output 由候选 flow 自控——深嵌套结构（~10k 层约
+        # 20KB）让 json.dumps 抛 RecursionError（RuntimeError 族）。请求没发
+        # 出去、不存在任何 verdict，与坏回复同口径降级 unavailable，不得穿透
+        # evaluate（r73 只守了回复解析侧，这里是输入侧的另一半）。
+        _log.warning("judge request could not be built; case degrades to unavailable: %s", e)
+        return _unavailable_reply("judge request could not be built: output not serializable")
     try:
         resp = httpx.post(
             f"{base_url}/chat/completions",

@@ -555,7 +555,13 @@ class Supervisor:
         """Save one proposal as the next patch version, evaluate it against the
         dataset, compare with the baseline, and apply the promote gate. This is
         the reusable half of :meth:`iterate` (the flow template calls it
-        directly, with the proposal produced upstream)."""
+        directly, with the proposal produced upstream).
+
+        失败迭代的候选版本处置（A2R46-01，补记而非回滚）：版本一经落库，
+        评测/对比段崩溃降级为 ``failed_iteration``，outcome 仍携带
+        ``candidate_version`` 指认已存版本——版本保留在 console 里作谱系
+        （无删除 API，供人类审计），绝不留无主孤儿。
+        """
         policy = self.policy
         baseline = baseline or self.baseline(flow_id, dataset)
         result: Dict[str, Any] = {
@@ -592,15 +598,34 @@ class Supervisor:
         result["candidate_version"] = next_version
         result["rationale"] = proposal.get("rationale", "")
 
-        candidate = evaluate(
-            self.client,
-            flow_id,
-            next_version,
-            dataset,
-            mode=policy.eval_mode,
-            timeout_s=policy.eval_timeout_s,
-        )
-        verdict = compare(baseline, candidate)
+        # A2R46-01 孤儿候选版本守卫：版本已在上一步落库，此后评测/对比段任何
+        # 崩溃（候选自控载荷的序列化残余形状、console 5xx 等）若穿透，run_loop
+        # 兜底新建的 outcome 就丢掉 candidate_version——库里留下无主孤儿版本
+        # （实弹：1.0.1/1.0.2 落库但 outcome 无 candidate_version）。处置取
+        # 「补记」不取「回滚」：console 版本无删除 API，版本谱系本来就是留给
+        # 人类审计的（见上 #59 注），失败的候选版本保留谱系、outcome 补
+        # candidate_version 指认，降级 failed_iteration 走既有连续失败预算。
+        try:
+            candidate = evaluate(
+                self.client,
+                flow_id,
+                next_version,
+                dataset,
+                mode=policy.eval_mode,
+                timeout_s=policy.eval_timeout_s,
+            )
+            verdict = compare(baseline, candidate)
+        except Exception as exc:
+            _log.warning(
+                "candidate version %s evaluation crashed; degraded to failed_iteration "
+                "(version kept as lineage): %s: %s",
+                next_version,
+                type(exc).__name__,
+                exc,
+            )
+            result["status"] = "failed_iteration"
+            result["reason"] = f"candidate evaluation unavailable: {type(exc).__name__}: {exc}"[:500]
+            return result
         result["candidate_report"] = candidate
         result["comparison"] = verdict
 
@@ -611,13 +636,24 @@ class Supervisor:
             "candidate": int(candidate.get("judge_unavailable_cases") or 0),
         }
         result["judge_unavailable_cases"] = judge_unavailable
+        unavailable_cases = {
+            "baseline": int(baseline.get("unavailable_cases") or 0),
+            "candidate": int(candidate.get("unavailable_cases") or 0),
+        }
+        result["unavailable_cases"] = unavailable_cases
         # A judge that was unreachable makes the two averages incomparable:
         # the "improvement" may just be the outage ending. Never promote on it.
-        judge_blind = bool(judge_unavailable["baseline"] or judge_unavailable["candidate"])
+        # A2R46-01 同理：输入侧序列化降级的 case 让两侧均值口径不一致，同属 blind。
+        blind = bool(
+            judge_unavailable["baseline"]
+            or judge_unavailable["candidate"]
+            or unavailable_cases["baseline"]
+            or unavailable_cases["candidate"]
+        )
         failed_hard = cand_avg is None  # whole eval crashed → counts as a failure
         improved = (
             not failed_hard
-            and not judge_blind
+            and not blind
             and base_avg is not None
             and cand_avg is not None
             and cand_avg >= base_avg + policy.min_improvement
@@ -632,11 +668,17 @@ class Supervisor:
             return result
         else:
             result["status"] = "no_improvement"
-            if judge_blind:
+            if blind:
+                causes = []
+                if judge_unavailable["baseline"] or judge_unavailable["candidate"]:
+                    causes.append("judge unavailable")
+                if unavailable_cases["baseline"] or unavailable_cases["candidate"]:
+                    causes.append("case unavailable")
                 result["reason"] = (
-                    "judge unavailable on "
-                    f"{judge_unavailable['baseline']} baseline / "
-                    f"{judge_unavailable['candidate']} candidate case(s) — scores not comparable"
+                    f"{' / '.join(causes)} on "
+                    f"{judge_unavailable['baseline'] + unavailable_cases['baseline']} baseline / "
+                    f"{judge_unavailable['candidate'] + unavailable_cases['candidate']} candidate "
+                    "case(s) — scores not comparable"
                 )
             return result
 

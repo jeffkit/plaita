@@ -191,3 +191,114 @@ def test_evaluate_execution_mode_carries_langfuse_trace(tmp_path):
     report = evaluate(client, "demo", "1.0.0", load_dataset(str(file)), mode="execution")
     assert report["cases"][0]["langfuse_trace_url"] == "https://langfuse.example/trace/abc123"
     assert report["langfuse_traces"] == ["https://langfuse.example/trace/abc123"]
+
+
+# -- 输入侧深嵌套（A2R46-01）----------------------------------------------------
+#
+# 候选 flow 的 dry-run 返回值与 execution 错误载荷都是候选自控的：深嵌套结构
+# （~10k 层约 20KB）让 json.dumps 抛 RecursionError（RuntimeError 族，不是
+# ValueError）。r73 只守了 judge 回复侧；输入侧这两处（assert_score 首行的
+# json.dumps(output)、execution 错误载荷的 json.dumps）一旦炸穿 per-case 守卫
+# （只捕 ConsoleClientError），整个 evaluate 崩、兄弟 case 已算出的结果一并
+# 丢弃。修复口径与输出侧相同：单 case 降级 unavailable 剔出均值，兄弟保留，
+# 报告本体保持 JSON 可序列化（下游 MCP 回复 / proposer prompt 还要 dumps 它）。
+#
+# 注入方式：深结构在客户端成形（resp.json() 的解析产物），故以 client 实例级
+# monkeypatch 注入返回值——线上 json.loads 与 json.dumps 的深度极限对称，纯
+# 线上文本到不了 scoring 面；实际窗口是「结构已成形 + 深调用栈耗尽预算」。
+
+
+def _deep_output(depth: int = 10008) -> dict:
+    root: dict = {}
+    node = root
+    for _ in range(depth):
+        node["child"] = {}
+        node = node["child"]
+    return root
+
+
+def _two_case_file(tmp_path):
+    file = tmp_path / "cases.json"
+    file.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"id": "deep", "input": {"i": 0}, "expect": {"contains": "ada"}},
+                    {"id": "sibling", "input": {"i": 1}, "expect": {"contains": "ada"}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return load_dataset(str(file))
+
+
+def test_deep_candidate_output_degrades_to_unavailable_siblings_kept(tmp_path, monkeypatch):
+    """负控主体（dry-run 面）：深嵌套候选输出必须只倒下自己那一个 case。
+
+    pre-fix：assert_score 首行 json.dumps(output) 抛 RecursionError，穿透
+    evaluate（只捕 ConsoleClientError）——整个报告崩，兄弟 case 结果丢弃；
+    post-fix：deep 单 case 降级 unavailable 剔出均值，sibling 照常计分，
+    报告本体可 json.dumps。
+    """
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": '{"v": 1}'}, published="1.0.0")
+    client = make_client(fake)
+
+    def deep_dry_run(flow_json, input=None, pinned=None, only_node=None):
+        if (input or {}).get("i") == 0:
+            return {"result": _deep_output(), "nodes": [], "error": None}
+        return {"result": {"text": "hello ada"}, "nodes": [], "error": None}
+
+    monkeypatch.setattr(client, "dry_run", deep_dry_run)
+    report = evaluate(client, "demo", "1.0.0", _two_case_file(tmp_path))
+    by_id = {c["id"]: c for c in report["cases"]}
+    assert by_id["deep"]["unavailable"] is True
+    assert by_id["deep"]["ok"] is False
+    assert "RecursionError" in by_id["deep"]["reasons"][0]
+    assert by_id["sibling"]["ok"] is True
+    assert report["unavailable_cases"] == 1
+    assert report["judge_unavailable_cases"] == 0
+    assert report["pass_rate"] == 1.0
+    assert report["avg_score"] == 1.0
+    json.dumps(report)  # 报告本体不得携带序列化地雷
+
+
+def test_deep_execution_error_payload_degrades_case_only(tmp_path, monkeypatch):
+    """负控（execution 面：错误载荷 json.dumps）：同口径单 case 降级。"""
+    fake = FakeConsole()
+    fake.seed_flow("demo", {"1.0.0": '{"v": 1}'}, published="1.0.0")
+    client = make_client(fake)
+
+    def start(flow_id, version=None, params=None, **kw):
+        return {"execution_id": "exec-deep" if (params or {}).get("i") == 0 else "exec-ok"}
+
+    def wait(execution_id, timeout_s=120.0, **kw):
+        if execution_id == "exec-deep":
+            return {"status": "failed", "error": _deep_output(), "execution_id": execution_id}
+        return {"status": "completed", "output": {"text": "hello ada"}, "execution_id": execution_id}
+
+    monkeypatch.setattr(client, "start_execution", start)
+    monkeypatch.setattr(client, "wait_execution", wait)
+    report = evaluate(client, "demo", "1.0.0", _two_case_file(tmp_path), mode="execution")
+    by_id = {c["id"]: c for c in report["cases"]}
+    assert by_id["deep"]["unavailable"] is True
+    assert "RecursionError" in by_id["deep"]["error"]
+    assert by_id["sibling"]["ok"] is True
+    assert report["unavailable_cases"] == 1
+    assert report["pass_rate"] == 1.0
+    json.dumps(report)
+
+
+def test_compare_treats_unavailable_case_as_blind():
+    """unavailable case 的 ok/score 不是证据：compare 不得拿它算回归/进步。"""
+    base = {"version": "1.0.0", "pass_rate": 1.0, "avg_score": 1.0,
+            "cases": [{"id": "c0", "ok": True, "score": 1.0}, {"id": "c1", "ok": True, "score": 1.0}]}
+    candidate = {"version": "1.0.1", "pass_rate": 1.0, "avg_score": 1.0,
+                 "cases": [{"id": "c0", "unavailable": True, "ok": False, "score": 0.0},
+                           {"id": "c1", "ok": True, "score": 1.0}]}
+    verdict = compare(base, candidate)
+    row = {r["id"]: r for r in verdict["cases"]}["c0"]
+    assert row["judge_unavailable"] is True  # blind 复用既有标记面
+    assert verdict["regressions"] == []
+    assert verdict["improvements"] == []
