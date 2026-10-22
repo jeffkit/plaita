@@ -424,3 +424,110 @@ class TestCrossTenantIsolation:
         assert detail["error"] == "unsupported_node_types"
         assert detail["runtime"] == "go"
         assert store.get_version("mappy", "1.0.0", tenant_id="tenant-b").status == "draft"
+# ---------------------------------------------------------------------------
+# #82 复跑（B3 r80）：上面所有 go 池用例的 capability_manifest 都是测试合成的
+#（_register_worker 里 build_capability_manifest 注入）——没有任何用例覆盖
+# 「真实 plaita-go worker 注册条目」。本组用例改用真实注册产物复跑 #300 负控
+# 矩阵：fixture 由 plaita-go pkg/worker 的 TestExportRegistryFixture 导出
+# （真实 Registry.Start→running→Flush 的 SETEX 字节，manifest 由
+# ir.CapabilityManifest() 白名单自动生成），清单随 plaita-go 白名单演进时
+# 重新导出即可。
+GO_WORKER_ENTRY_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "plaita_go_registry_entry.json"
+)
+
+
+def _sql_def(flow_id="sqlq", version="1.0.0"):
+    # sql_query 在真实 plaita-go 清单里是 unsupported（已知拒载面），而
+    # python 侧是注册节点——真品门正反两向的试金石。
+    return json.dumps({
+        "flow_id": flow_id,
+        "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": "start", "next": "q"},
+            {"type": "sql_query", "id": "q", "next": "end"},
+            {"type": "end", "id": "end", "output": "$INPUT", "resultType": "success"},
+        ],
+    })
+
+
+def _register_real_go_worker(redis):
+    entry = json.loads(GO_WORKER_ENTRY_FIXTURE.read_text())
+    redis.setex(
+        f"plaita:registry:flow_worker:{entry['instance_id']}", 30,
+        json.dumps(entry),
+    )
+    return entry["metadata"]["capability_manifest"]
+
+
+class TestRealGoWorkerRegistration:
+    def _only_real_go_worker(self, redis):
+        redis.delete("plaita:registry:flow_worker:go-1")
+        return _register_real_go_worker(redis)
+
+    def test_real_entry_publish_gates_sql_query_flow(self, redis):
+        manifest = self._only_real_go_worker(redis)
+        client = _client(redis)
+        flow_store.get_flow_store().create_flow("sqlq", tenant_id="default")
+        _save(client, "sqlq", "1.0.0", _sql_def(), runtime="go")
+        resp = _publish(client, "sqlq", "1.0.0")
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "unsupported_node_types"
+        assert detail["runtime"] == "go"
+        assert detail["unsupported"] == ["sql_query"]
+        assert detail["supported"] == manifest["supported_node_types"]
+        # 未发布：draft 不动、引擎存储无键、零入队
+        row = flow_store.get_flow_store().get_version("sqlq", "1.0.0")
+        assert row.status == "draft"
+        assert redis.get("plaita:flow:sqlq:1.0.0") is None
+        assert redis.xlen(GO_QUEUE) == 0
+
+    def test_real_entry_start_gate_blocks_no_enqueue_no_row(self, redis):
+        self._only_real_go_worker(redis)
+        client = _client(redis)
+        store = flow_store.get_flow_store()
+        store.create_flow("sqlq", tenant_id="default")
+        store.save_flow_definition("sqlq", "1.0.0", _sql_def("sqlq"), "{}",
+                                   runtime="go", tenant_id="default")
+        store.publish_version("sqlq", "1.0.0")
+        resp = _start(client, "sqlq", "1.0.0")
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "unsupported_node_types"
+        assert detail["unsupported"] == ["sql_query"]
+        # 零残留：无 queued 占位行、无队列消息、无配额占位
+        assert redis.xlen(GO_QUEUE) == 0
+        assert redis.xlen(DEFAULT_QUEUE) == 0
+        assert not redis.keys("plaita:*execution:sqlq*")
+        assert redis.zcard("plaita:tenant_running:default") == 0
+
+    def test_real_entry_supported_flow_routes_to_go_queue(self, redis):
+        self._only_real_go_worker(redis)
+        client = _client(redis)
+        store = flow_store.get_flow_store()
+        store.create_flow("plain", tenant_id="default")
+        store.save_flow_definition("plain", "1.0.0", _plain_def("plain"), "{}",
+                                   runtime="go", tenant_id="default")
+        store.publish_version("plain", "1.0.0")
+        resp = _start(client, "plain", "1.0.0")
+        assert resp.status_code == 200, resp.text
+        assert redis.xlen(GO_QUEUE) == 1
+        assert redis.xlen(DEFAULT_QUEUE) == 0
+
+    def test_services_read_face_shows_real_manifest(self, redis):
+        manifest = self._only_real_go_worker(redis)
+        client = _client(redis)
+        resp = client.get("/api/services", headers=_headers())
+        assert resp.status_code == 200, resp.text
+        rows = {s["instance_id"]: s for s in resp.json()["services"]}
+        go = rows["flow-worker-fixture-1"]
+        assert go["capability_manifest"]["engine"] == "plaita-go"
+        assert go["capability_manifest"]["ir_contract_version"]
+        assert go["capability_manifest"]["supported_node_types"] == manifest["supported_node_types"]
+        # 真实 accept-list（#80 三相转正后）：map/case 等已支持；
+        # sql_query 是 Go 侧「未做」——不在 supported 也不在 unsupported
+        #（unsupported 只收有具名拒绝提示的类型），能力门按 supported 集
+        # 判定照样拒——与合成清单的代表性子集不同。
+        assert "map" in go["capability_manifest"]["supported_node_types"]
+        assert "sql_query" not in go["capability_manifest"]["supported_node_types"]
