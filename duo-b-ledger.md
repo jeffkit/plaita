@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十六轮，2026-10-22）：**login_guard 硬化 A112-01/02 + B112-01/02（基线 `3c9d1a0`）**——① 三桶限速：per-key `(ip,user)` 5 次/300s、账号桶（失败来自 ≥3 个不同 IP）、IP 桶（单 IP fan-out ≥10，锁 5m 减少 NAT 影响），锁内正确/错误都 429、再次触发翻倍封顶 24h；② 反枚举：missing 跑固定 dummy PBKDF2、disabled 跑真实 hash（计时比 16×→1.0×）；③ 可信代理：`PLAITA_TRUSTED_PROXIES` allowlist，peer 可信时 XFF 从右向左取首个 untrusted，否则忽略 XFF；④ 多 worker：`RedisLoginThrottle`（Lua 原子共享 key/IP/account），无 Redis 本地档退回进程内并文档化；⑤ break-glass env 绕过限速（仍校验口令）；⑥ MAX_TRACKED 不再驱逐活动锁。测试 console `test_issue_a112_login_hardening.py` **12P** + #208 **8P**；NC-L1~L11 pre/post（端点探针 + timing/eviction 探针）；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1184P/13S**；`landing_gate.py ci` rc=0（`3c9d1a0` CI + Console E2E 绿）。
+
 > 一行摘要（第六十五轮，2026-10-22）：**B109-01/02 + B2 r67 注记轻量硬化（基线 `a75b4ab`）**——① `safeExternalUrl` 外部链接 scheme 白闸（仅 http/https；javascript:/data:/相对路径返回 null），`ExecutionDetail` Langfuse 链接非白即降级纯文本；② `buildLogsHref` 用 URLSearchParams 逐参数编码，Cluster 日志深链的 serviceType/instanceId 特殊字符不再改写 query；③ `test_issue69_mutation_matrix.py` 的恒真断言 `assertTrue(x is False or x)` 改为 `assertFalse(refused)`（对照实现 Reduce.initial refused=False，写穿由 live_changed 全表断言兜住）。前端 `node check-api-transport` **33/33** + tsc 干净；unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1121P/13S**；负控（去 scheme 白闸/退回字符串拼接/改错期望值）三红→恢复绿；`landing_gate.py ci` rc=0（`eee7b37` CI + Console E2E `a75b4ab` 绿）。
 
 > 一行摘要（第六十四轮，2026-10-22；任务书标称第六十三轮——台账第六十三轮已被 #289 park-retry 轮占用，按序列顺延）：**B108-01/02 收尾（基线 `c24ce3e`）**——① **park 周期清扫**：新增 `plaita/server/start_dedup_sweeper.py`，park 时写 `{ns}:start-dedup-park:{key}`（id+parked_at），console cluster lifespan 启动 `ParkSweeper`（默认 30s/超时 60s=claiming TTL/预算 100，env 可调/可关）；超时后 queued/缺失行 ⇒ 墓碑+删行+清 map/token+回配额+WARNING，running/终态只删标记；`mark_enqueued` 成功清除标记。② **discarded 独立审计**：worker 终态放弃载体递增 `_dedup_discarded_total`，`/metrics` 新 counter `worker_dedup_discarded_total`，写 `plaita:execution:dedup-discard:{id}`（7d），console 执行详情返回 `dedup_discarded`。测试 unit **4P** sweeper + console 既有 3P 追加指标/审计/详情断言；负控 A–D（永不清理/忽略超时/无 counter/无审计）实红；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1121P/13S**；`landing_gate.py ci` rc=0（`eee7b37` CI + Console E2E 绿）。
@@ -566,5 +568,37 @@
 - 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
   subtests**；e2e+integration **287P/4S**；console **1121P/13S**；
   `landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十六轮 · login_guard 硬化（A112-01/02 + B112-01/02，2026-10-22，B1 修复席）
+
+- 基线：`origin/main` `3c9d1a0`；落地门 `3c9d1a0` CI + Console E2E 绿。
+- **A112-01 分布式爆破**：新增账号桶（同一账号失败来自 ≥3 个不同 IP →
+  锁账号）；保留 per-key `(ip,user)` 5 次/300s；新增 IP 桶（单 IP fan-out
+  ≥10 → 锁 IP 5m，低于账号锁，NAT/共享出口影响小）。单 IP 重复失败不触发
+  账号桶（L5 另一 IP 仍可登录）。
+- **A112-02 计时枚举**：`users_svc.login` 对 missing 跑固定 dummy PBKDF2、
+  disabled 跑真实 hash；A1 probe ratio 16.0× → 1.0×（阈值 ≤2）。
+- **B112-01 可信代理**：`PLAITA_TRUSTED_PROXIES`（IP/CIDR allowlist）；
+  仅 peer 可信时解析 XFF，从右向左取首个 untrusted；peer 不可信一律忽略
+  XFF（L2 伪 XFF 仍锁）。
+- **B112-02 多 worker**：`RedisLoginThrottle`（key/IP/account 三维 Lua 原子
+  共享计数，前缀 `plaita:login-guard:`）；endpoint 从 `app.state.redis` 注入；
+  无 Redis 本地档退回进程内并 runbook 注明单 worker 语义。
+- **L6 break-glass**：`PLAITA_LOGIN_BREAK_GLASS_USERS` 绕过限速（仍校验
+  口令，WARNING）。
+- **L10**：`_prune` 不驱逐活动锁；容量满时新键不跟踪，已有锁保持。
+- 测试：`test_issue_a112_login_hardening.py` **12P**（L1~L11 逐条，含 Redis
+  两实例共享计数与两个 app 端点共享计数）；既有 #208 **8P**；`test_r55_
+  audit_observability` 的 retry_after monkeypatch 适配新签名。
+- 负控：pre `/tmp/plaita-r112-tree` vs post 主树（端点探针 + A1 timing/
+  eviction）：L1 429→200、L3 helper 无→有、L4 200→429、L5 未试账号 200→429、
+  L6 429→200、L7/L8 无实现→有、L9 16×→1.0×、L10 evicted True→False、
+  L11 200/401→429/429；L2 429→429（保留性）。证据
+  `docs/proofs/data/r64-login-hardening-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
+  subtests**；e2e+integration **287P/4S**；console **1184P/13S**（rebase 到
+  `3c9d1a0` 后复跑）；`landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

@@ -734,6 +734,23 @@ redis-cli KEYS 'plaita:execution:lease:*'
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
 
+### 登录限速与反枚举（r64 A112-01/02、B112-01/02）
+
+- **三桶**：`(client_ip, username)` 5 次/300s → 锁 15m；同一账号的失败来自
+  ≥3 个不同 IP → 锁账号（分布式爆破）；单 IP 对多用户名 fan-out ≥10 次 →
+  锁该 IP（5m，低于账号锁，减少 NAT/共享出口影响）。再次触发锁定时长翻倍，
+  上限 24h；锁定期内正确/错误口令都 429。
+- **客户端 IP**：默认只用 ASGI peer；只有 peer 命中 `PLAITA_TRUSTED_PROXIES`
+  （逗号分隔 IP/CIDR）才解析 `X-Forwarded-For`，并从右向左取第一个 untrusted
+  地址。未配置可信代理时 XFF 一律忽略（防伪造绕过）。
+- **多 worker**：console 连 Redis 时计数写共享 Redis（Lua 原子，前缀
+  `plaita:login-guard:*`），N 个 worker 不会变成 N×5；无 Redis 的本地档退回
+  进程内计数（单 worker 语义）。
+- **break-glass**：`PLAITA_LOGIN_BREAK_GLASS_USERS`（逗号分隔用户名）绕过限速
+  （仍校验口令，日志 WARNING）；仅用于紧急运维，使用后应移除。
+- **反枚举**：用户名不存在/禁用也执行一次同成本 PBKDF2（固定 dummy hash），
+  登录响应时间不区分账号是否存在。
+
 ### console 审计口径（A55-S2/S3/S4）
 
 - **拒绝审计按窗口合并**：`*.denied` / `auth.denied` / `auth.login_failed` 以

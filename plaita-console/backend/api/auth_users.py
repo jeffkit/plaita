@@ -57,13 +57,17 @@ _USER_FP_LEN = 12
 
 
 def _client_ip(request: Request) -> str:
-    """登录限速维度之一：ASGI 客户端地址。
+    """登录限速维度之一：解析真实客户端地址（B112-01）。
 
-    刻意不读 ``X-Forwarded-For``（可伪造，读它等于把限速交给攻击者）；
-    反向代理部署下需要真实 IP 时应在网关层收敛后再另议（issue 边界）。
+    默认只用 ASGI peer；仅当 peer 在 ``PLAITA_TRUSTED_PROXIES`` 内才读
+    ``X-Forwarded-For``，并从右向左取第一个 untrusted 地址。裸信 XFF 等于
+    把限速交给攻击者（可伪造）。
     """
     client = getattr(request, "client", None)
-    return getattr(client, "host", "") or "unknown"
+    peer = getattr(client, "host", "") or "unknown"
+    return login_guard.client_ip_from(
+        peer, request.headers.get("x-forwarded-for")
+    )
 
 
 def _user_fingerprint(username: str) -> str:
@@ -130,17 +134,31 @@ def login(req: LoginRequest, request: Request):
     否则「锁定期内正确口令也被拒」这一验收条件不成立（爆破仍可撞库）。
     """
     client_ip = _client_ip(request)
-    retry_after = login_guard.retry_after(client_ip, req.username)
-    if retry_after:
-        _audit_login_failed(request, req.username, client_ip, "locked")
-        raise HTTPException(
-            status_code=429,
-            detail="登录尝试过于频繁，请稍后再试",
-            headers={"Retry-After": str(retry_after)},
+    redis_client = getattr(request.app.state, "redis", None)
+    break_glass = login_guard.is_break_glass(req.username)
+    if break_glass:
+        logger.warning(
+            "登录 break-glass 生效（绕过限速，仍校验口令）: ip=%s user=%s",
+            _scrub_url_text(client_ip), _user_fingerprint(req.username),
         )
+    else:
+        retry_after = login_guard.retry_after(
+            client_ip, req.username, redis=redis_client
+        )
+        if retry_after:
+            _audit_login_failed(request, req.username, client_ip, "locked")
+            raise HTTPException(
+                status_code=429,
+                detail="登录尝试过于频繁，请稍后再试",
+                headers={"Retry-After": str(retry_after)},
+            )
     info = users_svc.login(get_flow_store(), req.username, req.password)
     if info is None:
-        locked_for = login_guard.record_failure(client_ip, req.username)
+        locked_for = 0
+        if not break_glass:
+            locked_for = login_guard.record_failure(
+                client_ip, req.username, redis=redis_client
+            )
         logger.warning(
             "登录失败 ip=%s user=%s%s",
             _scrub_url_text(client_ip),
@@ -152,7 +170,8 @@ def login(req: LoginRequest, request: Request):
             "locked" if locked_for else "bad_credentials",
         )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    login_guard.reset(client_ip, req.username)
+    if not break_glass:
+        login_guard.reset(client_ip, req.username, redis=redis_client)
     _set_audit_identity(request, info)
     _audit(request, "auth.login", info.get("username", req.username),
            {"role": info.get("role")},

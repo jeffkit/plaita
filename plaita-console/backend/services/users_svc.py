@@ -73,6 +73,11 @@ def verify_password(password: str, stored: str) -> bool:
     return secrets.compare_digest(calc, digest)
 
 
+# A112-02：用户不存在/禁用时也跑一次同成本 PBKDF2，避免计时枚举账号。
+# 该哈希只用于耗尽同等工作量，结果永不参与鉴权。
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_hex(16))
+
+
 # ---- 引导 ----
 
 def has_any_user(store) -> bool:
@@ -151,7 +156,13 @@ def login(store, username: str, password: str) -> Optional[Dict[str, Any]]:
     """
     with store._session_local() as session:
         row = session.scalars(select(User).where(User.username == username)).first()
-        if row is None or row.disabled or not verify_password(password, row.password_hash):
+        if row is None:
+            verify_password(password, _DUMMY_PASSWORD_HASH)
+            return None
+        if row.disabled:
+            verify_password(password, row.password_hash)
+            return None
+        if not verify_password(password, row.password_hash):
             return None
         memberships = _memberships_of(session, row.username)
         # 优先钉到一个未停用租户（#27）：唯一成员租户被停用时用户本就会被闸门

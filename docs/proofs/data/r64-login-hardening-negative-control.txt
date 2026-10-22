@@ -1,0 +1,71 @@
+=== 负控 r64：login_guard NC-L1~L11 ===
+
+环境：pre = clean archive `/tmp/plaita-r112-tree`（3c9d1a0）；post = 主工作树。
+端点探针 /tmp/r64_nc_probe.py（ROOT 参数化，旧/新 API 都可运行）、
+timing/eviction 探针复用 A1 原件。断言未放宽。
+
+--- 端点 NC（/tmp/r64_nc_probe.py） ---
+pre:
+  L1_victim_correct          429   ← 共享代理把受害者与攻击者塌缩到同一 IP
+  L2_spoof_correct           429   （pre 已忽略 XFF，保留行为）
+  L3_has_client_ip_from      false
+  L4_distributed_correct     200   ← 分布式爆破未触发账号桶
+  L5_same_ip_third_user      200   ← 无 IP 桶，fan-out 未收敛
+  L5_other_ip_admin          200
+  L6_break_glass_correct     429   ← 无 break-glass
+  L7_has_redis_throttle      false
+  L8_has_account_bucket      false
+  L11_correct                200   ← 分布式打完后新 IP 正确口令仍可登录
+  L11_wrong                  401
+post:
+  L1_victim_correct          200   ← 可信 peer + XFF 真实 IP，受害者 200
+  L2_spoof_correct           429   ← peer 不可信，伪 XFF 仍锁
+  L3_has_client_ip_from      true
+  L4_distributed_correct     429   ← 多 IP 打同账号触发账号桶
+  L5_same_ip_third_user      429   ← 单 IP fan-out 触发 IP 桶（未试过账号也被拦）
+  L5_other_ip_admin          200   ← 账号未被全局锁，另一 IP 正常
+  L6_break_glass_correct     200   ← break-glass 绕过限速（仍校验口令）
+  L7_has_redis_throttle      true
+  L8_has_account_bucket      true
+  L11_correct                429   ← 账号锁：正确/错误都 429
+  L11_wrong                  429
+
+--- L3 代理链（直接函数） ---
+post:
+  client_ip_from("10.0.0.2", "203.0.113.60, 10.0.0.1") == "203.0.113.60"
+  client_ip_from("10.0.0.2", "10.0.0.1") == "10.0.0.1"
+  client_ip_from("203.0.113.9", "198.51.100.77") == "203.0.113.9"
+pre: 无 client_ip_from（KeyError/AttributeError）
+
+--- L7 多 worker 共享计数 ---
+post 单测 test_l7_shared_redis_counters_across_workers：
+  t1 3 次 + t2 2 次 → t1/t2 retry_after 均 >0（共享 Redis，非进程内）
+post 单测 test_l7_endpoint_uses_shared_redis_counter：
+  两个 app 实例共享同一 fakeredis；合计第 6 次 429
+pre: 无 RedisLoginThrottle / 端点只用进程内计数（N worker=N×5）
+
+--- L8 锁过期后退避 ---
+post 单测 test_l8_account_lock_expiry_then_escalation：
+  3 个不同 IP 触发账号锁 900s；过期后 3 个新 IP 再触发 → 1800s
+pre: 无账号桶（ACCOUNT_DISTINCT_IPS 不存在），该断言无法成立
+
+--- L9 计时枚举（A1 timing probe，12 样本中位数） ---
+pre:
+  existing_ms_median 28.25 / missing_ms_median 1.77 / ratio 16.0
+post:
+  existing_ms_median 28.14 / missing_ms_median 28.49 / ratio 1.0
+（missing/disabled 均跑固定 PBKDF2；阈值 ≤2×）
+
+--- L10 MAX_TRACKED 驱逐活动锁 ---
+pre (容量 10 建锁/填充 → 收紧到 3 → 新键)：
+  before 900 / after 0 / evicted True   ← victim 活动锁被驱逐
+post:
+  before 900 / after 900 / evicted False
+
+--- L11 锁内正确/错误口令 ---
+pre: correct 200 / wrong 401（无账号锁）
+post: correct 429 / wrong 429
+
+结论：L1/L4/L5/L6/L11 端点行为、L3 代理解析、L7 Redis 共享、L8 账号退避、
+L9 计时、L10 驱逐均有 pre→post 实红/绿对照；L2 是保留性回归（pre 已安全，
+post 不得回退）。完整命令输出见本文件各节。

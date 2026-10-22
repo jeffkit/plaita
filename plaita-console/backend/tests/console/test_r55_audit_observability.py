@@ -579,7 +579,10 @@ def test_login_failure_reasons_are_separately_throttled(env: Env, monkeypatch):
     first = _assert_audit("auth.login_failed", actor="root")
     assert first["detail"]["reason"] == "bad_credentials"
 
-    monkeypatch.setattr(login_guard, "retry_after", lambda ip, username: 30)
+    monkeypatch.setattr(
+        login_guard, "retry_after",
+        lambda ip, username, now=None, redis=None: 30,
+    )
     resp = env.client.post(
         "/api/auth/login",
         json={"username": "root", "password": "wrong-password"},
