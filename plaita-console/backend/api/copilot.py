@@ -13,19 +13,22 @@
 import json
 import logging
 import os
+from typing import Any, Dict
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic_ai.ui import SSE_CONTENT_TYPE
 from pydantic_ai.ui.ag_ui import AGUIAdapter
 
 try:
+    from ..auth import ensure_platform_admin, require_auth
     from ..config import get_settings
     from ..services import ai_flow, claude_brain, flow_agent, flow_store
 except ImportError:  # 直接以 backend 为工作目录启动（python run.py）
+    from auth import ensure_platform_admin, require_auth  # type: ignore
     from config import get_settings
-    from services import ai_flow, claude_brain, flow_agent, flow_store
+    from services import ai_flow, claude_brain, flow_agent, flow_store  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +127,30 @@ def _audit_copilot(request: Request, brain: str, body: dict, flow_id: str) -> No
 
 
 @router.post("/copilot", tags=["admin", "copilot"])
-async def copilot_run(request: Request):
-    """AG-UI 协议端点：反代 recursive `POST /agui`，SSE 透传。"""
+async def copilot_run(
+    request: Request,
+    identity: Dict[str, Any] = Depends(require_auth),
+):
+    """AG-UI 协议端点：反代 recursive `POST /agui`，SSE 透传。
+
+    #292：凡 spawn 宿主 Agent 的大脑（claude / recursive，即 ``brain !=
+    "flow_agent"``）是平台能力——租户 editor 的 prompt 会交给本机编码 Agent
+    （env 继承 console 全量凭据）或以平台 API key 反代外部 Agent，与
+    ``/api/flows/ai-generate/stream`` 同口径要求 ``ensure_platform_admin``；
+    ``flow_agent``（纯 validate/dry-run 工具）保持租户 editor+ 可用。
+    """
     settings = get_settings()
     brain = (
         os.getenv("PLAITA_CONSOLE_COPILOT_BRAIN")
         or settings.copilot_brain
         or "flow_agent"
     ).lower()
+
+    if brain != "flow_agent":
+        # 闸先于请求体解析与会话留痕：被拒请求零副作用。
+        ensure_platform_admin(
+            request, identity, action="copilot.run", resource="copilot",
+        )
 
     try:
         body = _inject_context(await request.json())
@@ -145,13 +164,18 @@ async def copilot_run(request: Request):
             body["tools"] = []
         body.setdefault("forwardedProps", {})
 
-    # 会话持久化：thread_id ↔ flow_id/version 关联入库（审计与回看）
+    # 会话持久化：thread_id ↔ flow_id/version 关联入库（审计与回看）。
+    # thread 归属租户闸（r70 b/P2）：跨租户 thread 404，不接管历史。
     flow_id = request.headers.get("x-flow-id", "")
     if flow_id and isinstance(body.get("threadId"), str) and body["threadId"]:
         try:
             flow_store.get_flow_store().upsert_copilot_thread(
                 thread_id=body["threadId"], flow_id=flow_id, bump_message=True,
                 tenant_id=getattr(request.state, "tenant_id", "") or "",
+            )
+        except LookupError:
+            return JSONResponse(
+                status_code=404, content={"detail": "thread 不存在"},
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("copilot thread upsert 失败: %s", exc)
@@ -192,7 +216,10 @@ async def copilot_run(request: Request):
         )
         _audit_copilot(request, brain, body, flow_id)
         return StreamingResponse(
-            claude_brain.claude_agui_stream(body, str(goal)),
+            claude_brain.claude_agui_stream(
+                body, str(goal),
+                tenant_id=getattr(request.state, "tenant_id", "") or "",
+            ),
             media_type="text/event-stream",
         )
 

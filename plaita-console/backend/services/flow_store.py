@@ -861,14 +861,32 @@ class FlowStore:
         bump_message: bool = False,
         tenant_id: str = "",
     ) -> None:
-        """记录/更新 Copilot 会话与流程的关联（不存在则创建）。"""
+        """记录/更新 Copilot 会话与流程的关联（不存在则创建）。
+
+        thread 归属租户闸（r70 b/P2）：按 ``(tenant_id, thread_id)`` 复合键
+        查行；thread_id 已被**其他租户**占用时抛 ``LookupError``（端点转
+        404）——不接管历史、不静默改归属（threadId 客户端可控，全局唯一键
+        曾使 tenant-a 一条请求即夺走 tenant-b 的会话关联）。
+        """
         from datetime import datetime
 
         with self._session_local() as session:  # type: Session
             record = session.scalars(
-                select(CopilotThread).where(CopilotThread.thread_id == thread_id)
+                select(CopilotThread).where(
+                    CopilotThread.thread_id == thread_id,
+                    CopilotThread.tenant_id == tenant_id,
+                )
             ).first()
             if record is None:
+                squatter = session.scalars(
+                    select(CopilotThread).where(
+                        CopilotThread.thread_id == thread_id
+                    )
+                ).first()
+                if squatter is not None:
+                    raise LookupError(
+                        f"copilot thread 已归属其他租户: {thread_id}"
+                    )
                 record = CopilotThread(
                     tenant_id=tenant_id,
                     thread_id=thread_id,

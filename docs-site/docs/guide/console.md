@@ -77,6 +77,16 @@ python -m plaita_console              # 或使用 plaita-console 命令
 `Host` 头拼成，拿它当回环目标等于把平台 admin key（`X-Admin-API-Key`）送往
 调用方指定的任意主机。覆盖值指向非本机地址会留 WARNING；非法值 503 具名拒绝。
 
+`POST /api/copilot` 的宿主 Agent 大脑是平台能力（#292）：`PLAITA_CONSOLE_COPILOT_BRAIN`
+选 `claude`（本机编码 Agent 子进程，继承 console 进程环境与 provider 凭证）或
+`recursive`（以平台 API key 反代外部 Agent）时，仅平台管理员 / 平台级 API-Key
+可调用，租户 editor/admin 403 具名拒绝、进审计且大脑零启动（与
+`/api/flows/ai-generate/stream` 同口径）；默认 `flow_agent`（纯 validate /
+dry-run 工具，无宿主 Agent）保持 editor+ 可用。Copilot 会话（thread）归属
+创建租户：upsert 按 (租户, threadId) 复合键，跨租户使用他租户 threadId 一律
+404、不接管历史；claude 会话续轮（`--resume`）按租户段隔离，知道他租户
+threadId 也无法续其会话。
+
 **全量视角是只读的，对所有租户作用域写路径生效**（A2R17-01 / A1 r110）：
 会话型平台管理员 switch-tenant 到「全量」后，schedules 的改/删/启停/触发、
 自定义节点与属性类型删除、凭据删除、执行的取消/删除/恢复、事件订阅删除——
@@ -301,7 +311,7 @@ JSON 损坏或顶层不是对象时，`plaita.credentials` 抛
 - **Dry-Run**：保存前在控制台进程内试运行并查看逐步输出
 - **执行与集群**：执行历史、集群页一键拉起 flow_worker / 调度 / 事件服务等实例
   （`cluster_config.yaml` 定义服务模板与实例数）
-- **Copilot**：AI 辅助生成流程（`PLAITA_CONSOLE_COPILOT_BRAIN` 可选大脑）
+- **Copilot**：AI 辅助生成流程（`PLAITA_CONSOLE_COPILOT_BRAIN` 可选大脑；`claude`/`recursive` 宿主 Agent 大脑需平台管理员，`flow_agent` 租户可用）
 
 ## 节点插件
 
