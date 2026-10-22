@@ -23,11 +23,13 @@
 """
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 try:
     from ..request_models import EmptyRequestModel, StrictRequestModel
@@ -312,7 +314,12 @@ def _validate_flow(flow_id: str, version: Optional[str], tenant_id: Optional[str
 
 def _schedule_from_req(req: ScheduleCreateRequest, tenant_id: str) -> dict:
     return {
-        "schedule_id": f"sched-{datetime.now().strftime('%Y%m%d%H%M%S%f')[:-3]}",
+        # A2R52-02：id 带随机后缀——毫秒时间戳同毫秒两连 create 会生成同 id，
+        # 集群档 hset 语义=覆盖即真，第二条把第一条静默抹掉（无 409/无错误面）。
+        "schedule_id": (
+            f"sched-{datetime.now().strftime('%Y%m%d%H%M%S%f')[:-3]}"
+            f"-{uuid.uuid4().hex[:6]}"
+        ),
         "tenant_id": tenant_id,
         "name": req.name.strip(),
         "flow_id": req.flow_id,
@@ -404,9 +411,35 @@ def create(req: ScheduleCreateRequest, request: Request, redis: Redis = Depends(
     )
 
     if (local := _get_local(request)) is not None:
-        schedule = local.create_schedule(flow_store.get_flow_store(), schedule)
+        try:
+            schedule = local.create_schedule(flow_store.get_flow_store(), schedule)
+        except IntegrityError as e:
+            # A2R52-02：id 唯一约束兜底（随机后缀下实测不可达，唯一约束
+            # 语义化）——此前 IntegrityError 裸穿 500。
+            raise HTTPException(
+                status_code=409,
+                detail=error_detail(
+                    "schedule_id_conflict",
+                    f"调度 ID 冲突: {schedule['schedule_id']}，请重试",
+                    schedule_id=schedule["schedule_id"],
+                ),
+            ) from e
     else:
-        _save_schedule(redis, schedule)
+        # A2R52-02：写入防覆盖（hsetnx）——生成侧已带随机后缀，此处是
+        # 结构性兜底：id 撞行时 409 而非静默抹掉已有调度。
+        if not redis.hsetnx(
+            SCHEDULES_KEY,
+            schedule["schedule_id"],
+            json.dumps(schedule, ensure_ascii=False),
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=error_detail(
+                    "schedule_id_conflict",
+                    f"调度 ID 冲突: {schedule['schedule_id']}，请重试",
+                    schedule_id=schedule["schedule_id"],
+                ),
+            )
     _audit(request, "schedule.create", schedule["schedule_id"],
            _schedule_detail(schedule), tenant_id=tenant)
     return _view(schedule)
@@ -463,6 +496,13 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
         raise HTTPException(status_code=422, detail="name 不能为空")
     if req.cron is not None and not validate_cron(req.cron):
         raise HTTPException(status_code=422, detail=f"非法 cron 表达式: {req.cron}")
+    # A2R52-01：update 钉版本与 create 同口（此前 _validate_flow 只在 create
+    # 调，PUT 钉任意字符串 200 落行，cron 每 tick 产出 flow_definition_missing
+    # 垃圾执行）。只拦「钉新版本」：非空 version 必须存在（422）；空串=解钉
+    # （回到跟随 latest published 语义）不拦；不触碰 version 的更新不复查
+    # 流程存在性（存量孤儿调度仍可改名/暂停/解钉）。
+    if req.version:
+        _validate_flow(schedule["flow_id"], req.version, tenant_id=tenant)
 
     # plaita#300 触发面池路由：version 变化即重盖章 runtime。解析涉及
     # 版本库读，提前到 CAS mutate 之外算好（mutate 只做纯字段赋值）。

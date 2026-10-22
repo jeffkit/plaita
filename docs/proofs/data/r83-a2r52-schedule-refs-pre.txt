@@ -1,0 +1,17 @@
+# r83 A2R52-01/02 pre-fix 红（fix/a2r52-schedule-refs 基线 origin/main c924221，wt2）
+# 2026-10-23 探针=A2 r56 归档 test_a2r52_axis1_schedule_lifecycle-r56.py sed 换根本 wt（判红口径=断言正确行为失败即红）
+# 结果：6 failed / 1 passed——红=01a(update 不验版本)/01b(守卫零 schedule 判据)/01c(同毫秒 id 碰撞覆盖)【本双单】+ 01d/01e(A2R52-03/04 非本单范围,维持红)；绿=对照格 create 422
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_control_create_rejects_nonexistent_version PASSED [ 14%]
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version FAILED [ 28%]
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule FAILED [ 42%]
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite FAILED [ 57%]
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule FAILED [ 71%]
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502 FAILED [ 85%]
+../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502 FAILED [100%]
+FAILED ../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01a_update_pins_nonexistent_version
+FAILED ../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01b_delete_draft_orphans_pinned_schedule
+FAILED ../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01c_same_ms_create_silent_overwrite
+FAILED ../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01d_cluster_manual_trigger_fires_paused_schedule
+FAILED ../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01d_local_manual_trigger_paused_is_502
+FAILED ../../../../../../../tmp/b2-r83-probes/test_a2r52_axis1_pre.py::test_r52_01e_quota_rejection_surfaces_as_redis_502
+=================== 6 failed, 1 passed, 89 warnings in 1.50s ===================
