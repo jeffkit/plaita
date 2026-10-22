@@ -332,8 +332,9 @@ def test_copilot_and_supervisor_are_audited(env: Env, monkeypatch):
         lambda: (lambda path: {"cases": []}, lambda: object(), lambda: object(),
                  lambda: object(), _FakeSupervisor, lambda **kwargs: object()),
     )
-    # plaita#290：回环客户端现带调用方租户；入口归属校验要求 flow 真实存在
-    monkeypatch.setattr(supervisor_api, "_local_client", lambda request, tenant_id: object())
+    # plaita#290：回环客户端现带调用方租户；入口归属校验要求 flow 真实存在。
+    # plaita#291：回环客户端不再持有 request（目标钉固定内部源）。
+    monkeypatch.setattr(supervisor_api, "_local_client", lambda tenant_id: object())
     monkeypatch.setattr(
         supervisor_api, "_resolve_dataset_path", lambda name: Path("/tmp/r55-ds"))
     env.store.create_flow("flow-r55", tenant_id="default")

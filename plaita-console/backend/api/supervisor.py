@@ -13,6 +13,10 @@
   回环客户端以平台 key **钉在调用方租户**（`X-Tenant-ID`），基线评测、候选
   草稿、dry-run 全部落在调用方租户，不再「读全量、写 default」。平台身份
   跨租户须显式带 `X-Tenant-ID`；会话型平台管理员全量视角是只读的（403）。
+- **回环目标固定（plaita#291）**：回环地址只来自部署配置（`_loopback_base_url`：
+  `PLAITA_CONSOLE_LOOPBACK_URL` 或由自身监听 host/port 推导），**绝不取
+  `request.base_url`**——那是请求方可控的 `Host` 头，拿它当目标等于把平台
+  admin key 送往调用方指定的任意主机。`_local_client` 不接触 request。
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
@@ -91,9 +96,61 @@ def _load_plaita_ai():
     return load_dataset, FlowSourceProposer, PromptProposer, StaticProposer, Supervisor, SupervisorPolicy
 
 
-def _local_client(request: Request, tenant_id: str):
+def _loopback_base_url() -> str:
+    """supervisor 回环目标（plaita#291）：固定内部源，与请求 ``Host`` 解耦。
+
+    只认部署方权威的两个来源：
+
+    - ``PLAITA_CONSOLE_LOOPBACK_URL``：显式覆盖（uvicorn CLI 另指端口、进程内
+      TLS 等非常规部署）。非法值 503 具名拒绝、不静默回退推导值（回环配置
+      错误必须可见）；指向非本机地址照用（部署方权威）但 WARNING 留痕——
+      平台 admin key 将发往该地址，必须可观测。
+    - 否则由 console 自身监听配置推导：``PLAITA_CONSOLE_HOST`` 为通配
+      （``0.0.0.0`` / ``::``）取对应回环地址，其余取绑定地址本身；端口取
+      ``PLAITA_CONSOLE_PORT``。与 ``run.py`` / ``__main__.py`` 的 uvicorn
+      参数同源，常规部署零配置。
+    """
+    try:
+        from ..config import LOOPBACK_HOSTS, get_settings
+    except ImportError:
+        from config import LOOPBACK_HOSTS, get_settings  # type: ignore
+
+    settings = get_settings()
+    override = (os.getenv("PLAITA_CONSOLE_LOOPBACK_URL") or "").strip()
+    if override:
+        parts = urlsplit(override)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            message = (
+                "PLAITA_CONSOLE_LOOPBACK_URL 非法（须为 http(s)://host[:port]）："
+                f"{override!r}"
+            )
+            logger.warning("拒绝 supervisor 回环：%s", message)
+            raise HTTPException(status_code=503, detail=error_detail(
+                "loopback_misconfigured", message))
+        if parts.hostname not in LOOPBACK_HOSTS and parts.hostname != settings.host:
+            logger.warning(
+                "supervisor 回环目标指向非本机地址 %s（PLAITA_CONSOLE_LOOPBACK_URL）"
+                "：平台 admin key 将发往该地址，确认它是本 console 的可信内部入口",
+                override,
+            )
+        return override.rstrip("/")
+
+    host = settings.host or "127.0.0.1"
+    if host in ("0.0.0.0", "*", ""):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{settings.port}"
+
+
+def _local_client(tenant_id: str):
     """以 backend 自己的身份（admin key）构造 console 客户端——同进程回环。
 
+    plaita#291：回环目标只来自 ``_loopback_base_url()``（部署配置），本函数
+    **不持有 request**——``request.base_url`` 由请求方可控的 ``Host`` 头拼成，
+    拿它当目标就是把平台 admin key 送往调用方指定的任意主机。
     plaita#290：平台 key 是全量视角凭证，回环必须**钉在调用方租户**
     （``ConsoleConfig.tenant_id`` → 每个请求带 ``X-Tenant-ID``），否则
     Supervisor 的 get_flow / dry-run 读到别租户、save_version 落 default。
@@ -107,8 +164,10 @@ def _local_client(request: Request, tenant_id: str):
             status_code=503,
             detail="PLAITA_CONSOLE_ADMIN_API_KEY 未配置：supervisor 回环客户端需要它与本 console 通信",
         )
+    base_url = _loopback_base_url()
+    logger.debug("supervisor 回环目标 %s（租户 %s）", base_url, tenant_id)
     config = ConsoleConfig(
-        base_url=str(request.base_url).rstrip("/"),
+        base_url=base_url,
         api_prefix="/api",
         admin_api_key=os.getenv("PLAITA_CONSOLE_ADMIN_API_KEY", ""),
         tenant_id=tenant_id,
@@ -196,7 +255,7 @@ def supervisor_iterate(flow_id: str, req: SupervisorIterateRequest, request: Req
         ) from exc
 
     supervisor = Supervisor(
-        _local_client(request, tenant_id=tenant),
+        _local_client(tenant_id=tenant),
         policy=SupervisorPolicy(promote_gate="manual", max_iterations=req.max_iterations),
         proposer=proposer,
     )

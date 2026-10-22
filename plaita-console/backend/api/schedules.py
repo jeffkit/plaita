@@ -374,7 +374,10 @@ def get_one(schedule_id: str, request: Request, redis: Redis = Depends(get_redis
 @router.put("/schedules/{schedule_id}")
 def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
            redis: Redis = Depends(get_redis_or_none)):
-    tenant = tenant_scope(request)
+    # 写路径按 required=True 取租户（A2R17-01 全量视角只读；A1 r110 a/P2）：
+    # 非 required 下全量视角解析出 None，get_schedule(tenant_id=None) 不过滤，
+    # 平台管理员即可按 id 盲改任意租户的调度。以下 by-id 写端点同理。
+    tenant = tenant_scope(request, required=True)
     local = _get_local(request)
     if local is not None:
         store = flow_store.get_flow_store()
@@ -453,7 +456,7 @@ def update(schedule_id: str, req: ScheduleUpdateRequest, request: Request,
 def remove(schedule_id: str, request: Request,
            redis: Redis = Depends(get_redis_or_none),
            body: Optional[EmptyRequestModel] = None):
-    tenant = tenant_scope(request)
+    tenant = tenant_scope(request, required=True)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
@@ -475,7 +478,7 @@ def remove(schedule_id: str, request: Request,
 def enable(schedule_id: str, request: Request,
            redis: Redis = Depends(get_redis_or_none),
            body: Optional[EmptyRequestModel] = None):
-    tenant = tenant_scope(request)
+    tenant = tenant_scope(request, required=True)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
@@ -501,7 +504,7 @@ def enable(schedule_id: str, request: Request,
 def disable(schedule_id: str, request: Request,
             redis: Redis = Depends(get_redis_or_none),
             body: Optional[EmptyRequestModel] = None):
-    tenant = tenant_scope(request)
+    tenant = tenant_scope(request, required=True)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)
@@ -532,7 +535,7 @@ def trigger_now(schedule_id: str, request: Request,
 
     A2R24-08：两模式返回同一字段集（``mode`` 区分标识语义）。
     """
-    tenant = tenant_scope(request)
+    tenant = tenant_scope(request, required=True)
     if (local := _get_local(request)) is not None:
         store = flow_store.get_flow_store()
         schedule = local.get_schedule(store, schedule_id, tenant_id=tenant)

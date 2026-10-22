@@ -69,6 +69,23 @@ python -m plaita_console              # 或使用 plaita-console 命令
 候选草稿全部落在调用方租户，不再「读全量、写 default」。平台身份跨租户
 迭代须显式带 `X-Tenant-ID`；会话型平台管理员的全量视角是只读的（403）。
 
+回环**目标地址**与请求解耦（#291）：回环客户端的 base URL 只来自部署配置——
+默认由 console 自身监听配置推导（`PLAITA_CONSOLE_HOST` 为 `0.0.0.0`/`::` 时取
+对应回环地址，否则取绑定地址；端口取 `PLAITA_CONSOLE_PORT`），非常规部署
+（uvicorn CLI 另指端口、进程内 TLS 等）可显式设
+`PLAITA_CONSOLE_LOOPBACK_URL`。绝不取 `request.base_url`——那由请求方可控的
+`Host` 头拼成，拿它当回环目标等于把平台 admin key（`X-Admin-API-Key`）送往
+调用方指定的任意主机。覆盖值指向非本机地址会留 WARNING；非法值 503 具名拒绝。
+
+**全量视角是只读的，对所有租户作用域写路径生效**（A2R17-01 / A1 r110）：
+会话型平台管理员 switch-tenant 到「全量」后，schedules 的改/删/启停/触发、
+自定义节点与属性类型删除、凭据删除、执行的取消/删除/恢复、事件订阅删除——
+一律 403（`全量视角为只读，写操作请先选择具体租户`），与 flows / credentials
+创建等写端点同一闸；跨租户写须显式 `X-Tenant-ID`（或先切换到具体租户），
+审计记录生效租户。不带租户头的无状态平台 API-Key 沿写路径契约落 default，
+他租户资源按 404 处理（与租户用户视角同口径，不暴露存在性）。全量视角的
+**读**面不变。
+
 `POST /api/dispatch/one` 的 `shadow` / `dry_run` / `tenant_id` 是服务端
 权威字段（#262）：`shadow` 只取 `PLAITA_CONSOLE_DISPATCH_SHADOW`（请求体
 同名字段忽略）；`dry_run=false` 仅平台身份可写，租户 editor 传 false 会被

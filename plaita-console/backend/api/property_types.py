@@ -113,7 +113,8 @@ def upsert_property_type(req: UpsertPropertyTypeRequest, request: Request = None
 @router.delete("/property-types/{name}")
 def delete_property_type(name: str, request: Request = None,
                          body: Optional[EmptyRequestModel] = None):
-    tenant: Optional[str] = tenant_scope(request) if request is not None else None
+    # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）：None 不过滤租户。
+    tenant: Optional[str] = tenant_scope(request, required=True) if request is not None else None
     try:
         node_registry_svc.delete_property_type(_store(), name, tenant_id=tenant)
     except LookupError as e:

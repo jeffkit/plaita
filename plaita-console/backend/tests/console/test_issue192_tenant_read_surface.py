@@ -345,8 +345,15 @@ class TestEventsTenantScope:
         r = client.delete("/api/events/subscriptions/sub-b", headers=_editor_a(client))
         assert r.status_code == 404
         assert redis.exists("plaita:subscription:data:sub-b") == 1, "跨租户不得删除订阅"
-        # 平台视角仍可删除（保持运维口径）
+        # A1 r110 a/P2 收口：无租户头的平台 key 沿写路径契约落 default（与
+        # create 同闸），他租户订阅 404 且不动；跨租户运维删除须显式 X-Tenant-ID。
         admin = client.delete("/api/events/subscriptions/sub-b", headers=_admin())
+        assert admin.status_code == 404
+        assert redis.exists("plaita:subscription:data:sub-b") == 1
+        admin = client.delete(
+            "/api/events/subscriptions/sub-b",
+            headers={**_admin(), "X-Tenant-ID": TENANT_B},
+        )
         assert admin.status_code == 200
         assert redis.exists("plaita:subscription:data:sub-b") == 0
 

@@ -162,7 +162,9 @@ def save_credential(req: CredentialSaveRequest, request: Request = None):
 @router.delete("/credentials/{name}")
 def delete_credential(name: str, request: Request = None,
                       body: Optional[EmptyRequestModel] = None):
-    tenant = tenant_scope(request) if request is not None else None
+    # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）：None 不过滤租户，
+    # 平台管理员全量视角可按名盲删他租户凭据。
+    tenant = tenant_scope(request, required=True) if request is not None else None
     if not credentials_svc.delete_credential(name, tenant_id=tenant):
         raise HTTPException(status_code=404, detail=f"凭据不存在: {name}")
     _audit(request, "credential.delete", name,
