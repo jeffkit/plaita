@@ -52,6 +52,24 @@ def is_output_validation_retryable(exc: BaseException) -> bool:
     return bool(getattr(exc, _OUTPUT_VALIDATION_RETRY_ATTR, False))
 
 
+#: 确定性错误类型名集（node-F2 × plaita-go#43，owner 裁决 2026-10-22：两侧同集）。
+#:
+#: 这些类型（及其子类）表示「同一份代码在同一份输入上重跑不可能变对」——
+#: 参数/配置错（ValueError）、类型误用（TypeError）、未定义名字（NameError）、
+#: 语法/编码错（SyntaxError）。重试只会烧预算、放大副作用；与 plaita-go
+#: ``pyDeterministicEnvelopeTypes``（r69 终态，Go 侧不放松）逐字对齐。
+#:
+#: 两个消费面：
+#: - 类型面：in-process 后端用户异常原样穿出，按 ``isinstance`` 命中；
+#: - 信封面：subprocess/docker 后端把 ``ok=false`` 信封包成 RuntimeError，
+#:   内层类型名以 ``origin_type`` 属性穿透分类（见
+#:   ``plaita.node.code.SandboxEnvelopeError``；按属性而非文本前缀，不做
+#:   文本嗅探）。
+DETERMINISTIC_ERROR_TYPES = frozenset(
+    {"ValueError", "TypeError", "NameError", "SyntaxError"}
+)
+
+
 class FlowErrorType(Enum):
     """流程异常类型"""
 

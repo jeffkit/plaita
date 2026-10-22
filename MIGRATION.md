@@ -8,6 +8,16 @@
 
 ## Unreleased
 
+### 重试分类：TypeError / NameError / SyntaxError 与 ValueError 同列确定性不重试；沙箱信封内层类型穿透（plaita-go#43 收口）
+
+**口径（contract）**：node-F2 重试分类把 `ValueError`/`TypeError`/`NameError`/`SyntaxError`（及子类）与 `NodeException` 1001 同列**确定性错误**——同一份节点代码在同一份输入上重跑不可能变对，重试只会烧预算、放大副作用。任意节点的执行异常命中这些类型即**立即按 errorHandler `strategy` 处理，不消耗 retryTimes**（此前仅 `ValueError` 入列；`TypeError`/`NameError`/`SyntaxError` 维持历史「一律可重试」）。与 plaita-go 同集对齐（#43，2026-10-22 owner 裁决：Python 采纳完整确定性集，Go r69 终态不放松）。
+
+**沙箱信封穿透**：`code` 节点 subprocess/docker 后端此前把用户代码异常压成裸 `RuntimeError("类型: 消息")`，内层确定性类型只剩文本前缀、分类打不穿（实测 `is_retryable_error(RuntimeError("ValueError: boom")) == True`——沙箱内 `ValueError` 也被烧满 retryTimes）。现在信封解码抛 `SandboxEnvelopeError`（`RuntimeError` 子类，**错误文本逐字不变**），信封保留的类型名挂 `origin_type` 属性供分类按集对照——落集内不重试；缺型（`Error`）、`KeyError` 等集外类型与基础设施级失败（沙箱无输出/输出非 JSON/无信封非零退出）保持历史可重试缺省。JS 沙箱信封不在该集内，维持历史行为。按属性分类、不做文本嗅探：裸 `RuntimeError("TypeError: …")`（无 `origin_type`）仍可重试。
+
+- **受影响**：依赖 `TypeError`/`NameError`/`SyntaxError` 被 retryTimes 重试的存量 flow——现在这些错误第一次失败就按 `strategy` 终结（abort 即流程 error 终态）。典型：把「变量未定义/字段缺失当触发条件」写成依赖重试凑对的 code/表达式节点。
+- **迁移步骤**：此类节点改为**显式容错**——配 `errorHandler`（`continue`/`continue_with` + `defaultValue`）承接确定性失败，或把「可能缺失的输入」在节点前用条件分支显式判定；需要重试的瞬态行为改用可重试的错误通道（HTTP 1002/1003 或自定义瞬态异常类型）。分布式 worker 侧同理：确定性失败不再消耗重投预算（`_is_retryable_node_failure` 复用同一分类），首投即终态化。
+- **不受影响**：`ValueError` 既有口径、`NodeException` 1001/1002/1003 分类、#219 输出校验钩子异常（仍走 retryTimes，豁免对整个确定性家族一致生效）、错误文本与 `RuntimeError` 捕获兼容性（`SandboxEnvelopeError` 是其子类且文本不变）。
+
 ### 表达式：运行期字符串不再二次求值——契约定为「配置求值、运行期数据」（plaita#268）
 
 **口径（contract）**：表达式只活在 flow **配置**里（节点字段、`input` 映射、条件、

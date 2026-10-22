@@ -141,7 +141,9 @@ class PollableNode(Node):
 
 `retryTimes` 控制重试次数：在重试耗尽前不触发策略，重试全部失败后才按 `strategy` 处理。**合法域为 0..10**——构造期校验，超限或负值在保存/发布/加载时直接失败（`ValueError` 具名拒绝）。共享 worker 场景下，无上界的重试次数会让单个节点长期占用 worker。**口径变更（2026-10）**：负数此前构造期接受、运行期被 `max(0, …)` 静默钳 0（无任何告警，`retryTimes=-1` 与 `0` 无差别）；现在负值构造期具名拒绝。布尔 / 数字字符串（`true`→1、`"5"`→5 的隐式强转）同样构造期拒绝——五个定义入口（JSON / Builder / @flow / console / S-expression）同口径。显式 `None` 也与省略不同（省略即用默认）：S-expr 的 `:retry nil` / `None` / `null`、`@flow` 的具名 `retry_times=None` 与 `**` dict 字面量里的 `None` 一律具名拒绝（三个 caps 字段同口径）。
 
-只有瞬态错误会被重试（HTTP 节点的 `NodeException` 1002/1003，含 429 限流），重试间隔为指数退避 `min(30s, 1s × 2^n)`。确定性配置错误不消耗重试次数：`NodeException` 1001（请求生成失败）与非 `NodeException` 的 `ValueError` 会立即按 `strategy` 处理（节点输出校验钩子 `_validate_output` 抛出的异常除外——它们仍按普通节点异常重试）。
+只有瞬态错误会被重试（HTTP 节点的 `NodeException` 1002/1003，含 429 限流），重试间隔为指数退避 `min(30s, 1s × 2^n)`。确定性错误不消耗重试次数——同一份代码在同一份输入上重跑不可能变对：`NodeException` 1001（请求生成失败），`ValueError`/`TypeError`/`NameError`/`SyntaxError` **及其子类**，会立即按 `strategy` 处理（节点输出校验钩子 `_validate_output` 抛出的异常除外——它们仍按普通节点异常重试，豁免对整个确定性家族一致生效）。该口径与 plaita-go 同集对齐（#43，2026-10 owner 裁决）。
+
+`code` 节点的 subprocess/docker 沙箱后端把用户代码异常包成 `RuntimeError` 传输（JSON 信封 `ok=false`）；内层类型名以 `origin_type` 属性随 `SandboxEnvelopeError`（`RuntimeError` 子类，错误文本不变）穿透上述分类——信封类型落在确定性集内同样不重试；缺型（`Error`）、`KeyError` 等集外类型与基础设施级失败（沙箱无输出/输出非 JSON/无信封非零退出）保持历史可重试缺省。JS 沙箱信封不在该集内（`ReferenceError` 等类型名体系不同），维持历史行为。
 
 ### 超时处理器
 

@@ -935,10 +935,30 @@ redis-cli DEL plaita:execution:nofail:<execution_id>
   「从断点续派」（与 `continue` 同路），即使计数键达限也照常派发——计数键寿命
   长于状态行，按「已终态」拒绝会得到「返回已受理、一行不推进」的假受理。
 
+## 确定性错误不重试（#43 口径，2026-10 起） {#确定性错误不重试}
+
+**引擎行为**：节点重试分类把 `ValueError`/`TypeError`/`NameError`/`SyntaxError`
+（及子类）与 `NodeException` 1001 同列**确定性错误**——首次失败即按 errorHandler
+`strategy` 终结，不消耗 `retryTimes`；分布式 worker 的重投判据（`_is_retryable_node_failure`）
+复用同一分类，**首投即终态化**，不再烧重投/退避预算。`code` 节点 subprocess/docker
+沙箱的用户异常以内层类型名（`origin_type`）穿透分类——沙箱里抛的这四类同样一次即停；
+缺型/`KeyError` 等集外类型与沙箱基础设施级失败（无输出/非 JSON）保持历史可重试。
+
+**运维会观察到什么**：引擎升级后，「以前靠 retryTimes/消息重投凑过去」的 flow 的
+error 终态变多、DLQ 里 `reason` 出现确定性类型——这不是回归，是重试放大器被摘除
+（此前一次确定性失败 = 真实重跑 retryTimes+1 次，有副作用的代码重复执行副作用）。
+
+**处置**：按 error 文本里的类型修 flow（缺字段/未定义名/类型误用属于定义问题），
+给「输入可能缺失」的节点配显式 `errorHandler`（`continue_with` + `defaultValue`）
+或前置条件分支；修定义后走 DLQ replay 回灌。**不要**用调大 `PLAITA_MAX_DELIVERIES`
+来「恢复」这类执行——确定性错误重投多少次都在同一位置失败，只会挤掉真死信。
+完整迁移步骤见 `MIGRATION.md`「重试分类」小节。
+
 ## 故障手册
 
 | 现象 | 可能原因 | 动作 |
 |------|----------|------|
+| 引擎升级后某 flow 首次失败即 error 终态（以前会重试/重投几次） | 确定性错误不重试口径（#43）：`ValueError`/`TypeError`/`NameError`/`SyntaxError` 首投即终态 | 按 error 文本的类型修定义（显式 errorHandler / 前置条件分支），见[确定性错误不重试](#确定性错误不重试)；修后 DLQ replay |
 | 任务不消费 | group/stream 键不一致；Worker 未起 | 核对 `--queue-name` / group；看 Worker 日志 |
 | `XLEN>0` 但 `XPENDING`/`lag` 为 0 | 已 `XACK` 未 `XDEL` 的残留条目（XACK 与 XDEL 之间进程被杀），**不是**真积压 | worker 启动时与每 300s 兜底回收（`residue_swept`）；`XRANGE` 看 payload 的 `execution_id`，console 实查为终态即可确认无活干 |
 | pending 堆积 | 处理失败反复 reclaim；lease 冲突 | 查日志；调大 lease TTL；看 DLQ |
