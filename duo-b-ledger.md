@@ -1,5 +1,7 @@
 # B1 席位交付台账
 
+> 一行摘要（第六十七轮，2026-10-22）：**login_guard 设计级收口 #293/#294/#295 + B112-01/02（基线 `b2906c2`）**——① IP canonical 化（IPv4-mapped→IPv4/压缩展开）+ IPv6 /64 聚合；account 桶 IP 集合按 300s 窗口滑动（进程 dict / Redis ZSET），同 /64 多地址只算 1、旧 IP 锁过期后不续锁；② break-glass 不再是用户名列表即绕过：用户名白名单 + 来源 IP 白名单 + 一次性 HMAC token（`bg1.<exp>.<nonce>.<hmac>`，短 TTL，Redis SET NX 跨副本），失败照常计数，每次尝试独立 `auth.login_break_glass` 审计（break_glass=true）；③ Redis throttle 全部用 `redis.call('TIME')`/`redis.time()`，禁止进程 monotonic 入共享键；④ `0.0.0.0/0`/`::/0` 全 trust 配置具名拒绝、IPv4-mapped 参与 CIDR 匹配；⑤ MAX_TRACKED 满表新键 60s 具名饱和（不静默放行、不驱逐活动锁）。桶/窗口语义表入 ops-runbook（文档即规格）。测试 console `test_issue293_294_295_login_guard_v2.py` **14P** + A112 **12P** + #208 **8P**；负控 pre/post（A1 r113 探针 + post 探针）；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1198P/13S**；`landing_gate.py ci` rc=0（`b2906c2` CI + Console E2E 绿）。#293/#294/#295 关单回执另附。
+
 > 一行摘要（第六十六轮，2026-10-22）：**login_guard 硬化 A112-01/02 + B112-01/02（基线 `3c9d1a0`）**——① 三桶限速：per-key `(ip,user)` 5 次/300s、账号桶（失败来自 ≥3 个不同 IP）、IP 桶（单 IP fan-out ≥10，锁 5m 减少 NAT 影响），锁内正确/错误都 429、再次触发翻倍封顶 24h；② 反枚举：missing 跑固定 dummy PBKDF2、disabled 跑真实 hash（计时比 16×→1.0×）；③ 可信代理：`PLAITA_TRUSTED_PROXIES` allowlist，peer 可信时 XFF 从右向左取首个 untrusted，否则忽略 XFF；④ 多 worker：`RedisLoginThrottle`（Lua 原子共享 key/IP/account），无 Redis 本地档退回进程内并文档化；⑤ break-glass env 绕过限速（仍校验口令）；⑥ MAX_TRACKED 不再驱逐活动锁。测试 console `test_issue_a112_login_hardening.py` **12P** + #208 **8P**；NC-L1~L11 pre/post（端点探针 + timing/eviction 探针）；全量 unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1184P/13S**；`landing_gate.py ci` rc=0（`3c9d1a0` CI + Console E2E 绿）。
 
 > 一行摘要（第六十五轮，2026-10-22）：**B109-01/02 + B2 r67 注记轻量硬化（基线 `a75b4ab`）**——① `safeExternalUrl` 外部链接 scheme 白闸（仅 http/https；javascript:/data:/相对路径返回 null），`ExecutionDetail` Langfuse 链接非白即降级纯文本；② `buildLogsHref` 用 URLSearchParams 逐参数编码，Cluster 日志深链的 serviceType/instanceId 特殊字符不再改写 query；③ `test_issue69_mutation_matrix.py` 的恒真断言 `assertTrue(x is False or x)` 改为 `assertFalse(refused)`（对照实现 Reduce.initial refused=False，写穿由 live_changed 全表断言兜住）。前端 `node check-api-transport` **33/33** + tsc 干净；unit **8795P/12S/14 deselected/3501 subtests**、e2e+integration **287P/4S**、console **1121P/13S**；负控（去 scheme 白闸/退回字符串拼接/改错期望值）三红→恢复绿；`landing_gate.py ci` rc=0（`eee7b37` CI + Console E2E `a75b4ab` 绿）。
@@ -601,4 +603,35 @@
   subtests**；e2e+integration **287P/4S**；console **1184P/13S**（rebase 到
   `3c9d1a0` 后复跑）；`landing_gate.py ci` rc=0 后单 commit 推送。
 - 单 commit；未触碰他席 `duo-b3-ledger.md` 与未跟踪
+  `duo-a-ledger.md`/`duo-a2-ledger.md`。
+
+## 第六十七轮 · login_guard 设计级收口（#293/#294/#295 + B112-01/02，2026-10-22，B1 修复席）
+
+- 基线：`origin/main` `b2906c2`；落地门 `b2906c2` CI + Console E2E 绿。
+- **桶/窗口语义表**已入 ops-runbook「登录限速与反枚举」：per-key canonical IP
+  5/300s；IP 桶 IPv6 /64 聚合 10/300s→5m；account 桶窗口内 ≥3 个不同 IP 桶
+  →15m；翻倍≤24h。
+- **#293**：`canonical_ip`（IPv4-mapped→IPv4、压缩展开）+ `bucket_ip`（IPv6
+  /64）；account 集合进程内每次 record/retry 按窗口清理、Redis 改 ZSET
+  （ZADD/ZREMRANGEBYSCORE/ZCARD）；同 /64 多地址只算 1，旧 IP 锁过期后单次
+  失败不续锁。
+- **#294**：break-glass 必须用户名白名单 + 来源 IP 白名单 + 一次性 HMAC
+  token（`bg1.<exp>.<nonce>.<hmac>`，secret≥32，短 TTL，Redis SET NX 跨副本）；
+  失败照常计数；每次尝试独立 `auth.login_break_glass` 审计；仅用户名列表
+  回落常规限速。
+- **#295**：Redis Lua 用 `redis.call('TIME')`，retry 用 `redis.time()`；进程
+  time/monotonic 不入共享键；NTP 回拨 until 只前进。
+- **B112-01**：`0.0.0.0/0`/`::/0` 具名拒绝；peer/XFF canonical 化后 CIDR
+  匹配（IPv4-mapped 可命中 IPv4 网段）。
+- **B112-02**：MAX_TRACKED 满表且无过期项时新键 60s 具名饱和（不静默 0、
+  不驱逐活动锁）。
+- 测试：`test_issue293_294_295_login_guard_v2.py` **14P**；A112 **12P**
+  （L6 改 token 语义）；#208 **8P**；r55 审计适配。负控 pre/post：同 /64
+  waits [0,0,900]→[0,0,0]、旧 IP 续锁 1800→0、break-glass 20×401/no marker
+  →{401,429}/marker、Redis clock 0/999900→900、/0 全 trust→拒绝、MAX_TRACKED
+  0→60。证据 `docs/proofs/data/r65-login-guard-v2-negative-control.txt`。
+- 验收：全量 unit `-m "not slow"` **8795P/12S/14 deselected/3501
+  subtests**；e2e+integration **287P/4S**；console **1198P/13S**；
+  `landing_gate.py ci` rc=0 后单 commit 推送。
+- 单 commit 关闭 #293/#294/#295；未触碰他席 `duo-b3-ledger.md` 与未跟踪
   `duo-a-ledger.md`/`duo-a2-ledger.md`。

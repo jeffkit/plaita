@@ -126,26 +126,67 @@ def setup(req: CreateUserRequest, request: Request):
     return session
 
 
+def _audit_break_glass(
+    request: Request, username: str, client_ip: str, *,
+    allowed: bool, reason: str, outcome: str,
+) -> None:
+    """#294：break-glass 每次尝试独立审计（不按窗口合并）。"""
+    try:
+        from ..services import audit as audit_svc
+    except ImportError:
+        from services import audit as audit_svc  # type: ignore
+    try:
+        audit_svc.record(
+            request,
+            action="auth.login_break_glass",
+            resource="auth",
+            resource_id=username,
+            detail={
+                "break_glass": True,
+                "allowed": bool(allowed),
+                "reason": reason,
+                "outcome": outcome,
+                "username": username,
+                "ip": client_ip,
+            },
+            actor=username,
+            tenant_id="",
+        )
+    except Exception as exc:  # noqa: BLE001 — 审计不阻断登录
+        logger.warning("break-glass 审计失败: %s", _scrub_url_text(exc))
+
+
 @router.post("/auth/login")
 def login(req: LoginRequest, request: Request):
     """用户名密码换会话 token。
 
-    #208：按 (客户端 IP, username) 限速——锁定期内即使口令正确也返回 429，
-    否则「锁定期内正确口令也被拒」这一验收条件不成立（爆破仍可撞库）。
+    #208/r64：三维限速；锁定期内正确/错误口令都 429。
+    #294：break-glass 必须同时满足用户白名单 + 来源 IP 白名单 + 一次性
+    token；失败照常计数，每次尝试独立审计（break_glass=true）。
     """
     client_ip = _client_ip(request)
     redis_client = getattr(request.app.state, "redis", None)
-    break_glass = login_guard.is_break_glass(req.username)
-    if break_glass:
+    bg_allowed, bg_reason, bg_requested = login_guard.validate_break_glass(
+        req.username,
+        request.headers.get("x-break-glass-token"),
+        client_ip,
+        redis=redis_client,
+    )
+    if bg_requested and not bg_allowed:
         logger.warning(
-            "登录 break-glass 生效（绕过限速，仍校验口令）: ip=%s user=%s",
-            _scrub_url_text(client_ip), _user_fingerprint(req.username),
+            "break-glass 未生效（%s，回落到常规限速）: ip=%s user=%s",
+            bg_reason, _scrub_url_text(client_ip), _user_fingerprint(req.username),
         )
-    else:
+    if not bg_allowed:
         retry_after = login_guard.retry_after(
             client_ip, req.username, redis=redis_client
         )
         if retry_after:
+            if bg_requested:
+                _audit_break_glass(
+                    request, req.username, client_ip,
+                    allowed=False, reason=bg_reason, outcome="locked",
+                )
             _audit_login_failed(request, req.username, client_ip, "locked")
             raise HTTPException(
                 status_code=429,
@@ -154,24 +195,32 @@ def login(req: LoginRequest, request: Request):
             )
     info = users_svc.login(get_flow_store(), req.username, req.password)
     if info is None:
-        locked_for = 0
-        if not break_glass:
-            locked_for = login_guard.record_failure(
-                client_ip, req.username, redis=redis_client
-            )
+        # break-glass 失败也必须计数（不允许无限爆破）
+        locked_for = login_guard.record_failure(
+            client_ip, req.username, redis=redis_client
+        )
         logger.warning(
             "登录失败 ip=%s user=%s%s",
             _scrub_url_text(client_ip),
             _user_fingerprint(req.username),
             f"（失败次数超限，已锁定 {locked_for}s）" if locked_for else "",
         )
+        if bg_requested:
+            _audit_break_glass(
+                request, req.username, client_ip,
+                allowed=bg_allowed, reason=bg_reason, outcome="bad_credentials",
+            )
         _audit_login_failed(
             request, req.username, client_ip,
             "locked" if locked_for else "bad_credentials",
         )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    if not break_glass:
-        login_guard.reset(client_ip, req.username, redis=redis_client)
+    login_guard.reset(client_ip, req.username, redis=redis_client)
+    if bg_requested:
+        _audit_break_glass(
+            request, req.username, client_ip,
+            allowed=bg_allowed, reason=bg_reason, outcome="ok",
+        )
     _set_audit_identity(request, info)
     _audit(request, "auth.login", info.get("username", req.username),
            {"role": info.get("role")},

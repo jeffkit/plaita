@@ -1,0 +1,71 @@
+=== 负控 r65：login_guard 设计级收口（#293/#294/#295 + B112-01/02） ===
+
+pre = clean archive `/tmp/plaita-r113-tree`（b2906c2）；post = 主工作树。
+A1 r113 探针原件 + post 探针 /tmp/r65_post_probe.py；断言未放宽。
+
+--- #293 account 桶：IP 归一 + 窗口滑动 ---
+pre（/tmp/r113_account_ip_probe.py）：
+  inproc_lock_waits            [0, 0, 900]   ← 同 IPv6 /64 的 3 个地址即锁账号
+  inproc_account_ips           ["2001:db8:0:1::1","::2","::3"]（裸地址）
+  inproc_old_ip_re_lock        1800          ← 锁过期后 1 个旧 IP 续锁
+  variant_waits                [0, 0, 900]
+  variant_account_ips          ["192.0.2.1","2001:0db8:0:0:0:0:0:1","::ffff:192.0.2.1"]
+  redis_old_ip_re_lock_after_expiry 1800
+  redis_account_ips_key_ttl    86460
+post（/tmp/r65_post_probe.py）：
+  same_64_waits                [0, 0, 0]     ← /64 聚合，不锁
+  same_64_retry                0
+  diff_64_waits                [0, 0, 900]   ← 3 个不同 /64 才锁
+  old_ip_relock                0             ← 旧 IP 窗口外不再续锁
+  old_ip_retry                 0
+单测 test_293_canonical_ip_and_mapped_forms：3 种形式只算 2 个桶（IPv4 + 2001:db8::/64）。
+
+--- #294 break-glass：token + 来源 + 审计 ---
+pre（/tmp/r113_break_glass_probe.py，仅 USERS=admin）：
+  wrong_codes                  [401 × 20]
+  any_429                      false
+  correct_status               200
+  audit_has_break_glass_marker false
+post（/tmp/r65_post_probe.py，USERS+SECRET+ALLOWED_IPS=127.0.0.1）：
+  bg_no_token_codes            [401, 429]   ← 无 token 照常锁
+  bg_no_token_any_429          true
+  bg_valid_token_status        200
+  bg_audit_rows                21
+  bg_audit_marker              true
+单测：
+  test_294_valid_one_time_token_and_audit：有效 token 200，审计 break_glass/outcome；
+  同 token 复用不再绕过；
+  test_294_break_glass_failures_are_counted：token 下错误口令仍计数并锁；
+  test_294_wrong_source_or_invalid_token_fail_closed：来源不符/无效 token 回落限速。
+
+--- #295 Redis 时间源：UTC/Redis TIME ---
+pre（/tmp/r113_redis_clock_probe.py，两副本 monotonic 基准不同）：
+  host_b_higher_clock_retry    0             ← 高 monotonic 副本绕过锁
+  host_d_lower_clock_retry     999900        ← 低 monotonic 副本锁被延长 ~11.6 天
+post：
+  redis_clock_retry            900           ← 两实例一致，无天数级误差
+单测 test_295_redis_uses_server_time_not_process_clocks（把本模块 time.time/
+monotonic 打到 0，retry 仍 0<wait≤901）与 test_295_new_process_reads_existing_lock_same_scale。
+
+--- B112-01 可信代理 ---
+pre（/tmp/r113_trusted_proxy_probe.py）：
+  0.0.0.0/0 direct_peer_untrusted_config  "198.51.100.77"  ← 全 trust 裸信 XFF
+  mapped_peer                              "::ffff:10.0.0.1"（IPv4 CIDR 未匹配）
+  ipv6_forms 展开/压缩原样返回
+post：
+  broad_proxy_networks                     []               ← /0 具名拒绝
+  broad_proxy_direct                       "203.0.113.9"
+  mapped_peer                              "203.0.113.50"
+  单测 test_b112_01_mapped_peer_matches_ipv4_cidr 同时钉 canonical IPv6。
+
+--- B112-02 MAX_TRACKED ---
+pre（/tmp/r113_max_tracked_probe.py）：
+  target_returns [0, 0, 0, 0, 0, 0] / target_retry 0  ← 满表新键静默不跟踪
+post：
+  max_tracked_first            60            ← 具名饱和
+  max_tracked_retry            60
+  单测 test_b112_02_max_tracked_saturation_not_silent；L10 活动锁不被驱逐保持。
+
+--- 回归 ---
+#208 8P、A112 12P、#293-295 14P、r55 审计 1P；console 全量在本轮验收中复跑。
+结论：五个面均 pre→post 实红/绿对照；L2 等保留性回归不变。

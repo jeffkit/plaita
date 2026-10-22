@@ -734,22 +734,34 @@ redis-cli KEYS 'plaita:execution:lease:*'
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
 
-### 登录限速与反枚举（r64 A112-01/02、B112-01/02）
+### 登录限速与反枚举（r65 #293/#294/#295，含 r64 桶）
 
-- **三桶**：`(client_ip, username)` 5 次/300s → 锁 15m；同一账号的失败来自
-  ≥3 个不同 IP → 锁账号（分布式爆破）；单 IP 对多用户名 fan-out ≥10 次 →
-  锁该 IP（5m，低于账号锁，减少 NAT/共享出口影响）。再次触发锁定时长翻倍，
-  上限 24h；锁定期内正确/错误口令都 429。
-- **客户端 IP**：默认只用 ASGI peer；只有 peer 命中 `PLAITA_TRUSTED_PROXIES`
-  （逗号分隔 IP/CIDR）才解析 `X-Forwarded-For`，并从右向左取第一个 untrusted
-  地址。未配置可信代理时 XFF 一律忽略（防伪造绕过）。
-- **多 worker**：console 连 Redis 时计数写共享 Redis（Lua 原子，前缀
-  `plaita:login-guard:*`），N 个 worker 不会变成 N×5；无 Redis 的本地档退回
-  进程内计数（单 worker 语义）。
-- **break-glass**：`PLAITA_LOGIN_BREAK_GLASS_USERS`（逗号分隔用户名）绕过限速
-  （仍校验口令，日志 WARNING）；仅用于紧急运维，使用后应移除。
-- **反枚举**：用户名不存在/禁用也执行一次同成本 PBKDF2（固定 dummy hash），
-  登录响应时间不区分账号是否存在。
+| 桶 | key（归一后） | 窗口/阈值 | 锁定 | 说明 |
+|---|---|---|---|---|
+| per-key | canonical IP + username | 300s / 5 次 | 15m，翻倍≤24h | 精确 IP（IPv4-mapped→IPv4；IPv6 canonical） |
+| IP | IPv6 按 /64 聚合（IPv4 精确） | 300s / 10 次 | 5m，翻倍≤24h | 单 IP fan-out；NAT 影响低于账号锁 |
+| account | 账号 + 窗口内不同 IP 桶集合 | 300s / ≥3 个不同桶 | 15m，翻倍≤24h | 集合按窗口滑动清理；同 /64 多地址只算 1；旧 IP 不再续锁 |
+
+- 锁定语义：锁定期内正确/错误口令都 429；锁过期后需要重新满足窗口阈值才会
+  再锁（旧 IP 单次失败不续锁）。
+- **客户端 IP**：默认只用 ASGI peer；只有 peer 命中
+  `PLAITA_TRUSTED_PROXIES`（IP/CIDR）才解析 XFF，从右向左取首个 untrusted。
+  IPv4-mapped 归一后参与 CIDR 匹配；`0.0.0.0/0`/`::/0` 全 trust 配置**具名拒绝**
+  （WARNING），不会开启裸 XFF。
+- **时间源**：RedisLoginThrottle 的窗口/锁定全部用 `redis.call('TIME')` /
+  `redis.time()` 的 UTC 时间，不写进程 monotonic；多副本/重启后锁语义一致。
+  无 Redis 的本地档退回进程内计数（单 worker 语义）。
+- **MAX_TRACKED**：表满且无过期条目时，新键进入 60s 具名饱和（429/Retry-After），
+  不静默放行，也不驱逐活动锁。
+- **break-glass（#294）**：必须同时满足
+  `PLAITA_LOGIN_BREAK_GLASS_USERS` 用户名白名单、
+  `PLAITA_LOGIN_BREAK_GLASS_ALLOWED_IPS` 来源白名单（默认回环）、
+  `X-Break-Glass-Token: bg1.<exp>.<nonce>.<hmac>` 一次性 token
+  （`PLAITA_LOGIN_BREAK_GLASS_SECRET` ≥32 字符，短 TTL，单次使用；Redis 可用时
+  用 SET NX 跨副本一次性，否则进程内）。失败照常计数；每次尝试写独立
+  `auth.login_break_glass` 审计（`break_glass=true`, allowed/reason/outcome）。
+  仅配用户名列表不再绕过任何限速（回落常规 401/429）。
+- **反枚举**：用户名不存在/禁用也执行一次同成本 PBKDF2（固定 dummy hash）。
 
 ### console 审计口径（A55-S2/S3/S4）
 

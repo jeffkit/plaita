@@ -147,29 +147,49 @@ def test_l5_single_ip_fanout_uses_ip_bucket_not_account_lock(tmp_path):
     assert other.status_code == 200, other.text
 
 
-def test_l6_break_glass_bypasses_lock(tmp_path, monkeypatch):
+def test_l6_break_glass_requires_token_and_allowed_source(tmp_path, monkeypatch):
     monkeypatch.setenv("PLAITA_LOGIN_BREAK_GLASS_USERS", "admin")
+    monkeypatch.setenv(
+        "PLAITA_LOGIN_BREAK_GLASS_SECRET", "x" * 64
+    )
+    monkeypatch.setenv("PLAITA_LOGIN_BREAK_GLASS_ALLOWED_IPS", "127.0.0.1/32")
     app = _app(tmp_path)
-    client = _client(app, "203.0.113.70")
+    client = _client(app, "127.0.0.1")
     _lock(client)
-    # break-glass 绕过限速：错误口令仍按 401（不锁），正确口令 200
-    assert client.post("/api/auth/login", json=WRONG).status_code == 401
-    resp = client.post("/api/auth/login", json=RIGHT)
-    assert resp.status_code == 200, resp.text
+    # 只有用户名列表、无 token：仍按常规限速 429
+    assert client.post("/api/auth/login", json=RIGHT).status_code == 429
+    token = login_guard.break_glass_token("admin", ttl_seconds=60)
+    ok = client.post(
+        "/api/auth/login", json=RIGHT,
+        headers={"X-Break-Glass-Token": token},
+    )
+    assert ok.status_code == 200, ok.text
+    # 锁重新建立后：token 失败尝试照常计数并消费；复用 token 不再绕过
+    _lock(client)
+    token2 = login_guard.break_glass_token("admin", ttl_seconds=60)
+    wrong = client.post(
+        "/api/auth/login", json=WRONG,
+        headers={"X-Break-Glass-Token": token2},
+    )
+    assert wrong.status_code == 401, wrong.text
+    reused = client.post(
+        "/api/auth/login", json=RIGHT,
+        headers={"X-Break-Glass-Token": token2},
+    )
+    assert reused.status_code == 429
 
 
 def test_l7_shared_redis_counters_across_workers():
     redis = fakeredis.FakeRedis(decode_responses=True)
     t1 = login_guard.RedisLoginThrottle(redis)
     t2 = login_guard.RedisLoginThrottle(redis)
-    now = 1000.0
     for _ in range(3):
-        t1.record_failure("203.0.113.80", "admin", now=now)
-    assert t2.retry_after("203.0.113.80", "admin", now=now) == 0
+        t1.record_failure("203.0.113.80", "admin")
+    assert t2.retry_after("203.0.113.80", "admin") == 0
     for _ in range(2):
-        t2.record_failure("203.0.113.80", "admin", now=now)
-    assert t1.retry_after("203.0.113.80", "admin", now=now) > 0
-    assert t2.retry_after("203.0.113.80", "admin", now=now) > 0
+        t2.record_failure("203.0.113.80", "admin")
+    assert t1.retry_after("203.0.113.80", "admin") > 0
+    assert t2.retry_after("203.0.113.80", "admin") > 0
 
 
 def test_l7_endpoint_uses_shared_redis_counter(tmp_path):
