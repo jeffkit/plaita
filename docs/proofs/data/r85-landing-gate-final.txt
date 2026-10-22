@@ -1,0 +1,6 @@
+# landing_gate ci（终态）2026-10-23 07:08:38 +0800
+[landing-gate] main 最近完成 run：2026-10-22T22:47:51Z e72e5e5 conclusion=success  |  docs(ledger): B1 第八十五轮——卡 A-1（A129-01）console 发布闸拒「hash 不可计算
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（6d16450）
+[landing-gate] ✅ 允许落地
+landing-gate-final-rc=0
