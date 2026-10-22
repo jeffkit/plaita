@@ -12,7 +12,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
@@ -622,6 +622,11 @@ class FlowStore:
           按设计跳过比对，无条件更新（原行为不变）；
         - ``runtime``（#300）为 None 时不碰该列（保留草稿原值）；显式给出时
           随本次保存更新。
+
+        A2R54-02 补强：谓词含 ``status = 'draft'``——SELECT 检查与 UPDATE 之间
+        若并发 publish 把行翻成 published，CAS 必然失配（rowcount=0 → 409），
+        不再发生「已发布行被打回 draft + 定义覆盖」的状态盲写。该谓词不依赖
+        updated_at 列，legacy 降级档同样受保护。
         """
         params: Dict[str, Any] = {
             "definition": definition,
@@ -638,7 +643,8 @@ class FlowStore:
         sql = (
             "UPDATE flow_versions SET definition = :definition, layout = :layout, "
             f"status = :status{runtime_sql}, updated_at = :ts "
-            "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver"
+            "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver "
+            "AND status = 'draft'"
         )
         if not self._updated_at_supported(session):
             logger.warning(
@@ -650,7 +656,8 @@ class FlowStore:
             sql = (
                 "UPDATE flow_versions SET definition = :definition, "
                 "layout = :layout, status = :status "
-                "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver"
+                "WHERE tenant_id = :tid AND flow_id = :fid AND version = :ver "
+                "AND status = 'draft'"
             )
         elif base_updated_at is not None and not force:
             base_dt = _parse_updated_at(base_updated_at)
@@ -816,9 +823,28 @@ class FlowStore:
             cursor = (last[0] or "", last[1], last[2])
 
     def publish_version(
-        self, flow_id: str, version: str, tenant_id: Optional[str] = None
+        self,
+        flow_id: str,
+        version: str,
+        tenant_id: Optional[str] = None,
+        gate_fn: Optional[Callable[[FlowVersion], None]] = None,
     ) -> FlowVersionOut:
-        """发布版本：draft → published。已发布则幂等返回。不存在则 LookupError。"""
+        """发布版本：draft → published。已发布则幂等返回。不存在则 LookupError。
+
+        A2R54-01/02 修后语义（#300 门快照 TOCTOU + CAS 状态盲写）：
+
+        - ``gate_fn``：发布事务内对**重 SELECT 出的 fresh 行**复核能力门——
+          校验对象 = 落盘对象，同一事务同一快照（API 层注入
+          ``_gate_runtime_capability`` 的包装）。门抛出的异常原样上抛，
+          事务回滚、零写入（版本保持 draft）。``None`` 保留旧调用面
+          （不发门，仅测试/兼容路径使用）。
+        - 状态翻转为单条条件 UPDATE：谓词 ``status='draft'`` + 翻转前快照
+          ``updated_at``（与门校验同一事务读出），发布同时**前进
+          updated_at**。SELECT/门校验与 UPDATE 之间落进的并发草稿保存使
+          谓词失配 → rowcount=0 → 抛 VersionConflictError（409 语义），
+          不盲写；``status`` 谓词不依赖 updated_at 列，旧库降级档同样挡住
+          「已发布行被打回 draft」。
+        """
         with self._session_local() as session:
             row = session.scalars(
                 select(FlowVersion).where(
@@ -830,8 +856,53 @@ class FlowStore:
             if row is None:
                 raise LookupError(f"版本不存在: {flow_id}@{version}")
             if row.status != "published":
-                row.status = "published"
-                row.published_at = datetime.utcnow()
+                # 翻转前行快照（先于门校验读出）：门校验期间（含 Redis 往返）
+                # 落进的并发保存使钉扎谓词失配——快照取竞后值就钉不住了
+                snap_updated_at = self._read_updated_at_raw(session, flow_id, version, tenant_id)
+                # A2R54-01：再对 fresh 行过门，然后翻转——校验对象即落盘对象
+                if gate_fn is not None:
+                    gate_fn(row)
+                now = datetime.utcnow()
+                updated_ok = self._updated_at_supported(session)
+                if updated_ok:
+                    sql = (
+                        "UPDATE flow_versions SET status = 'published', "
+                        "published_at = :ts, updated_at = :ts "
+                        "WHERE tenant_id = :tid AND flow_id = :fid "
+                        "AND version = :ver AND status = 'draft'"
+                    )
+                    params: Dict[str, Any] = {
+                        "ts": now,
+                        "tid": row.tenant_id or "",
+                        "fid": flow_id,
+                        "ver": version,
+                    }
+                    if snap_updated_at is not None:
+                        sql += " AND updated_at = :snap"
+                        params["snap"] = snap_updated_at
+                else:
+                    sql = (
+                        "UPDATE flow_versions SET status = 'published', "
+                        "published_at = :ts "
+                        "WHERE tenant_id = :tid AND flow_id = :fid "
+                        "AND version = :ver AND status = 'draft'"
+                    )
+                    params = {
+                        "ts": now,
+                        "tid": row.tenant_id or "",
+                        "fid": flow_id,
+                        "ver": version,
+                    }
+                result = session.execute(text(sql), params)
+                if not result.rowcount:
+                    # 并发保存/发布抢先把行推进了：拒绝面朝安全侧（409 语义）
+                    raise VersionConflictError(
+                        f"版本 {flow_id}@{version} 在发布前已被并发修改，"
+                        "请刷新后重试",
+                        latest_updated_at=self._stored_updated_at(
+                            session, flow_id, version, tenant_id
+                        ),
+                    )
                 # #299：发布事务内登记 outbox（跨 Redis 部署的 durable 投递链）。
                 # 与 flow_versions 同事务 = publish 回滚时 outbox 不残留；
                 # 未配目标 Redis（同 Redis 部署）时是 no-op，零额外写入。
@@ -847,7 +918,35 @@ class FlowStore:
                 assert_tenant_generation(session, tenant_id)
                 session.commit()
                 session.refresh(row)
-            return self._version_to_out(row)
+            return self._version_to_out(
+                row,
+                updated_at=self._stored_updated_at(
+                    session, flow_id, version, tenant_id
+                ),
+            )
+
+    def _read_updated_at_raw(
+        self,
+        session: Session,
+        flow_id: str,
+        version: str,
+        tenant_id: Optional[str],
+    ) -> Optional[Any]:
+        """读取某版本 updated_at 原始值（不做 ISO 转换，供谓词绑定）；缺列/空返回 None。"""
+        if not self._updated_at_supported(session):
+            return None
+        sql = "SELECT updated_at FROM flow_versions WHERE flow_id = :fid AND version = :ver"
+        params: Dict[str, Any] = {"fid": flow_id, "ver": version}
+        if tenant_id is not None:
+            sql += " AND tenant_id = :tid"
+            params["tid"] = tenant_id
+        try:
+            row_ = session.execute(text(sql), params).first()
+        except Exception:  # noqa: BLE001 — 旧库缺列
+            return None
+        if not row_ or not row_[0]:
+            return None
+        return row_[0]
 
     def delete_version(
         self, flow_id: str, version: str, tenant_id: Optional[str] = None

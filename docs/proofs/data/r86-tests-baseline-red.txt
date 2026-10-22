@@ -1,0 +1,277 @@
+FFFF.FFFF.                                                               [100%]
+=================================== FAILURES ===================================
+____ TestRegateFreshRow.test_race_before_publish_ungated_fresh_row_rejected ____
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestRegateFreshRow object at 0x106db8f50>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=8b376d87ce1248ba8004507d6ce06be4,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_race_before_publish_ungated_fresh_row_rejected(self, redis):
+        """门快照读 D1 → 竞窗 CAS 落 D2（go 池不支持 map）→ re-gate 拒，版本保持 draft。"""
+        redis_ctx["r"] = redis
+        store = _seed()
+        snap = store.get_version("racy", "1.0.0", tenant_id=TENANT)
+        store.save_flow_definition(
+            flow_id="racy", version="1.0.0", definition=_map_def(),
+            tenant_id=TENANT, base_updated_at=snap.updated_at.isoformat(),
+            created_by="racer",
+        )
+        with pytest.raises(UnsupportedNodeTypesError):
+>           store.publish_version("racy", "1.0.0", tenant_id=TENANT, gate_fn=_regate)
+E           TypeError: FlowStore.publish_version() got an unexpected keyword argument 'gate_fn'
+
+tests/console/test_a2r54_publish_race_toctou.py:193: TypeError
+______ TestRegateFreshRow.test_import_direct_publish_chain_same_rejection ______
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestRegateFreshRow object at 0x115503110>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=3d1064bdc2f84bb2bf6ecc5cefbc26d7,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_import_direct_publish_chain_same_rejection(self, redis):
+        """import 直发链同构：promotion 草稿 + 同一门 → 未过门 fresh 行同样拒。"""
+        redis_ctx["r"] = redis
+        store = _seed(created_by="promotion")
+        snap = store.get_version("racy", "1.0.0", tenant_id=TENANT)
+        store.save_flow_definition(
+            flow_id="racy", version="1.0.0", definition=_map_def(),
+            tenant_id=TENANT, base_updated_at=snap.updated_at.isoformat(),
+            created_by="racer",
+        )
+        with pytest.raises(UnsupportedNodeTypesError):
+>           store.publish_version("racy", "1.0.0", tenant_id=TENANT, gate_fn=_regate)
+E           TypeError: FlowStore.publish_version() got an unexpected keyword argument 'gate_fn'
+
+tests/console/test_a2r54_publish_race_toctou.py:210: TypeError
+__________ TestRegateFreshRow.test_no_race_gated_definition_publishes __________
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestRegateFreshRow object at 0x1132b1350>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=ca2afa94b4f84f529e9088ed5aabfef2,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_no_race_gated_definition_publishes(self, redis):
+        """无竞窗：re-gate 过门即发布，正常面不误伤。"""
+        redis_ctx["r"] = redis
+        store = _seed()
+>       out = store.publish_version("racy", "1.0.0", tenant_id=TENANT, gate_fn=_regate)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FlowStore.publish_version() got an unexpected keyword argument 'gate_fn'
+
+tests/console/test_a2r54_publish_race_toctou.py:218: TypeError
+______________ TestPublishPinning.test_race_during_gate_conflicts ______________
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestPublishPinning object at 0x115502fd0>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=425ce85b575e49419d03bbd0419795ec,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_race_during_gate_conflicts(self, redis):
+        redis_ctx["r"] = redis
+        store = _seed()
+        snap = store.get_version("racy", "1.0.0", tenant_id=TENANT)
+        race_base = snap.updated_at.isoformat()
+    
+        def gate_with_race(fresh):
+            store.save_flow_definition(
+                flow_id="racy", version="1.0.0", definition=_map_def(),
+                tenant_id=TENANT, base_updated_at=race_base,
+                created_by="racer2",
+            )
+            _regate(fresh)
+    
+        with pytest.raises(flow_store.VersionConflictError) as ei:
+>           store.publish_version("racy", "1.0.0", tenant_id=TENANT,
+                                  gate_fn=gate_with_race)
+E           TypeError: FlowStore.publish_version() got an unexpected keyword argument 'gate_fn'
+
+tests/console/test_a2r54_publish_race_toctou.py:240: TypeError
+_ TestPublishedRowProtection.test_sandwich_cas_update_blocked_by_status_predicate _
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestPublishedRowProtection object at 0x1155034d0>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=baf04afef8274f52892796cbd4c05503,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_sandwich_cas_update_blocked_by_status_predicate(self, redis):
+        """faithful 语句序复刻：会话内 SELECT(draft) → （他会话）publish → 同会话 CAS UPDATE。"""
+        redis_ctx["r"] = redis
+        store = _seed(runtime="python")
+        from sqlalchemy import select, text
+    
+        from models.flow import FlowVersion
+    
+        base = store.get_version("racy", "1.0.0", tenant_id=TENANT).updated_at
+        with store._session_local() as s1:
+            existing = s1.scalars(select(FlowVersion).where(
+                FlowVersion.tenant_id == TENANT, FlowVersion.flow_id == "racy",
+                FlowVersion.version == "1.0.0")).first()
+            assert existing.status == "draft"
+            store.publish_version("racy", "1.0.0", tenant_id=TENANT)  # 并发发布提交
+            advanced = s1.execute(text(
+                "SELECT updated_at FROM flow_versions "
+                "WHERE tenant_id=:t AND flow_id=:f AND version=:v"),
+                {"t": TENANT, "f": "racy", "v": "1.0.0"}).first()[0]
+            assert advanced is not None and advanced != base  # 修①：发布前进基准
+            ok = store._cas_update_draft(
+                s1, flow_id="racy", version="1.0.0", tenant_id=TENANT,
+                definition=_map_def(), layout="", status="draft",
+                base_updated_at=base.isoformat(), force=False, runtime=None,
+            )
+            s1.commit()
+>       assert ok is False  # CAS 失配（updated_at 前进 + status=published 双保险）
+        ^^^^^^^^^^^^^^^^^^
+E       assert True is False
+
+tests/console/test_a2r54_publish_race_toctou.py:294: AssertionError
+_ TestPublishedRowProtection.test_legacy_degrade_status_predicate_still_blocks _
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestPublishedRowProtection object at 0x115505e00>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=4ec09dc42dda49b6befee8885c8f64cd,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_legacy_degrade_status_predicate_still_blocks(self, redis):
+        """updated_at 列缺失（legacy 降级档）：status 谓词独立挡住打回。"""
+        redis_ctx["r"] = redis
+        store = _seed(runtime="python")
+        store._updated_at_ok = False
+        from sqlalchemy import select
+    
+        from models.flow import FlowVersion
+    
+        with store._session_local() as s1:
+            existing = s1.scalars(select(FlowVersion).where(
+                FlowVersion.tenant_id == TENANT, FlowVersion.flow_id == "racy",
+                FlowVersion.version == "1.0.0")).first()
+            assert existing.status == "draft"
+            store.publish_version("racy", "1.0.0", tenant_id=TENANT)
+            ok = store._cas_update_draft(
+                s1, flow_id="racy", version="1.0.0", tenant_id=TENANT,
+                definition=_map_def(), layout="", status="draft",
+                base_updated_at=None, force=False, runtime=None,
+            )
+            s1.commit()
+>       assert ok is False
+E       assert True is False
+
+tests/console/test_a2r54_publish_race_toctou.py:319: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  services.flow_store:flow_store.py:624 flow_versions.updated_at 列不可用，草稿保存退化为无并发保护的覆盖写（flow=racy@1.0.0）——乐观锁 #101 失效，请升级库结构
+____ TestPublishApi.test_race_landing_between_gates_returns_422_draft_kept _____
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestPublishApi object at 0x115503610>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=e3de90dd4617483ba1ca6356b0e0e4a3,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x11693a210>
+
+    def test_race_landing_between_gates_returns_422_draft_kept(self, redis, monkeypatch):
+        """A2R54-01 API 形态：pre-gate 放行 D1 → 竞窗落未过门 D2 → 事务内 re-gate 422。
+    
+        竞窗位置=pre-gate 放行之后、publish_version 重 SELECT 之前——
+        publish 内部 fresh 行已是未过门定义，gate_fn 对 fresh 行过门必拒。
+        """
+        store = _seed()
+        snap = store.get_version("racy", "1.0.0", tenant_id=TENANT)
+        real_gate = flows_api.gate_flow_nodes
+        calls = {"n": 0}
+    
+        def gate_with_race(r, runtime, definition, **kw):
+            out = real_gate(r, runtime, definition, **kw)
+            calls["n"] += 1
+            if calls["n"] == 1:  # pre-gate（快照 plain 定义）放行后：竞窗 CAS 落未过门定义
+                store.save_flow_definition(
+                    flow_id="racy", version="1.0.0", definition=_map_def(),
+                    tenant_id=TENANT, base_updated_at=snap.updated_at.isoformat(),
+                    created_by="racer",
+                )
+            return out
+    
+        monkeypatch.setattr(flows_api, "gate_flow_nodes", gate_with_race)
+        resp = _client(redis).post(
+            "/api/flows/racy/publish", json={"version": "1.0.0"},
+            headers=_headers(),
+        )
+>       assert resp.status_code == 422, resp.text
+E       AssertionError: {"flow_id":"racy","version":"1.0.0","status":"published","definition":"{\"flow_id\": \"racy\", \"inputType\": {\"dataType\": \"object\"}, \"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"m\"}, {\"type\": \"map\", \"id\": \"m\", \"over\": \"$INPUT.items\", \"next\": \"end\", \"child_flow\": {\"flow_id\": \"child\", \"nodes\": [{\"type\": \"start\", \"id\": \"s\", \"next\": \"e\"}, {\"type\": \"end\", \"id\": \"e\", \"output\": \"$INPUT\", \"resultType\": \"success\"}]}}, {\"type\": \"end\", \"id\": \"end\", \"output\": \"$INPUT\", \"resultType\": \"success\"}]}","layout":"","runtime":"go","created_at":"2026-10-22T18:35:35.052145","published_at":"2026-10-22T18:35:35.072307","created_by":"t","updated_at":null,"tenant_id":"default"}
+E       assert 200 == 422
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a2r54_publish_race_toctou.py:354: AssertionError
+_________ TestPublishApi.test_race_during_in_publish_gate_returns_409 __________
+
+self = <backend.tests.console.test_a2r54_publish_race_toctou.TestPublishApi object at 0x115503750>
+redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=a1c659bc172f4404b007d03ad8d2bda9,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1169d49b0>
+
+    def test_race_during_in_publish_gate_returns_409(self, redis, monkeypatch):
+        """钉扎 API 形态：re-gate 期间并发保存 → 条件翻转失配 → 409 version_stale。"""
+        store = _seed()
+        snap = store.get_version("racy", "1.0.0", tenant_id=TENANT)
+        real_gate = flows_api.gate_flow_nodes
+        calls = {"n": 0}
+    
+        def gate_with_race(r, runtime, definition, **kw):
+            calls["n"] += 1
+            if calls["n"] == 2:  # 事务内 re-gate 期间并发保存落进
+                store.save_flow_definition(
+                    flow_id="racy", version="1.0.0", definition=_map_def(),
+                    tenant_id=TENANT, base_updated_at=snap.updated_at.isoformat(),
+                    created_by="racer2",
+                )
+            return real_gate(r, runtime, definition, **kw)
+    
+        monkeypatch.setattr(flows_api, "gate_flow_nodes", gate_with_race)
+        resp = _client(redis).post(
+            "/api/flows/racy/publish", json={"version": "1.0.0"},
+            headers=_headers(),
+        )
+>       assert resp.status_code == 409, resp.text
+E       AssertionError: {"flow_id":"racy","version":"1.0.0","status":"published","definition":"{\"flow_id\": \"racy\", \"inputType\": {\"dataType\": \"object\"}, \"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"output\": \"$INPUT.name\", \"resultType\": \"success\"}]}","layout":"","runtime":"go","created_at":"2026-10-22T18:35:35.167512","published_at":"2026-10-22T18:35:35.208324","created_by":"t","updated_at":null,"tenant_id":"default"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_a2r54_publish_race_toctou.py:381: AssertionError
+=============================== warnings summary ===============================
+config.py:18
+  /private/tmp/plaita-b3-r86/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 20 warnings
+  /private/tmp/plaita-b3-r86/plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py:86: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 33 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 10 warnings
+  /private/tmp/plaita-b3-r86/plaita-console/backend/services/flow_store.py:676: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 18 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestRegateFreshRow::test_race_before_publish_ungated_fresh_row_rejected
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestRegateFreshRow::test_import_direct_publish_chain_same_rejection
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_sandwich_cas_update_blocked_by_status_predicate
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_legacy_degrade_status_predicate_still_blocks
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_landing_between_gates_returns_422_draft_kept
+  /private/tmp/plaita-b3-r86/plaita-console/backend/services/flow_store.py:610: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "ts": datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_publish_advances_updated_at_stale_save_conflicts
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_sandwich_cas_update_blocked_by_status_predicate
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_legacy_degrade_status_predicate_still_blocks
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_landing_between_gates_returns_422_draft_kept
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_during_in_publish_gate_returns_409
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_happy_publish_unaffected
+  /private/tmp/plaita-b3-r86/plaita-console/backend/services/flow_store.py:814: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.published_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_landing_between_gates_returns_422_draft_kept
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_during_in_publish_gate_returns_409
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_happy_publish_unaffected
+  /private/tmp/plaita-b3-r86/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestRegateFreshRow::test_race_before_publish_ungated_fresh_row_rejected
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestRegateFreshRow::test_import_direct_publish_chain_same_rejection
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestRegateFreshRow::test_no_race_gated_definition_publishes
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestPublishPinning::test_race_during_gate_conflicts
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_sandwich_cas_update_blocked_by_status_predicate
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestPublishedRowProtection::test_legacy_degrade_status_predicate_still_blocks
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_landing_between_gates_returns_422_draft_kept
+FAILED tests/console/test_a2r54_publish_race_toctou.py::TestPublishApi::test_race_during_in_publish_gate_returns_409
+8 failed, 2 passed, 96 warnings in 2.10s

@@ -1,0 +1,12 @@
+flow_versions.updated_at 列不可用，草稿保存退化为无并发保护的覆盖写（flow=f1@0.0.1）——乐观锁 #101 失效，请升级库结构
+
+=== r86 postfix probe output ===
+[GREEN-G1] G1 修② re-gate：未过门 fresh 行发布被拒，版本保持draft | raised=True status=draft definition=D2-UNGATED published_at=None
+[GREEN-G2] G2 修②钉扎：门校验期间并发保存→发布409拒绝 | conflict=True status=draft definition=D2-RACE latest=2026-10-22T18:31:22.715322
+[GREEN-G3] G3 修① 三明治：publish前进updated_at+CAS status谓词→保存409 | updated_at前进=True cas_ok=False status=published definition=D1
+[GREEN-G4] G4 修①legacy档：status谓词挡住打回（不再依赖updated_at列） | cas_ok=False status=published definition=D1
+[GREEN-G5] G5 import直发链：同构 re-gate 拒未过门定义 | raised=True status=draft definition=D2-UNGATED
+[GREEN-对照绿A] 对照绿A 无竞窗：门对象==发布对象（修复不误伤正常发布） | published=published definition=D1
+[GREEN-对照绿B] 对照绿B 幂等重发布：旧调用面行为不变 | published=published definition=D1
+[GREEN-对照绿C] 对照绿C published 检查拦截保存（守恒） | blocked=True status=published definition=D1
+TOTAL: 8/8 green; ALL_GREEN=True

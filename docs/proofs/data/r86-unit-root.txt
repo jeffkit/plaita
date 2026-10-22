@@ -1,0 +1,6 @@
+    self._flush()
+  File "/private/tmp/plaita-b3-r86/plaita/server/log_handler.py", line 253, in _flush
+    _audit_logger.warning(
+Message: '日志刷新失败: %s（本批起回灌 %d 条，丢弃最旧 %d 条，累计丢弃 %d，队列 %d/%d）'
+Arguments: ('RecordingRedis 不支持 pipeline', 10000, 0, 30389, 10000, 10000)
+unit-rc=0

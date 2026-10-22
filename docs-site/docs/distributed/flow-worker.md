@@ -52,6 +52,12 @@ queue/redis/group/dlq/预算/安全开关，并计算三个**互不替代**的�
 （旧 build worker）时门 fail-open 放行并打 WARNING——发布/启动行为与上线前
 一致，混池能力升级完成后建议尽快让全部 worker 升到带清单的 build。
 
+**发布时点防竞窗（A2R54-01/02）**：publish（含 import 直发链）在发布事务内
+对落盘前的 fresh 行**复核能力门**——门校验对象=落盘对象，门校验期间落进的
+并发草稿保存使发布以 `409 version_stale` 拒绝（fail-closed，草稿保持）；发布
+同时前进 `updated_at`，已发布行不会被并发草稿保存打回 draft / 覆盖定义
+（CAS 谓词含 `status='draft'`，旧库降级档同保护）。
+
 **调度触发面同池路由（#300）**：runtime→队列解析的单源真值在
 `plaita/server/runtime_queues.py`（console 的 `services/runtime_pools.py` 是
 再导出，不存在第二份映射）。cron 调度循环是独立 plaita server 进程、读不到
