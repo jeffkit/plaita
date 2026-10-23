@@ -151,6 +151,43 @@ class TestExecutionTimelineCallback:
         assert end["ok"] is False
         assert "kaboom" in end["error"]
 
+    def test_failed_node_error_text_is_scrubbed(self):
+        """A2R49-02：时间线事件 ``error`` = ``str(exception)`` 是**读面**——
+
+        落盘（``/timeline`` 端点）与实时发布（SSE 频道）共用同一份事件记录，
+        构造处必须先过 scrub（与同模块 logger 侧 ``#151`` 同判据），诊断语义
+        （异常类型、消息主体）保留。
+        """
+        cb = ExecutionTimelineCallback(clock=_Clock())
+        cb.start_run()
+        cb.on_node_start(None, _Node("call"))
+        cb.on_node_end(
+            None, _Node("call"), None, None,
+            exception=RuntimeError(
+                "ConnectionError: Max retries exceeded with url: "
+                "/api/run?token=sk-live-timeline-needle"
+            ),
+        )
+        end = cb.snapshot()["events"][-1]
+        assert end["ok"] is False
+        assert "sk-live-timeline-needle" not in end["error"]
+        assert "Max retries exceeded" in end["error"]
+
+    def test_failed_node_error_text_without_credentials_unchanged(self):
+        """负控：非凭据文本一字不动（scrub 只抹凭据分量）。"""
+        cb = ExecutionTimelineCallback(clock=_Clock())
+        cb.start_run()
+        cb.on_node_end(None, _Node("boom"), None, {"code": -500, "message": "kaboom"},
+                       exception=RuntimeError("kaboom"))
+        assert cb.snapshot()["events"][-1]["error"] == "kaboom"
+
+    def test_failed_node_error_none_stays_none(self):
+        """成功节点没有 error：scrub 不得把 None 变成空串以外的形状。"""
+        cb = ExecutionTimelineCallback(clock=_Clock())
+        cb.start_run()
+        cb.on_node_end(None, _Node("ok-node"))
+        assert cb.snapshot()["events"][-1]["error"] is None
+
     def test_queue_wait_answered_from_enqueued_at(self):
         cb = ExecutionTimelineCallback(clock=_Clock(start=1_000.0),
                                        enqueued_at="1970-01-01T00:16:40+00:00")

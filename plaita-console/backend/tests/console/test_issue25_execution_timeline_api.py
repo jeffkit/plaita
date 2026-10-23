@@ -177,6 +177,77 @@ class TestLocalTimelineProjection:
         assert body["queue_wait_ms"] is None
 
 
+# A2R49-02：timeline 信封是读面——events[*].error = str(exception)（worker 侧
+# 构造无 scrub），集群/本地两路投影在修复前都原样透出；存量旧行（修复前落盘）
+# 只能靠读面信封兜，故 scrub 落在信封构造处。
+TL_NEEDLE = "sk-live-timeline-api-needle"
+
+
+def _scrubbed_timeline():
+    return {
+        "events": [
+            {"seq": 1, "type": "node_start", "node_id": "call", "attempt": 1, "at_ms": 1},
+            {"seq": 2, "type": "node_end", "node_id": "call", "attempt": 1, "ok": False,
+             "error": ("ConnectionError: Max retries exceeded with "
+                       "url: /api/run?token=" + TL_NEEDLE),
+             "duration_ms": 120},
+            {"seq": 3, "type": "run_end", "status": "error", "final": True},
+        ],
+        "dropped": 0,
+        "max_events": 500,
+    }
+
+
+class TestTimelineErrorFaceIsRedacted:
+    """A2R49-02：``/timeline`` 信封对 ``events[*].error``（及 ``reason``）过 scrub。"""
+
+    def test_cluster_timeline_error_has_no_needle(self, redis, client):
+        _seed(redis, "tl-sec-1", timeline=_scrubbed_timeline())
+
+        resp = client.get("/api/executions/tl-sec-1/timeline", headers=_headers())
+
+        assert resp.status_code == 200, resp.text
+        assert TL_NEEDLE not in resp.text
+        body = resp.json()
+        err = body["events"][1]["error"]
+        assert "Max retries exceeded" in err, "诊断语义必须保留"
+
+    def test_local_timeline_projection_error_has_no_needle(self):
+        info = {
+            "execution_id": "l-sec-1",
+            "status": "error",
+            "start_time": "2026-09-01T00:00:00",
+            "nodes": [
+                {"id": "boom", "status": "error", "started_at": "2026-09-01T00:00:00.300",
+                 "started_ms": 300, "ended_at": "2026-09-01T00:00:00.900",
+                 "ended_ms": 900, "duration_ms": 600,
+                 "error": "ConnectionError: url /api/run?token=" + TL_NEEDLE},
+            ],
+        }
+
+        body = executions_api.project_local_timeline(info)
+
+        assert body["collected"] is True
+        err = body["events"][-1]["error"]
+        assert TL_NEEDLE not in err
+        assert "ConnectionError" in err
+
+    def test_noncredential_error_text_unchanged(self, redis, client):
+        """负控：非凭据错误文本与事件形状（seq/node_id/duration）原样。"""
+        timeline = _scrubbed_timeline()
+        timeline["events"][1]["error"] = "boom: quota exceeded"
+        _seed(redis, "tl-sec-2", timeline=timeline)
+
+        body = client.get(
+            "/api/executions/tl-sec-2/timeline", headers=_headers()
+        ).json()
+
+        end = body["events"][1]
+        assert end["error"] == "boom: quota exceeded"
+        assert end["node_id"] == "call" and end["duration_ms"] == 120
+        assert [e["seq"] for e in body["events"]] == [1, 2, 3]
+
+
 @pytest.mark.parametrize("path", ["/api/executions/e1/timeline"])
 def test_endpoint_is_registered_without_auth_bypass(client, path):
     """路由挂在受 require_auth 保护的 router 上（不是 SSE 那种 raw Route）。"""

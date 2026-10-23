@@ -45,6 +45,7 @@ from typing import Any, Callable, Dict, List, Optional
 from plaita.core.callback import FlowCallback
 from plaita.core.url_redaction import _scrub_exception_text
 from plaita.core.url_redaction import _redact_env_value
+from plaita.core.url_redaction import _scrub_url_text
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +128,19 @@ def _node_label(node: object) -> str:
 
 
 def _error_text(error: Any, exception: Any) -> Optional[str]:
+    """事件 ``error`` 文本：``str(src)`` 过 ``_scrub_url_text``（A2R49-02）。
+
+    这份文本有**两个读面**：落盘进 ``ExecutionState.timeline``（console
+    ``/timeline`` 端点透出）+ 经 publisher 实时发布到 SSE 频道（console
+    update 帧零滤透传——worker 是频道唯一发布者，scrub 必须在构造处）。
+    与本模块 logger 侧 ``_scrub_exception_text``（#151）同判据；只抹凭据
+    分量，异常类型与消息主体原样。
+    """
     src = exception if exception is not None else error
     if src is None:
         return None
     try:
-        return str(src)
+        return _scrub_url_text(str(src))
     except Exception:  # noqa: BLE001
         return f"<{type(src).__name__}>"
 

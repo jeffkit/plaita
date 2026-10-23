@@ -93,9 +93,38 @@ _EXAMPLES = [
 ]
 
 
-def seed_example_flows(store: FlowStore | None = None, tenant_id: str = "default") -> int:
-    """某租户 flows 为空时写入示例流程（1.0.0 已发布）。返回写入数量。"""
+def _default_seed_gate(row) -> None:
+    """种子发布的默认门（A134-04：门=发布唯一执法点，种子面不破例）。
+
+    与 API 发布（api/flows.py ``_publish_gates``）同一组闸：
+
+    * **编码闸**（卡 A-1）：判据是定义自身、不依赖 redis——本地档照样执法；
+    * **能力门**（#300）：数据源是 worker 注册清单，传 ``redis=None`` 时由
+      ``_gate_runtime_capability`` 自跳过。种子只发生在本地单机档启动期
+      （main.py 仅 ``local_mode`` 调用本函数），与本地档 HTTP 发布完全同判；
+      若未来种子扩到集群启动，调用方应经 ``gate_fn`` 传真实 redis 句柄的
+      门，而不是改这里。
+
+    门拒（HTTPException）被 per-example except 兜住：该例跳过 + WARNING，
+    启动不受影响。惰性导入 api 层防环（api.flows 不反向依赖本模块）。
+    """
+    try:
+        from ..api.flows import _publish_gates
+    except ImportError:
+        from api.flows import _publish_gates  # type: ignore
+    _publish_gates(None, row, where="examples.seed")
+
+
+def seed_example_flows(store: FlowStore | None = None, tenant_id: str = "default",
+                       gate_fn=None) -> int:
+    """某租户 flows 为空时写入示例流程（1.0.0 已发布）。返回写入数量。
+
+    ``gate_fn``：发布事务内的门（A134-04 补第三点注入），缺省用
+    :func:`_default_seed_gate`（编码闸 + 本地档语义的能力门）。
+    """
     store = store or get_flow_store()
+    if gate_fn is None:
+        gate_fn = _default_seed_gate
     if store.list_flows(tenant_id):
         return 0
     created = 0
@@ -114,7 +143,8 @@ def seed_example_flows(store: FlowStore | None = None, tenant_id: str = "default
                 created_by="plaita",
                 tenant_id=tenant_id,
             )
-            store.publish_version(flow_id, "1.0.0", tenant_id=tenant_id)
+            store.publish_version(flow_id, "1.0.0", tenant_id=tenant_id,
+                                  gate_fn=gate_fn)
             created += 1
         except Exception as e:  # noqa: BLE001 — 单个示例失败不影响启动
             logger.warning("写入示例流程 %s 失败: %s", flow_id, e)
