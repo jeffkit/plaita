@@ -1,0 +1,16 @@
+
+==================================== ERRORS ====================================
+_____ ERROR collecting tests/unit/test_issue330_suspend_not_executable.py ______
+ImportError while importing test module '/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue330_suspend_not_executable.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/unit/test_issue330_suspend_not_executable.py:27: in <module>
+    from plaita.core.errors import (
+E   ImportError: cannot import name 'SuspendNotExecutableError' from 'plaita.core.errors' (/Users/kong/projects/infra4agent/plaita/plaita/core/errors.py)
+=========================== short test summary info ============================
+ERROR tests/unit/test_issue330_suspend_not_executable.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.17s

@@ -1,0 +1,47 @@
+.....FF                                                                  [100%]
+=================================== FAILURES ===================================
+____________________ test_run_flow_suspend_node_named_error ____________________
+
+    def test_run_flow_suspend_node_named_error():
+        """event 在 normal 根（flow_run 路径）：ok=false + 稳定 error_type 字符串 +
+        结构化 error_detail（fix 指向分布式运行时，不引导误删节点）。"""
+        ran = run_flow(EVENT_SRC)
+        assert not ran.ok
+>       assert ran.error_type == "suspend_not_executable"
+E       AssertionError: assert 'FlowErrorType.FLOW_ERROR' == 'suspend_not_executable'
+E         
+E         - suspend_not_executable
+E         + FlowErrorType.FLOW_ERROR
+
+plaita-ai/tests/test_flow_runner.py:87: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:38 EventNode '_n1': unknown config keys ['eventType'] will be IGNORED (possible typo?). Known keys: ['desc', 'errorHandler', 'error_handler', 'event_filter', 'event_type', 'id', 'name', 'next', 'output', 'source_line', 'subscription_timeout', 'timeout', 'timeoutHandler', 'timeout_handler', 'type']
+WARNING  plaita.node.schema:basic.py:38 EventNode '_n1': unknown config keys ['eventType'] will be IGNORED (possible typo?). Known keys: ['desc', 'errorHandler', 'error_handler', 'event_filter', 'event_type', 'id', 'name', 'next', 'output', 'source_line', 'subscription_timeout', 'timeout', 'timeoutHandler', 'timeout_handler', 'type']
+_____________ test_run_flow_error_type_is_stable_enum_value_string _____________
+
+    def test_run_flow_error_type_is_stable_enum_value_string():
+        """FlowErrorType 枚举错误类型序列化为稳定字符串值（历史上是
+        ``str(Enum)`` 产出 ``FlowErrorType.ERROR_RESULT`` 机器键）。"""
+        ran = run_flow(ERROR_END_SRC)
+        assert not ran.ok
+>       assert ran.error_type == "error_result"
+E       AssertionError: assert 'FlowErrorType.ERROR_RESULT' == 'error_result'
+E         
+E         - error_result
+E         + FlowErrorType.ERROR_RESULT
+
+plaita-ai/tests/test_flow_runner.py:108: AssertionError
+=============================== warnings summary ===============================
+tests/test_flow_runner.py::test_compile_flow_ok
+tests/test_flow_runner.py::test_run_flow
+tests/test_flow_runner.py::test_compile_flow_rejects_invalid_error_handler_strategy
+tests/test_flow_runner.py::test_run_flow_suspend_node_named_error
+tests/test_flow_runner.py::test_run_flow_error_type_is_stable_enum_value_string
+  /Users/kong/projects/infra4agent/plaita/plaita-ai/plaita_ai/flow_runner.py:82: DeprecationWarning: input_type/output_type on @flow/@childflow is deprecated and ignored; $INPUT is always a dict from run(**kwargs) or run({...}).
+    ir = compile_source(source, flow_id=flow_id, **opts)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-ai/tests/test_flow_runner.py::test_run_flow_suspend_node_named_error
+FAILED plaita-ai/tests/test_flow_runner.py::test_run_flow_error_type_is_stable_enum_value_string
+2 failed, 5 passed, 5 warnings in 0.35s
