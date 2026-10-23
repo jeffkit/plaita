@@ -133,6 +133,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_TENANT_RUNNING_TTL_SECONDS` | `86400`；≤0/非法 → 86400 | `call`（每次 admit） | 名额条目 TTL，崩溃自愈 | 长于 TTL 的合法运行会提前让出名额 |
 | `PLAITA_TENANT_QUOTA_DEFER_MAX` | `64`；<1/非法 → 64 | `call`（每次 defer） | worker 超配额重投预算；达限带 `quota_bypass` 放行 | 放行是存活性优先，不是配额失效 |
 | `PLAITA_DLQ_MAX_LEN` | `1000`；非法 → 1000 + WARNING；**0/负 → 1 + WARNING**；启动预检拒绝 ≤0 | `ctor`（队列构造，worker 启动） | 每次死信后 `XTRIM` 保留最近 N 条 | **0 不是关闭，只保留 1 条**；钳制必留 WARNING；改值需重启；已有队列保留旧值 |
+| `PLAITA_TENANT_DLQ_MAX_ENTRIES` | `200`（=平台 maxlen 的 20% 份额占位，owner 三选一后改 env 即切）；非法/负 → 200 + WARNING；**0 = 不限（关闭配额）** | `ctor`（队列构造，worker 启动） | per-tenant DLQ 配额（#327）：平台 DLQ + 租户隔离流共用计数键 `plaita:tenant_dlq_count`，满格拒新收容、留 pending（`dlq_quota_full`），**不挤旧**；过半程 WARNING 一次 | 满格是「无着陆点」（#312 同构）；确认态撞满格留 pending 走独立计数口径；`delete_tenant` 的 DLQ purge 与计数清零两键成对；计数随全局 xtrim 只朝虚高漂，待扫描对账纠偏 |
 | `PLAITA_EXECUTION_STATE_TTL_DAYS` | `30`（2592000s）；≤0 → 0（关闭）；非法 → 30 | `call`（每次 save） | 仅终态（completed/error/cancelled）设 TTL；running/suspended 不设，保恢复 | 0/负是唯一明确的“关闭 TTL” |
 | `PLAITA_WORKER_CONCURRENCY` | `1`；非整数 → 启动 `ValueError`；`0`/负 → 构造时钳 1 | `startup`（argparse/构造） | N 个消费线程 | 非整数是原始 traceback 退出，不是友好告警；0/负不是“停用” |
 | `PLAITA_CAPACITY_STALE_SECONDS` | `90`；≤0/NaN/inf/非法 → 90 + WARNING | `call`（每次判定） | 容量快照新鲜期 | 0 回默认，不是关闭判定 |

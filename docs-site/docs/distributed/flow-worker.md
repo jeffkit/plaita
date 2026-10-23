@@ -172,7 +172,11 @@ pending），瞬断自愈后下一轮按真实状态处置，绝不把健康租�
 信封（与 DLQ 同形，另带 `tenant_write_rejected` 具名原因与 `quarantined`
 标记）写**租户隔离流** `{dlq}:quarantine:{tenant}` 并 ack 原消息（终局出口）；
 平台 DLQ 纯净性不变，隔离流按键裁剪（同 `PLAITA_DLQ_MAX_LEN`）、刻意不随租
-户删除清理（证据保全）。租户恢复后可经 console 按信封内源世代人工重放
+户删除清理（证据保全）。**隔离流同受 per-tenant DLQ 配额**（#327，与平台
+DLQ 共用计数键 `plaita:tenant_dlq_count`，env `PLAITA_TENANT_DLQ_MAX_ENTRIES`
+缺省 200、`0`=不限）：满格拒新收容、留 pending（具名 `dlq_quota_full`），
+不挤旧；`delete_tenant` 的 DLQ purge 与计数清零两键成对（防同 slug 重建
+继承幻影计数）。租户恢复后可经 console 按信封内源世代人工重放
 （A135-01）：隔离流进 `/api/queues/dlq` 看板（租户视角只见本租户的隔离流），
 `POST /api/queues/dlq/{id}/replay` 传 `dlq_key=<隔离流键>` 回灌，与 DLQ
 replay 同一幂等/审计路径、目标缺省反推为源任务队列；回灌成功（含
