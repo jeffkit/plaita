@@ -141,6 +141,7 @@ from plaita.server.tenant_status import (
     is_epistemic_reject_reason,
     read_tenant_generation,
     tenant_is_active,
+    tenant_start_allowed,
     tenant_write_allowed,
 )
 # plaita#28：每租户 start 准入配额（最小公平性原语）。console 入口超限 429、
@@ -1374,6 +1375,28 @@ class TenantQuotaDeferred(RuntimeError):
     ``PLAITA_TENANT_QUOTA_DEFER_MAX``（默认 64）后带 ``quota_bypass`` 放行
     ——宁可短暂突破软配额，不可让消息在队列里无限空转烧 CPU。
     """
+
+
+class TenantGateEpistemicReject(RuntimeError):
+    """新 start 的租户状态闸认识论性拒绝（plaita#326，#312 词汇表）。
+
+    读失败型（status_read_failed / generation_read_failed）——「不知道租户
+    状态」，不是确认态。消费入口抛出，由 run() 的专门分支**留 pending**：
+    不 ack、不重投、不收容、不终局化，等 XCLAIM 重投，瞬断自愈后下轮过闸。
+    重投烧到 max_deliveries 触死信守卫时，守卫对读失败型原因同样不收容
+    （#312 修后语义），闭环无终局化出口。刻意不是 ValueError 子类（防
+    poison ack 语义误伤），也不是 TenantWriteRejected 子类（那是走收容
+    分流的确认态通道，处置语义相反）。
+    """
+
+    def __init__(self, tenant_id: Optional[str], reason: str):
+        self.tenant_id = tenant_id
+        self.reason = reason
+        super().__init__(
+            f"tenant start gate epistemic reject: tenant={tenant_id!r} "
+            f"reason={reason}; carrier stays pending until the status view "
+            "is readable again"
+        )
 
 
 class TaskNotForThisWorker(RuntimeError):
@@ -6651,10 +6674,35 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         # 租户状态闸（plaita#27）：停用租户的 start/resume 一律不执行。消息已
         # 入队才停用（或挂起执行的 resume 来自 delay/approval/event 服务）时，
-        # 若照跑则「停用」对运行面是 no-op。此处直接返回 = 消费循环 ack 丢弃
-        # （留 pending 会被反复 XCLAIM 重投，无意义）。状态读 Redis 短视图，
-        # 缺失/无客户端 = active（fail-open，见 tenant_status 模块）。
-        if not tenant_is_active(
+        # 若照跑则「停用」对运行面是 no-op。
+        # plaita#326：**新 start** 升级为 fail-closed 三格闸——读失败（认识论
+        # 性，#312 词汇表）抛 TenantGateEpistemicReject 由消费循环留 pending
+        # 自愈；确认态（disabled / A133-03 的 status 缺+世代在残留）照旧丢弃；
+        # status 缺+世代缺维持 #237 fail-open。resume 与其他在飞载体保持
+        # #27 fail-open（kill switch 是准入控制，抖动时拽飞中执行会放大而
+        # 非收敛爆炸半径）。
+        if message_type == "start":
+            start_allowed, start_gate_reason = tenant_start_allowed(
+                getattr(self, "redis_client", None),
+                message_data.get("tenant_id"),
+                getattr(self, "_tenant_status_epoch", None),
+            )
+            if not start_allowed:
+                if is_epistemic_reject_reason(start_gate_reason):
+                    raise TenantGateEpistemicReject(
+                        message_data.get("tenant_id"), start_gate_reason
+                    )
+                logger.warning(
+                    "租户 %s start 被状态闸拒绝（%s），丢弃任务 %s"
+                    "（flow=%s execution=%s）",
+                    message_data.get("tenant_id") or "default",
+                    start_gate_reason,
+                    message_type,
+                    message_data.get("flow_id"),
+                    message_data.get("execution_id"),
+                )
+                return
+        elif not tenant_is_active(
             getattr(self, "redis_client", None),
             message_data.get("tenant_id"),
             getattr(self, "_tenant_status_epoch", None),
@@ -7171,6 +7219,24 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # 重投失败 → 退化为留 pending（绝不丢消息）。
                     if self._defer_over_quota_start(task, queue, exc):
                         acked = True
+                except TenantGateEpistemicReject as exc:
+                    # plaita#326：新 start 的租户状态闸读失败（认识论性，#312
+                    # 词汇表）。不 ack、不重投、不收容——消息留 pending 等
+                    # XCLAIM 重投，瞬断自愈后下轮过闸正常执行。重投烧
+                    # deliveries 至多触死信守卫，#312 修后的守卫对读失败型
+                    # 原因同样不收容（留 pending），闭环无终局化出口。
+                    queue.note_failed()
+                    # #151 卫生：异常字段先投影成标量再进 logger（不裸传）。
+                    reject_tenant = str(exc.tenant_id or "default")
+                    reject_reason = str(exc.reason)
+                    logger.warning(
+                        "任务 %s start 的租户状态读失败（tenant=%s reason=%s）"
+                        "——载体不动（不 ack 不终局化），留 pending 等重投自愈"
+                        "（plaita#326 认识论性拒绝）",
+                        task.message_id,
+                        reject_tenant,
+                        reject_reason,
+                    )
                 except ExecutionLeaseError as exc:
                     # 另一 worker 持有该执行的租约（A′ 起点后的正常竞争态）：
                     # 持有者**活着**时 ack 释放本消息（2026-10-06 修）。

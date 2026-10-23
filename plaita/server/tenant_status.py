@@ -214,6 +214,105 @@ def is_epistemic_reject_reason(reason: Optional[str]) -> bool:
     return reason in EPISTEMIC_REJECT_REASONS
 
 
+# plaita#326：新 start 状态闸的具名 fail-closed 形态——状态记录缺失而世代
+# 记录在。A133-03/A2R58-05 实锤的快照回滚/补偿残留（对账不扫 META 键、
+# delete 不清世代）正是这个形状：世代在 = 这个租户曾被机制登记过，状态缺
+# = kill switch 的判定依据被回滚掉了——「读到了缺席」（状态确认），不是
+# 认识论性「读不到」，fail-closed 拒绝并终局化站得住。
+STATUS_MISSING_GENERATION_PRESENT = "status_missing_generation_present"
+
+_status_missing_gen_lock = threading.Lock()
+_status_missing_gen_total = 0
+
+
+def tenant_status_missing_generation_total() -> int:
+    """本进程内「status 缺 + 世代在」拒绝次数（观测/测试用）。"""
+    with _status_missing_gen_lock:
+        return _status_missing_gen_total
+
+
+def _note_status_missing_generation(tenant_id: Optional[str]) -> None:
+    global _status_missing_gen_total
+    with _status_missing_gen_lock:
+        _status_missing_gen_total += 1
+    logger.warning(
+        "event=tenant_status.missing_generation_present tenant=%s "
+        "reason=%s——状态记录缺失而世代在（快照回滚/补偿残留形态，A133-03），"
+        "新 start 具名 fail-closed 拒绝（plaita#326）",
+        tenant_id or "default",
+        STATUS_MISSING_GENERATION_PRESENT,
+    )
+
+
+def tenant_start_allowed(
+    redis_client,
+    tenant_id: Optional[str],
+    expected_epoch: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """新 start 的租户状态闸：fail-closed 三格（plaita#326）。
+
+    与 :func:`tenant_write_allowed` 同款 ``(allowed, reason)`` 形状，reason
+    复用 #312 词汇表（``is_epistemic_reject_reason`` 可判读失败型）：
+
+    - **格 1（认识论性）**：状态/世代 hget 读失败 → ``(False,
+      status_read_failed | generation_read_failed)``。调用方**载体不动**：
+      不 ack、不收容、不终局化，留 pending 走 at-least-once 重投，瞬断自愈
+      后下轮过闸（#312 同款纪律；重投烧到 max_deliveries 触死信守卫时，
+      守卫对读失败型原因同样不收容，闭环无终局化出口）。
+    - **格 2（确认态）**：状态 ``disabled`` → ``(False, tenant_disabled)``，
+      照既有拒绝语义（与在飞丢弃同款）。
+    - **格 3（记录缺失切刀）**：status 缺 + 世代缺 = 机制前租户，维持 #237
+      fail-open；**status 缺 + 世代在** = A133-03 残留形态 → ``(False,
+      status_missing_generation_present)`` + 具名告警（kill switch 被击败
+      的状态，fail-closed）。
+
+    default/空租户与无 Redis 客户端：fail-open（#237/#27 兼容面不扩——
+    无客户端是部署态运维缺口，不是瞬断窗）。``expected_epoch`` 非 legacy
+    时纪元闸（A2R31-02）经 :func:`tenant_is_active` 收口，语义不变。
+    """
+    if not tenant_id or tenant_id == "default":
+        return True, None
+    if redis_client is None:
+        return True, None
+    try:
+        raw_status = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
+    except Exception as exc:  # noqa: BLE001 — 状态不可确认 ⇒ 认识论性拒绝
+        logger.warning(
+            "event=tenant_status.start_gate tenant=%s reason=status_read_failed"
+            "（fail-closed，新 start 不放行）: %s",
+            tenant_id,
+            _scrub_exception_text(exc),
+        )
+        return False, "status_read_failed"
+    if raw_status is not None:
+        if _status_from_value(raw_status) == STATUS_DISABLED:
+            return False, "tenant_disabled"
+    else:
+        current, generation_read_failed = _read_tenant_generation_strict(
+            redis_client, tenant_id
+        )
+        if generation_read_failed:
+            logger.warning(
+                "event=tenant_status.start_gate tenant=%s "
+                "reason=generation_read_failed（fail-closed，认识论性拒绝，"
+                "新 start 不放行）",
+                tenant_id,
+            )
+            return False, "generation_read_failed"
+        if current is not None:
+            _note_status_missing_generation(tenant_id)
+            return False, STATUS_MISSING_GENERATION_PRESENT
+        # status 缺 + 世代缺：机制前租户 → #237 fail-open（纪元闸仍收口）。
+    expected = (expected_epoch or "").strip()
+    if expected and expected != LEGACY_EPOCH and not tenant_is_active(
+        redis_client, tenant_id, expected_epoch
+    ):
+        # 纪元陈旧/世代不匹的具体原因已由 tenant_is_active 内部告警
+        # （_note_stale_epoch）；对 start 面同样是确认态拒绝（终局化安全）。
+        return False, "tenant_epoch_stale"
+    return True, None
+
+
 def _read_tenant_generation_strict(
     redis_client, tenant_id: Optional[str]
 ) -> tuple[Optional[str], bool]:
