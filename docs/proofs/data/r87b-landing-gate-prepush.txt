@@ -1,0 +1,4 @@
+[landing-gate] main 最近完成 run：2026-10-23T09:11:48Z 0510946 conclusion=success  |  merge: 并入 fix/a2r58-03-mask-registration（r99:A2R58-03 P2——co
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（c7e4681）
+[landing-gate] ✅ 允许落地

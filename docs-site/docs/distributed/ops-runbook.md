@@ -936,6 +936,57 @@ redis-cli KEYS 'plaita:execution:lease:*'
 
 **读 `XLEN` 时注意残留条目**：`XLEN` 计的是 Stream 里的条目数，含「已 `XACK` 未 `XDEL`」的残留（XACK 与 XDEL 之间进程被杀）——它们的执行早已终态，不代表有活干。判积压先看 `XPENDING`（`pending>0` 才是待处理）与消费组 `lag`；若 `XLEN>0` 而 `pending=0`/`lag=0`，按残留处理：worker 启动时与每 300s 会兜底回收（每轮 ≤256 条，大量残留按轮次收敛，`residue_swept` 计数可见），也可 `XRANGE` 看条目 payload 里的 `execution_id`，在 console 实查执行确为终态后确认无积压（2026-10-07 曾据 `XLEN=3` 误判「新系统未投产」，实为演练残留）。
 
+### 执行载体对账（plaita#316 Stage 0，只读） {#执行载体对账-plaita316}
+
+「载体」= 会自行触发推进的线索。`scripts/carrier_audit.py` 周期对账
+**非终态执行 × 四存放处**（队列消息 stream 本体 ∪ PEL / 事件订阅 / 定时器
+服务队列 / DLQ 与租户隔离流），全程只读（Redis 命令白名单强制，不写任何
+键、不 ack、不碰 flow_worker 的 ack 点），产出 Prometheus gauge 族 +
+JSON 快照。回滚 = 停 timer，无残留键。
+
+部署（systemd timer 形态；间隔与 SLO「2 分钟内可见」对齐）：
+
+```ini
+# /etc/systemd/system/plaita-carrier-audit.service
+[Service]
+Type=oneshot
+Environment=PLAITA_CARRIER_AUDIT_REDIS_URL=redis://localhost:6379/0
+# 租户与 stream 清单必填（缺失即启动失败退出码 2，绝不按空清单扫出全零健康）
+Environment=PLAITA_CARRIER_AUDIT_TENANTS=default
+Environment=PLAITA_CARRIER_AUDIT_STREAMS=plaita:flow:queue
+ExecStart=/opt/plaita/bin/python /opt/plaita/scripts/carrier_audit.py --once
+# /etc/systemd/system/plaita-carrier-audit.timer  →  OnUnitActiveSec=60s
+```
+
+输出：`$PLAITA_CARRIER_AUDIT_OUTPUT_DIR`（缺省 `/tmp/plaita-carrier-audit`）下
+`carrier_metrics.prom`（node_exporter textfile 约定）+ `carrier_snapshot.json`
+（tmp+rename 原子写；失败轮不覆写上一轮产物）。
+
+指标读法：
+
+- `plaita_execution_carrier{status,carrier,tenant}`：非终态执行计数，每轮
+  status×carrier 全格显式发 0/N。**page 规则**：
+  `plaita_execution_carrier{carrier="none"} > 0 for: 2m`——持久性判定交给
+  PromQL `for`，不在 audit 进程内计时。`carrier="unknown"`（工具/数据故障
+  轮次）**不入 page**。
+- `plaita_carrier_violations{reason}`：`missing`=非终态×0 载体（六类失联
+  统一落点；幽灵 queued 占位行落 `status="queued"` 格）；`duplicate`=
+  同一执行多条队列消息；`orphan_terminal`=终态仍挂载体；`unbound_subscription`=
+  活订阅不指向任何在册执行（外部订阅者可抬升，信息面）。
+- 自指标 meta-alert（audit 自身挂掉不能静默全零）：
+  `plaita_carrier_audit_last_success_timestamp` 停推 **或**
+  `plaita_carrier_audit_sources_failed > 0`。
+- `plaita_execution_carrier_age_seconds`：纯信息面（步界才写，长节点期间
+  天然陈旧；mode 5「租约新鲜 + 无步界推进」不在本指标 page 面内，归
+  reap_zombie / Stage 1 reconciler）。
+
+分诊（`carrier="none"` page 认领顺序）：先查 `carrier_snapshot.json` 的
+`missing_samples` 拿 execution_id → console 查执行 → 按 status 分诊：
+`queued`×none 多为幽灵占位行（schedule 入队失败残留，人工清理行）；`running`/
+`suspended`×none 按「恢复线索」排查（checkpoint / 删除守卫 / 事件游标），
+Stage 1 reconciler 落地前不做自动恢复。载体在 DLQ/隔离流（`carrier="dlq"`）
+的执行**不是 none**，分诊动作是 replay 而非从头排查。
+
 ### 登录限速与反枚举（r65 #293/#294/#295，含 r64 桶）
 
 | 桶 | key（归一后） | 窗口/阈值 | 锁定 | 说明 |

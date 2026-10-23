@@ -1,0 +1,16 @@
+
+==================================== ERRORS ====================================
+______________ ERROR collecting tests/unit/test_carrier_audit.py _______________
+tests/unit/test_carrier_audit.py:56: in <module>
+    _spec.loader.exec_module(carrier_audit)
+<frozen importlib._bootstrap_external>:1022: in exec_module
+    ???
+<frozen importlib._bootstrap_external>:1159: in get_code
+    ???
+<frozen importlib._bootstrap_external>:1217: in get_data
+    ???
+E   FileNotFoundError: [Errno 2] No such file or directory: '/Users/kong/projects/infra4agent/plaita/scripts/carrier_audit.py'
+=========================== short test summary info ============================
+ERROR tests/unit/test_carrier_audit.py - FileNotFoundError: [Errno 2] No such...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.60s
