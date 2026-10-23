@@ -252,6 +252,85 @@ class ErrorResultException(FlowExecutionException):
         super().__init__(code, message, self.error_type, node)
 
 
+class SuspendCallFrame:
+    """嵌套挂起调用栈的一帧（plaita#311 NS-M3，rs ``CallFrame`` 对应面）。
+
+    描述「一个待返回的父执行帧」：子流程完成后，其返回值回填到本帧
+    ``flow`` 的 ``node`` 节点（``$NODE[node]`` + ``$LAST_NODE``），父流程从
+    ``node`` 的后继继续步进。``context`` 是该帧的活 ``ExecutionContext``。
+
+    传播时压入序 = 调用链传播序（最内父帧先入，``FlowSuspendedCarrier.frames``
+    index 0 = 最内父帧，递增到根），恢复时按同序消费（最深帧先返回）。
+    """
+
+    __slots__ = ("flow", "context", "node")
+
+    def __init__(self, flow, context, node) -> None:
+        self.flow = flow
+        self.context = context
+        self.node = node
+
+
+class FlowSuspendedCarrier(FlowExecutionException):
+    """嵌套挂起传播载体（plaita#311 NS-M3，rs ``FlowError::Suspended`` 对应面）。
+
+    挂起型节点（``is_suspending=True``）在**非分布式边界**返回 pending 载荷时
+    由 ``_advance_one`` 抛出，沿调用链逐层上抛、每层经 ``push_frame`` 压入
+    「待返回帧」——直到分布式步边界把它转换成本执行的合法挂起（传播半边），
+    或穿出 normal/generator 模式成为具名失败（缺陷修复半边：历史上 pending
+    载荷被当普通数据、流程假完成，事件永不消费且零报错）。
+
+    与取消（``FlowCancelledException``）同待遇：
+
+    - 不进节点 retry / errorHandler / timeoutHandler 策略链——``NodeRunner.
+      _execute_with_retry`` 在通用 except 之前原样上抛（runner.py 逃逸分支）；
+    - ``run_node`` 的 ``except BaseException`` 补发 error 形态 ``on_node_end``
+      ——穿越型子节点挂起的 NodeEnd 携带 error 文本，与 rs 两种 NodeEnd
+      形状口径一致（验证报告 Q2）。
+
+    ``code=-500``：载体本身不是终态错误（分布式边界会转换成挂起）；仅在
+    无法表达的挂起位置（normal/generator 模式）才作为具名失败呈现。
+    """
+
+    code = -500
+    error_type = FlowErrorType.FLOW_ERROR
+
+    def __init__(self, message: str, node=None, flow=None, context=None,
+                 node_result=None) -> None:
+        super().__init__(self.code, message, self.error_type, node)
+        # 挂起现场（最内层帧）：挂起节点 + 其所在 flow + 该帧的活上下文 +
+        # 节点返回的 pending 载荷（订阅注册与逐帧 checkpoint 的素材）。
+        self.flow = flow
+        self.context = context
+        self.node_result = node_result
+        # 待返回父帧栈（传播层压入）：index 0 = 最内父帧，递增到根。
+        self.frames: "list[SuspendCallFrame]" = []
+
+    def push_frame(self, flow, context, node) -> None:
+        """传播层压帧：本层 flow/上下文/子节点作为「待返回的调用帧」入栈。"""
+        self.frames.append(SuspendCallFrame(flow=flow, context=context, node=node))
+
+
+class FlowSuspendRejectedError(FlowExecutionException):
+    """挂起作用域闸的具名拒绝（plaita#311 NS-M3，rs ``FlowError::SuspendRejected``
+    对应面）。
+
+    v1 语义契约（plaita-rs docs/PROGRAM.md 程式一）：只有 child/reference
+    调用链内的挂起可以穿透到分布式恢复边界；迭代帧（loop/map/filter/find/
+    reduce/while）与 parallel 分支帧上的挂起**具名拒绝**——恢复位置需要迭代
+    状态快照，v1 无法表达，绝不静默（消息点名阻断帧类型）。
+
+    拒绝是终态错误：不挂起、不写 pending、不注册订阅；经 normal 模式原样
+    透传 / distributed 模式归一化为 ``FlowErrorException``/-500（消息保留）。
+    """
+
+    code = -500
+    error_type = FlowErrorType.FLOW_ERROR
+
+    def __init__(self, message: str, node=None):
+        super().__init__(self.code, message, self.error_type, node)
+
+
 class ResumeError(FlowExecutionException):
     """分布式恢复阶段的不合法状态（无挂起节点 / 节点非 EventNode / 状态不对 /
     resume_type 不支持 / 恢复执行抛错）。"""

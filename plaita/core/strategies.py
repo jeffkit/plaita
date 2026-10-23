@@ -27,6 +27,7 @@ from plaita.core.errors import (
     ExecutionDeadlineError,
     FlowExecutionException,
     FlowStartMissingError,
+    FlowSuspendedCarrier,
     FlowTimeoutError,
     ResumeError,
     ResumeGuardError,
@@ -583,10 +584,39 @@ async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None
     run → detect-end → resolve-next sequence lives in exactly one place.
     Distributed mode cannot share it wholesale because it suspends on
     ``EventNode`` instead of advancing, so it keeps its own single-step path.
+
+    plaita#311 NS-M3（嵌套挂起）两面：
+
+    - **fail-closed**（修正清单 #7：与子执行 fail-open 是同一个洞）：挂起型节点
+      的 pending 载荷不得当普通数据继续推进——``is_suspending`` 为真即抛
+      :class:`FlowSuspendedCarrier`（先于 end 判断与后继解析；挂起节点不可能
+      是 End）。根流程 normal/generator 模式由此从「静默假完成」变为具名失败；
+      分布式根的子执行里，载体沿调用链上抛到分布式步边界转换成合法挂起。
+      ``is True`` 的 bool 代理防御与本模块 continue 守卫（历史 288 行）同款。
+    - **传播压帧**（rs ``advance_from`` 的 push_frame 对应面）：carrier 从内层
+      ``runner.run_node`` 穿出时，把本帧（flow/上下文/子节点）压入其调用栈后
+      原样上抛——恢复续跑循环按同序消费（最深帧先返回）。
     """
-    result, branch = await runner.run_node(
-        flow, node, max_timeout_ms=max_timeout_ms, callback_manager=callback_manager,
-    )
+    try:
+        result, branch = await runner.run_node(
+            flow, node, max_timeout_ms=max_timeout_ms, callback_manager=callback_manager,
+        )
+    except FlowSuspendedCarrier as carrier:
+        carrier.push_frame(flow, runner.context, node)
+        raise
+    # plaita#311 fail-closed：挂起检查先于 end 判断（挂起节点不可能是 End，
+    # rs advance_from 同序）。
+    if getattr(node, "is_suspending", False) is True:
+        raise FlowSuspendedCarrier(
+            (
+                f"Node {node.id!r} ({getattr(node, 'node_type', '?')}) suspended in flow "
+                f"{getattr(flow, 'flow_id', '?')!r}: the pending payload is refused as "
+                "data (plaita#311 fail-closed). Suspend/resume requires distributed "
+                "mode; inside normal/generator executions a suspending node is a "
+                "terminal named failure."
+            ),
+            node=node, flow=flow, context=runner.context, node_result=result,
+        )
     is_end = flow.is_end_node(node)
     next_node = None if is_end else flow.next_node(node, branch)
     if next_node is None and not is_end:
