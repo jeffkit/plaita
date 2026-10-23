@@ -294,3 +294,23 @@
 - **嵌套挂起程式（三平台）就此闭环**：rs#16+go#88+plaita#311 全落地。余：NS-M4 三引擎对拍集；ir_validate 装载期拦截前移/resume generation 代数（章程修订候选）。
 
 **一行摘要**：NS-M3 收官——plaita 嵌套挂起 v1 合并 main 9072b9a 三 CI 绿（缺陷修复+传播+checkpoint 逐帧化+沿路径恢复；闸先于订阅强于 rs；27 语义测试+全量 8999P 主控复跑+探针翻转核实）——**嵌套挂起三平台闭环**（rs ce8df7b/go dea859f/plaita 9072b9a）；余 NS-M4 对拍集。
+
+## 第十三轮·终章（2026-10-23，NS-M4 对拍集收官 + WK-M2 worker 生产面合并——两程式主体全部落地）
+
+- **NS-M4 收官**（feat/ns-m4-diff → main 9e36aa3，CI 绿）：实现席交付 13 例统一形状对拍集 + 三腿 runner + 语义等价类比较 + known-red 机制（沿 A1 卡 R-3 纪律：钉形状保持期门绿/漂移即红给翻绿指引）。**首轮对拍即抓 plaita case 09 真缺陷**（恢复续跑进 child → AttributeError：_advance_frame_to_end 漏接 node_execution facade）——首版 facade 补接引入第二缺陷（facade 的 evaluate 读根 $NODE，内层 end 求值 None；探针三层定位：frame_ctx.evaluate ✓/节点视图 ✗）。终修：**_FrameExecutionView 复合执行视图**（evaluate/state 走帧 ctx、child 机制/bus 走 facade、__getattr__ 回落）+ 回归钉 ×2。issue69 白盒网随动：scope_inventory 经正道 --write 重生成 87→90 站点（三委托按 facade 同族归类）+ 计数钉 87→90。issue267 计时假红=负载敏感（单跑过，与记忆同族）不改。终态 **13/13 三引擎全绿**（rs/go/plaita 逐例 outcome/挂起序列/输出/拒绝类别一致）。
+- **WK-M2 收官**（feat/worker-m2 → main 88bee5b，CI 绿）：实现席（GLM 1308 配额阵亡前）交付五单——M2-1 retry 预算/指数退避/载体转换机器/死信守卫分支表、M2-2 deadline watchdog/取消轮询/进度心跳/孤儿观察、M2-3 租户 quota admit 闸（defer+bypass+终态释放）、M2-4 载体年龄闸（双源取大 fail-closed）、M2-5 registry LookupStatus+租约冲突活证 ack 分支。行为测试 27 例。主控验收：rebase NS-M4 后 clippy -D/34 二进制 279P 全绿（修一处死字段 lint）。余 WK-M3：亲和、桥回扫器、终态 context 采集（引擎 E 面）。
+- **竞态与配额两教训**：①共享主仓合并竞态（plaita-go 曾中招）本轮 plaita-rs 全程走「分支 rebase+临时 detach worktree 合并推送」零事故；②GLM 1308 配额阵亡的实现席留下了完整可验的提交——**阵亡席位的交付按提交树验收即可续命**，配额重置后仅剩收尾由主控代劳。
+
+**一行摘要**：十三轮终章——NS-M4 13/13 三引擎对拍全绿（首轮抓 plaita case 09 真缺陷→_FrameExecutionView 修复+白盒网 90 站点随动）+ WK-M2 五单合并（retry/watchdog/quota/agegate/LookupStatus，27 行为测试）。**嵌套挂起程式（NS-M1..M4）全部收官；worker 程式余 WK-M3 一轮**。plaita-rs main=88bee5b、plaita-go main=dea859f、plaita main=c7e4681。
+
+## 第十三轮·绝对终章（2026-10-24，WK-M3 收官合并 main 4a2ca27——worker 程式 M1..M3 全部落地，两件立项就此闭环）
+
+- WK-M3 四单：①引擎 FlowEnd 载荷附根执行终态九根快照（单列接口增量，dc9617f）②worker 终态行直写精确快照（2af5a00）③事件存储兜底回扫器（b877/3ea5801，桥订阅确认窗口丢事件收口）④**亲和让渡闸**（接手 1310 阵亡席位 affinity.rs WIP 472 行完成接线：lib.rs mod+LedgerEntry.issue_id 补齐+process_one 闸位〔agegate 后 task_type 前，go worker.go:386-388 同位〕+e2e 五景〔广播 A46-02/定向转投+计数/界收敛 AffinityHandoverExhausted fenced 终态/挂起永不终态化/计数失效 fail-closed 留 pending〕+make_target_alive 夹具）。38 二进制 306P/clippy -D/fmt 全绿；合并 main 4a2ca27 CI 绿（39988865087）。
+- 顺带收口（本会话自做）：**flowID 生产者方言双仓原生折叠**（rs a1c5e93/go c6c323b，CI 绿；NS-M4 对拍集顺带发现的装载面方言，runner 侧归一拆除）；**#311 装载期拦截拍板落档**（执行期 fail-closed 即终态——部署 IR 不带执行模式，装载期无判据；评论 6368707213）；**generation 代数结论**（类型系统 move+状态机准入已双重钉死，不引入显式计数；rs#17 评论）。
+- **两件立项总账**：嵌套挂起程式（NS-M1..M4）✅ 三平台实现+13/13 对拍；worker 程式（WK-M1..M3）✅ 骨架+生产面+收官面，与 plaita-go pkg/worker 协议面逐字段对齐（混合部署直接互操作）。三仓 main：plaita-rs 4a2ca27 / plaita-go c6c323b / plaita c7e4681。
+- 阵亡席位处置再验证：WK-M2（1308 配额）与 WK-M3（1310 周配额）两席均按提交树验收续命成功——**WIP 的可编译性+测试可补性是席位的交接界面**；affinity.rs 的孤立模块形态（未 mod 未接线）恰好是干净的续命点。
+
+**一行摘要**：十三轮绝对终章——WK-M3 四单合并（4a2ca27 CI 绿，含接手阵亡席位 affinity 完成接线+五景 e2e），worker 程式 M1..M3 全部落地；flowID 双仓收口+两项拍板落档随行。**两件立项（嵌套挂起三平台 / rs worker 运行时）就此全部闭环。**
+
+## 附记（主控，2026-10-23/24）：gov/version-dimensions 断言配套
+#328 F1 交付后，大仓 DOC_ASSERTIONS.yml 已加 gov/version-dimensions 断言骨架（expected wire_schema+ir 两维）。账本面待补：plaita/docs/governance/architecture.yaml 需增 version_dimensions 键（值 ["wire_schema","ir"]）使断言闭合——转交下一触及 governance 面的实施轮。
