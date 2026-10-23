@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -117,11 +117,17 @@ class DlqReplayRequest(StrictRequestModel):
     """死信回灌请求（A53-S2；平台管理员专属）。"""
     dlq_key: Optional[str] = Field(
         default=None,
-        description="来源 DLQ 键；缺省时在已登记/已存在的 DLQ 中按条目 id 查找",
+        description=(
+            "来源 DLQ 键（含 A125 租户隔离流 {dlq}:quarantine:{tenant}）；"
+            "缺省时在已登记/已存在的 DLQ 与隔离流中按条目 id 查找"
+        ),
     )
     target_stream: Optional[str] = Field(
         default=None,
-        description="目标任务队列；缺省为 dlq_key 去掉 :dlq 后缀",
+        description=(
+            "目标任务队列；缺省为 dlq_key 去掉 :dlq 后缀"
+            "（隔离流按基 DLQ 反推源任务队列）"
+        ),
     )
     force: bool = Field(
         default=False, description="绕过 replay 幂等标记（仅平台管理员，留审计）"
@@ -179,6 +185,11 @@ KNOWN_QUEUES = [
 
 DLQ_SUFFIX = ":dlq"
 
+# A125 收容终局的租户隔离流段：键形态 ``{dlq}:quarantine:{tenant}``。不以
+# ``:dlq`` 结尾、也不是登记队列键——A135-01 之前 DLQ 列表/replay 的后缀执法
+# 点对它一律拒绝（404 不可达），收容债无从清偿。
+QUARANTINE_SEGMENT = ":quarantine:"
+
 # 显式登记的死信键：DLQ 是纯记录流，只在有死信时才被创建——空 DLQ 也保留
 # 零值行，页面才不缺行（否则「看不到」与「没有死信」无从区分）。
 KNOWN_DLQ_KEYS = [
@@ -199,6 +210,37 @@ def _queue_key_allowed(queue_name: str) -> bool:
     return queue_name in _ALLOWED_QUEUE_KEYS or queue_name.startswith(
         _ALLOWED_QUEUE_PREFIXES
     )
+
+
+def _split_quarantine_key(queue_key: str) -> Optional[tuple]:
+    """quarantine 键 → ``(基 DLQ 键, 租户段)``；其余键 → ``None``。
+
+    键形态 = 已登记 ``*:dlq`` 基键 + 非空租户段（A125 收容终局，A135-01
+    放行）。按**第一**段 ``:quarantine:`` 切分——租户 id 自身含该段时，其后
+    全部归租户（基键只可能落在首个分隔段之前）。
+    """
+    if QUARANTINE_SEGMENT not in queue_key:
+        return None
+    dlq_base, _, tenant = queue_key.partition(QUARANTINE_SEGMENT)
+    if (
+        not dlq_base
+        or not tenant.strip()
+        or not dlq_base.endswith(DLQ_SUFFIX)
+        or not _queue_key_allowed(dlq_base)
+    ):
+        return None
+    return dlq_base, tenant
+
+
+def _is_quarantine_key(queue_key: str) -> bool:
+    """租户隔离流 ``{dlq}:quarantine:{tenant}`` 键形态判定。"""
+    return _split_quarantine_key(queue_key) is not None
+
+
+def _quarantine_tenant(queue_key: str) -> Optional[str]:
+    """quarantine 键 → 租户段；其余键（含纯 ``*:dlq``）→ ``None``。"""
+    split = _split_quarantine_key(queue_key)
+    return split[1] if split else None
 
 
 def _owned_by_tenant(data: Any, tenant: Optional[str]) -> bool:
@@ -523,9 +565,33 @@ def known_queue_family_keys(
     return sorted(names)
 
 
+def _quarantine_keys(
+    redis: Redis,
+    dlq_bases: Iterable[str],
+    max_keys: int = _DLQ_SCAN_MAX_KEYS,
+) -> List[str]:
+    """已存在的租户隔离流（A135-01）：按 DLQ 基键锚定的有界 SCAN（#202 同形，
+    触界 fail-safe），逐键复核键形态——不做全库 ``*:quarantine:*`` 扫描。
+    """
+    found: set = set()
+    for base in dlq_bases:
+        found.update(
+            key
+            for key in _bounded_queue_keys(
+                redis, f"{base}{QUARANTINE_SEGMENT}*", max_keys=max_keys
+            )
+            if _is_quarantine_key(key)
+        )
+    return sorted(found)
+
+
 def _is_stream_key(key: str) -> bool:
-    """已知的 Stream 键永远保留零值行——含 DLQ（#26）。"""
-    return key in ("plaita:flow:queue", "plaita:flow:queue:v2") or key.endswith(DLQ_SUFFIX)
+    """已知的 Stream 键永远保留零值行——含 DLQ 与租户隔离流（#26/A135-01）。"""
+    return (
+        key in ("plaita:flow:queue", "plaita:flow:queue:v2")
+        or key.endswith(DLQ_SUFFIX)
+        or _is_quarantine_key(key)
+    )
 
 
 @router.get("/queues/dlq", response_model=DlqListResponse)
@@ -558,6 +624,16 @@ async def list_dlq(
         key for key in known_queue_family_keys(redis, max_keys=_DLQ_SCAN_MAX_KEYS)
         if key.endswith(DLQ_SUFFIX)
     )
+    # A135-01：租户隔离流（A125 收容终局）进 DLQ 看板。键名自带租户段——
+    # 租户视角只收本租户的隔离流（别租户的连键名存在性都不泄露），平台视角
+    # 全量；条目仍过 _read_dlq_entries 的租户/世代过滤（纵深不变）。
+    names.update(
+        key
+        for key in _quarantine_keys(
+            redis, (name for name in names if name.endswith(DLQ_SUFFIX))
+        )
+        if tenant is None or _quarantine_tenant(key) == tenant
+    )
 
     streams = []
     for name in sorted(names):
@@ -580,9 +656,13 @@ async def list_dlq(
 def _resolve_dlq_key(
     redis: Redis, requested: Optional[str], dlq_id: str
 ) -> Optional[str]:
-    """定位 ``dlq_id`` 所在 DLQ 键（只允许已登记/同族 ``*:dlq`` 键）。"""
+    """定位 ``dlq_id`` 所在 DLQ 键（已登记/同族 ``*:dlq`` 键与租户隔离流）。"""
     if requested:
-        if not requested.endswith(DLQ_SUFFIX) or not _queue_key_allowed(requested):
+        # A135-01：隔离流键形态（{dlq}:quarantine:{tenant}）与 ``*:dlq`` 键
+        # 并列放行，其余键名照旧拒绝。
+        if not _is_quarantine_key(requested) and (
+            not requested.endswith(DLQ_SUFFIX) or not _queue_key_allowed(requested)
+        ):
             return None
         try:
             return (
@@ -597,6 +677,8 @@ def _resolve_dlq_key(
     names.update(
         _bounded_queue_keys(redis, f"*{DLQ_SUFFIX}", max_keys=_DLQ_SCAN_MAX_KEYS)
     )
+    # A135-01：隔离流同样按条目 id 定位（基键锚定有界扫描，逐键复核形态）。
+    names.update(_quarantine_keys(redis, names))
     for name in sorted(names):
         try:
             if _text(redis.type(name)) == "stream" and redis.xrange(
@@ -654,7 +736,13 @@ async def replay_dlq(
     返回统一 ``{replayed, reason, target_message_id, execution_id,
     tenant_id, schema_version}``；``reason`` 是具名结果（``ok`` /
     ``already_replayed`` / ``schema_too_new`` / ``execution_deleted`` ...）。
-    DLQ 原条目**不删除**（证据保留）。
+    平台 DLQ 原条目**不删除**（证据保留）。
+
+    租户隔离流（A125 收容终局，A135-01 放行）：``dlq_key`` 可传
+    ``{dlq}:quarantine:{tenant}`` 形态，默认目标按基 DLQ 反推为源任务队列。
+    与平台 DLQ 刻意不同的一点——隔离流是待清的收容债，回灌成功（含
+    already_replayed 补摘）后条目**摘除**；失败路径条目保留。隔离流场景的
+    响应额外带 ``quarantine: true`` 与 ``entry_removed``。
 
     审计（A55-S3）：成功与具名拒绝都写 ``dlq.replay``；定位失败/目标未登记
     也在抛 4xx 前留痕（A53-S2「每次尝试」契约）。行内 ``tenant_id`` 是条目
@@ -684,8 +772,19 @@ async def replay_dlq(
             tenant_id=caller_tenant,
         )
         raise HTTPException(status_code=404, detail="死信不存在或 DLQ 键未登记")
-    target_stream = (body.target_stream or "").strip() or dlq_key[: -len(DLQ_SUFFIX)]
-    if target_stream.endswith(DLQ_SUFFIX) or not _queue_key_allowed(target_stream):
+    # A135-01：隔离流键不以 ``:dlq`` 结尾，键尾截断是空操作——默认目标按
+    # 基 DLQ 反推（{dlq}:quarantine:{tenant} → 源任务队列）。
+    quarantine_split = _split_quarantine_key(dlq_key)
+    if quarantine_split is not None:
+        default_target = quarantine_split[0][: -len(DLQ_SUFFIX)]
+    else:
+        default_target = dlq_key[: -len(DLQ_SUFFIX)]
+    target_stream = (body.target_stream or "").strip() or default_target
+    if (
+        target_stream.endswith(DLQ_SUFFIX)
+        or _is_quarantine_key(target_stream)
+        or not _queue_key_allowed(target_stream)
+    ):
         _record_replay_audit(
             request,
             dlq_key=dlq_key,
@@ -711,9 +810,26 @@ async def replay_dlq(
         target_config_family=body.target_config_family,
         allow_family_mismatch=bool(body.allow_family_mismatch),
     )
+    # A135-01 清债面：隔离流条目在回灌成功后**摘除**（XDEL）——收容是待清的
+    # 债，不是平台 DLQ 那样的证据流（原条目保留）。already_replayed（幂等
+    # 标记在案=此前已成功回灌）也补摘，覆盖首次摘条失败的残留。失败路径
+    # （schema_too_new/tenant_mismatch 等）条目保留，修复配置后可重试。
+    # 摘条失败仅 WARNING：回灌本体已成功、幂等标记防重复入队，残留条目可由
+    # 再次回灌补摘或显式 drain。
+    entry_removed = False
+    if quarantine_split is not None and (
+        result.replayed or result.reason == "already_replayed"
+    ):
+        try:
+            entry_removed = bool(redis.xdel(dlq_key, dlq_id))
+        except Exception as exc:  # noqa: BLE001 — 摘条失败不改变回灌结果
+            logger.warning("隔离流摘条失败（%s/%s）: %s", dlq_key, dlq_id, exc)
     payload = result.as_dict()
     target_tenant = result.tenant_id or body.tenant_id or caller_tenant
     payload["target_tenant"] = result.tenant_id or body.tenant_id or None
+    if quarantine_split is not None:
+        payload["quarantine"] = True
+        payload["entry_removed"] = entry_removed
     _record_replay_audit(
         request,
         dlq_key=dlq_key,
@@ -721,6 +837,10 @@ async def replay_dlq(
         detail=payload,
         tenant_id=target_tenant,
     )
+    # 响应守恒（A135-01 负控）：平台 DLQ 回灌的响应体逐字节不变；隔离流场景
+    # 额外带 ``quarantine``/``entry_removed``（含审计已回显的 target_tenant）。
+    if quarantine_split is not None:
+        return payload
     return result.as_dict()
 
 

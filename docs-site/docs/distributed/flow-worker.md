@@ -165,7 +165,12 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 滞留」——信封（与 DLQ 同形，另带 `tenant_write_rejected` 具名原因与
 `quarantined` 标记）写**租户隔离流** `{dlq}:quarantine:{tenant}` 并 ack 原消息
 （终局出口）；平台 DLQ 纯净性不变，隔离流按键裁剪（同 `PLAITA_DLQ_MAX_LEN`）、
-刻意不随租户删除清理（证据保全），租户恢复后可按信封内源世代人工重放。
+刻意不随租户删除清理（证据保全）。租户恢复后可经 console 按信封内源世代
+人工重放（A135-01）：隔离流进 `/api/queues/dlq` 看板（租户视角只见本租户的
+隔离流），`POST /api/queues/dlq/{id}/replay` 传 `dlq_key=<隔离流键>` 回灌，
+与 DLQ replay 同一幂等/审计路径、目标缺省反推为源任务队列；回灌成功
+（含 `already_replayed` 补摘）后隔离条目即**摘除**——清债语义，与平台 DLQ
+的证据保留刻意不同，失败路径条目保留。
 `tenant_quarantined` / `tenant_quarantine_failures` 计数入 `/metrics` 快照。
 
 **超版本拒收不触发死信守卫的「克隆恢复」（A49-01）**：守卫在「执行非终态 +
