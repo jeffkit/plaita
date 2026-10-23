@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from plaita_ai.console_client import ConsoleClient, ConsoleClientError
 from plaita_ai.evals.judges import judge_output
+from plaita_ai.json_guard import GuardedJsonError, guarded_json_loads
 
 __all__ = ["Case", "Dataset", "load_dataset", "evaluate", "compare"]
 
@@ -75,8 +76,10 @@ class Dataset:
     @staticmethod
     def _load_file(file: Path) -> List[Case]:
         try:
-            raw = json.loads(file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            raw = guarded_json_loads(file.read_text(encoding="utf-8"), what=f"dataset file {file}")
+        except (OSError, GuardedJsonError) as exc:
+            # 深嵌套数据集文件（~12k 层 ~24KB）让 json.loads 抛 RecursionError，
+            # 原 (OSError, ValueError) 窄口径拦不住——统一折成具名 ConsoleClientError。
             raise ConsoleClientError(f"cannot read dataset file {file}: {exc}") from exc
         items = raw.get("cases") if isinstance(raw, dict) else raw
         if not isinstance(items, list):
@@ -225,7 +228,25 @@ def evaluate(
             if mode == "dry-run":
                 out = client.dry_run(definition or "", input=case.input)
                 if out.get("error"):
-                    entry["error"] = str(out["error"])[:500]
+                    try:
+                        entry["error"] = str(out["error"])[:500]
+                    except Exception as exc:  # noqa: BLE001 — 盲捕是守卫本体（深嵌套 RecursionError 非判定）
+                        # R49-03：error 载荷可嵌候选自控的深结构，str() 的
+                        # RecursionError 不是判定——与下方 execution 面同口径，
+                        # 单 case 降级 unavailable，兄弟 case 与整报告保留。
+                        entry["unavailable"] = True
+                        entry["error"] = f"{type(exc).__name__}: {exc}"[:500]
+                        entry["reasons"] = [
+                            "case unavailable: dry-run error payload not serializable"
+                        ]
+                        _log.warning(
+                            "eval case %s degraded to unavailable: "
+                            "dry-run error payload not serializable: %s",
+                            case.id,
+                            exc,
+                        )
+                        results.append(entry)
+                        continue
                     entry["reasons"] = ["dry-run error"]
                     results.append(entry)
                     continue

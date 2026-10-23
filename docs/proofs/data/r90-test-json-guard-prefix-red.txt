@@ -1,0 +1,1039 @@
+.....FF.FFF.ssFFF.F.FF.F..FFFFFFFFF.FFFF                                 [100%]
+=================================== FAILURES ===================================
+_______________ test_mcp_flow_run_deep_inputs_json_named_degrade _______________
+
+    def test_mcp_flow_run_deep_inputs_json_named_degrade():
+        from plaita_ai.mcp.server import flow_run
+    
+>       payload = json.loads(flow_run(SIMPLE_FLOW, inputs_json=DEEP_JSON))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:78: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/mcp/server.py:150: in flow_run
+    inputs: Dict[str, Any] = json.loads(inputs_json or "{}")
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+______________ test_mcp_flow_run_deep_globals_json_named_degrade _______________
+
+    def test_mcp_flow_run_deep_globals_json_named_degrade():
+        from plaita_ai.mcp.server import flow_run
+    
+>       payload = json.loads(flow_run(SIMPLE_FLOW, globals_json=DEEP_JSON))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:87: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/mcp/server.py:153: in flow_run
+    globals_ctx = json.loads(globals_json)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+____________ test_mcp_flow_from_json_deep_definition_named_degrade _____________
+
+    def test_mcp_flow_from_json_deep_definition_named_degrade():
+        from plaita_ai.mcp.server import flow_from_json
+    
+>       payload = json.loads(flow_from_json(DEEP_JSON))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:106: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/mcp/server.py:111: in flow_from_json
+    ir = json.loads(definition)
+         ^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+_________________ test_result_json_deep_result_named_envelope __________________
+
+    def test_result_json_deep_result_named_envelope():
+        from types import SimpleNamespace
+    
+        rr = SimpleNamespace(to_dict=lambda: {"ok": True, "result": deep_struct()})
+>       payload = json.loads(result_json(rr))
+                             ^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:119: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/flow_runner.py:267: in result_json
+    return dumps_json(data.to_dict())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/flow_runner.py:262: in dumps_json
+    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:238: in dumps
+    **kw).encode(obj)
+          ^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/encoder.py:200: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.encoder.JSONEncoder object at 0x11bbcb610>
+o = {'ok': True, 'result': {'n': {'n': {'n': {'n': {'n': {...}}}}}}}
+_one_shot = True
+
+    def iterencode(self, o, _one_shot=False):
+        """Encode the given object and yield each string
+        representation as available.
+    
+        For example::
+    
+            for chunk in JSONEncoder().iterencode(bigobject):
+                mysocket.write(chunk)
+    
+        """
+        if self.check_circular:
+            markers = {}
+        else:
+            markers = None
+        if self.ensure_ascii:
+            _encoder = encode_basestring_ascii
+        else:
+            _encoder = encode_basestring
+    
+        def floatstr(o, allow_nan=self.allow_nan,
+                _repr=float.__repr__, _inf=INFINITY, _neginf=-INFINITY):
+            # Check for specials.  Note that this type of test is processor
+            # and/or platform-specific, so do tests which don't depend on the
+            # internals.
+    
+            if o != o:
+                text = 'NaN'
+            elif o == _inf:
+                text = 'Infinity'
+            elif o == _neginf:
+                text = '-Infinity'
+            else:
+                return _repr(o)
+    
+            if not allow_nan:
+                raise ValueError(
+                    "Out of range float values are not JSON compliant: " +
+                    repr(o))
+    
+            return text
+    
+    
+        if self.indent is None or isinstance(self.indent, str):
+            indent = self.indent
+        else:
+            indent = ' ' * self.indent
+        if _one_shot and c_make_encoder is not None:
+            _iterencode = c_make_encoder(
+                markers, self.default, _encoder, indent,
+                self.key_separator, self.item_separator, self.sort_keys,
+                self.skipkeys, self.allow_nan)
+        else:
+            _iterencode = _make_iterencode(
+                markers, self.default, _encoder, indent, floatstr,
+                self.key_separator, self.item_separator, self.sort_keys,
+                self.skipkeys, _one_shot)
+>       return _iterencode(o, 0)
+               ^^^^^^^^^^^^^^^^^
+E       RecursionError: maximum recursion depth exceeded while encoding a JSON object
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/encoder.py:261: RecursionError
+_______________ test_result_json_circular_result_named_envelope ________________
+
+    def test_result_json_circular_result_named_envelope():
+        from types import SimpleNamespace
+    
+        circular: dict = {}
+        circular["self"] = circular
+        rr = SimpleNamespace(to_dict=lambda: {"ok": True, "result": circular})
+>       payload = json.loads(result_json(rr))
+                             ^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:131: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/flow_runner.py:267: in result_json
+    return dumps_json(data.to_dict())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/flow_runner.py:262: in dumps_json
+    return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:238: in dumps
+    **kw).encode(obj)
+          ^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/encoder.py:200: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.encoder.JSONEncoder object at 0x11bbe8e90>
+o = {'ok': True, 'result': {'self': {'self': {'self': {'self': {'self': {...}}}}}}}
+_one_shot = True
+
+    def iterencode(self, o, _one_shot=False):
+        """Encode the given object and yield each string
+        representation as available.
+    
+        For example::
+    
+            for chunk in JSONEncoder().iterencode(bigobject):
+                mysocket.write(chunk)
+    
+        """
+        if self.check_circular:
+            markers = {}
+        else:
+            markers = None
+        if self.ensure_ascii:
+            _encoder = encode_basestring_ascii
+        else:
+            _encoder = encode_basestring
+    
+        def floatstr(o, allow_nan=self.allow_nan,
+                _repr=float.__repr__, _inf=INFINITY, _neginf=-INFINITY):
+            # Check for specials.  Note that this type of test is processor
+            # and/or platform-specific, so do tests which don't depend on the
+            # internals.
+    
+            if o != o:
+                text = 'NaN'
+            elif o == _inf:
+                text = 'Infinity'
+            elif o == _neginf:
+                text = '-Infinity'
+            else:
+                return _repr(o)
+    
+            if not allow_nan:
+                raise ValueError(
+                    "Out of range float values are not JSON compliant: " +
+                    repr(o))
+    
+            return text
+    
+    
+        if self.indent is None or isinstance(self.indent, str):
+            indent = self.indent
+        else:
+            indent = ' ' * self.indent
+        if _one_shot and c_make_encoder is not None:
+            _iterencode = c_make_encoder(
+                markers, self.default, _encoder, indent,
+                self.key_separator, self.item_separator, self.sort_keys,
+                self.skipkeys, self.allow_nan)
+        else:
+            _iterencode = _make_iterencode(
+                markers, self.default, _encoder, indent, floatstr,
+                self.key_separator, self.item_separator, self.sort_keys,
+                self.skipkeys, _one_shot)
+>       return _iterencode(o, 0)
+               ^^^^^^^^^^^^^^^^^
+E       ValueError: Circular reference detected
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/encoder.py:261: ValueError
+_____________ test_sup_propose_deep_context_json_named_error_reply _____________
+
+    def test_sup_propose_deep_context_json_named_error_reply():
+        mod = _tools_module()
+>       reply = json.loads(mod.sup_propose(context_json=DEEP_JSON))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:193: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor_flow.py:73: in sup_propose
+    context = json.loads(context_json)
+              ^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+______________ test_sup_propose_control_bad_json_now_named_reply _______________
+
+    def test_sup_propose_control_bad_json_now_named_reply():
+        mod = _tools_module()
+>       reply = json.loads(mod.sup_propose(context_json="{oops"))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:200: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor_flow.py:73: in sup_propose
+    context = json.loads(context_json)
+              ^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>, s = '{oops', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: JSONDecodeError
+_____________ test_sup_propose_no_proposer_early_exit_before_parse _____________
+
+    def test_sup_propose_no_proposer_early_exit_before_parse():
+        # A2R52-05 次序格：未配置 proposer 时不得先炸解析（原实现在解析之后早退）。
+        mod = _tools_module(proposer=None)
+>       reply = json.loads(mod.sup_propose(context_json="{oops"))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:207: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor_flow.py:73: in sup_propose
+    context = json.loads(context_json)
+              ^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>, s = '{oops', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: JSONDecodeError
+_______________ test_sup_evaluate_deep_proposal_json_no_proposal _______________
+
+    def test_sup_evaluate_deep_proposal_json_no_proposal():
+        mod = _tools_module()
+>       verdict = json.loads(mod.sup_evaluate(flow_id="f", proposal_json=DEEP_JSON))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:219: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor_flow.py:86: in sup_evaluate
+    proposal = json.loads(proposal_json)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+___________ test_run_supervisor_flow_deep_verdict_string_flow_error ____________
+
+    def test_run_supervisor_flow_deep_verdict_string_flow_error():
+        # run_supervisor_flow 出口解析同族收口：深嵌套 verdict 串 → flow_error，
+        # 原 (ValueError, TypeError) 窄口径对 RecursionError 失守。
+        from plaita_ai import supervisor_flow as sf
+    
+        original = sf.run_flow
+        sf.run_flow = lambda *a, **kw: RunResult(ok=True, result=DEEP_JSON)
+        try:
+>           out = sf.run_supervisor_flow("f", tools=_tools_module())
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:237: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor_flow.py:128: in run_supervisor_flow
+    return json.loads(result.result) if isinstance(result.result, str) else dict(result.result)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+____________________ test_parse_legacy_json_deep_reply_none ____________________
+
+    def test_parse_legacy_json_deep_reply_none():
+        from plaita_ai.supervisor import PromptProposer
+    
+>       assert PromptProposer._parse_legacy_json(DEEP_JSON) is None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:249: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor.py:216: in _parse_legacy_json
+    parsed = json.loads(content)
+             ^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+_______________ test_emit_current_source_deep_json_empty_string ________________
+
+    def test_emit_current_source_deep_json_empty_string():
+        from plaita_ai.supervisor import PromptProposer
+    
+        # docstring 承诺「任何失败都降级为空串」——深嵌套（RecursionError）也兑现。
+>       assert PromptProposer._emit_current_source(DEEP_JSON) == ""
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:263: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor.py:156: in _emit_current_source
+    ir = json.loads(ir)
+         ^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+________________ test_extract_rationale_deep_block_empty_string ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x11bbe8e90>
+
+    def test_extract_rationale_deep_block_empty_string(monkeypatch):
+        from plaita_ai.supervisor import FlowSourceProposer
+    
+        monkeypatch.setenv("PLAITA_AI_PROPOSER_BASE_URL", "http://127.0.0.1:1")
+        monkeypatch.setenv("PLAITA_AI_PROPOSER_MODEL", "stub")
+        monkeypatch.setenv("PLAITA_AI_PROPOSER_API_KEY", "stub")
+        fp = FlowSourceProposer(flow_id="f")
+        content = "```json\n" + ('{"a":' * 12000) + "1" + ("}" * 12000) + "\n```"
+>       assert fp._extract_rationale(content) == ""
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:296: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/supervisor.py:388: in _extract_rationale
+    parsed = json.loads(match.group(1))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"...}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON object from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+_________________ test_ops_console_run_start_deep_params_named _________________
+
+ops_tools = {'console_flow_list': <function register.<locals>.console_flow_list at 0x11c25f740>, 'console_flow_get': <function reg... 0x11c25f920>, 'console_flow_version_save': <function register.<locals>.console_flow_version_save at 0x11c25fa60>, ...}
+
+    def test_ops_console_run_start_deep_params_named(ops_tools):
+>       payload = json.loads(ops_tools["console_run_start"](flow_id="f", params_json=DEEP_OBJ))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:328: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/ops_mcp.py:56: in wrapper
+    return _json(fn(*args, **kwargs))
+                 ^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/ops_mcp.py:188: in console_run_start
+    params = json.loads(params_json) if params_json else {}
+             ^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"...}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON object from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+__________________ test_ops_console_dry_run_deep_input_named ___________________
+
+ops_tools = {'console_flow_list': <function register.<locals>.console_flow_list at 0x11bee8d60>, 'console_flow_get': <function reg... 0x11bee9300>, 'console_flow_version_save': <function register.<locals>.console_flow_version_save at 0x11bee9440>, ...}
+
+    def test_ops_console_dry_run_deep_input_named(ops_tools):
+        payload = json.loads(ops_tools["console_dry_run"](flow_json="{}", input_json=DEEP_OBJ))
+        assert payload["ok"] is False
+>       assert "input_json is not valid JSON" in payload["error"]
+E       AssertionError: assert 'input_json is not valid JSON' in 'PLAITA_CONSOLE_URL is not configured — point it at a running plaita-console (e.g. http://127.0.0.1:8000).'
+
+plaita-ai/tests/test_json_guard.py:337: AssertionError
+____________________ test_ops_eval_compare_deep_base_named _____________________
+
+ops_tools = {'console_flow_list': <function register.<locals>.console_flow_list at 0x11beea840>, 'console_flow_get': <function reg... 0x11beeaa20>, 'console_flow_version_save': <function register.<locals>.console_flow_version_save at 0x11beeab60>, ...}
+
+    def test_ops_eval_compare_deep_base_named(ops_tools):
+>       payload = json.loads(ops_tools["eval_compare"](base_json=DEEP_OBJ, candidate_json="{}"))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:341: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/ops_mcp.py:56: in wrapper
+    return _json(fn(*args, **kwargs))
+                 ^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/ops_mcp.py:238: in eval_compare
+    base = json.loads(base_json)
+           ^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"...}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON object from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+__________________ test_ops_eval_compare_deep_candidate_named __________________
+
+ops_tools = {'console_flow_list': <function register.<locals>.console_flow_list at 0x11c2fc180>, 'console_flow_get': <function reg... 0x11c2fc400>, 'console_flow_version_save': <function register.<locals>.console_flow_version_save at 0x11c2fc540>, ...}
+
+    def test_ops_eval_compare_deep_candidate_named(ops_tools):
+>       payload = json.loads(ops_tools["eval_compare"](base_json="{}", candidate_json=DEEP_OBJ))
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:347: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/ops_mcp.py:56: in wrapper
+    return _json(fn(*args, **kwargs))
+                 ^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/ops_mcp.py:239: in eval_compare
+    candidate = json.loads(candidate_json)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"...}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON object from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+________________ test_ops_canary_shadow_once_deep_params_named _________________
+
+ops_tools = {'console_flow_list': <function register.<locals>.console_flow_list at 0x11c2fd9e0>, 'console_flow_get': <function reg... 0x11c2fdd00>, 'console_flow_version_save': <function register.<locals>.console_flow_version_save at 0x11c2fde40>, ...}
+
+    def test_ops_canary_shadow_once_deep_params_named(ops_tools):
+        payload = json.loads(
+>           ops_tools["canary_shadow_once"](flow_id="f", candidate_version="v2", params_json=DEEP_OBJ)
+        )
+
+plaita-ai/tests/test_json_guard.py:354: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/ops_mcp.py:56: in wrapper
+    return _json(fn(*args, **kwargs))
+                 ^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/ops_mcp.py:293: in canary_shadow_once
+    params = json.loads(params_json) if params_json else {}
+             ^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"...}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON object from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+___________________ test_ops_canary_verdict_deep_state_named ___________________
+
+ops_tools = {'console_flow_list': <function register.<locals>.console_flow_list at 0x11c2fff60>, 'console_flow_get': <function reg... 0x11c30c360>, 'console_flow_version_save': <function register.<locals>.console_flow_version_save at 0x11c30c4a0>, ...}
+
+    def test_ops_canary_verdict_deep_state_named(ops_tools):
+        payload = json.loads(ops_tools["canary_verdict"](state_json=DEEP_OBJ))
+        assert payload["ok"] is False
+>       assert "state_json is not valid JSON" in payload["error"]
+E       AssertionError: assert 'state_json is not valid JSON' in 'PLAITA_CONSOLE_URL is not configured — point it at a running plaita-console (e.g. http://127.0.0.1:8000).'
+
+plaita-ai/tests/test_json_guard.py:363: AssertionError
+_______________ test_ops_guarded_widened_catches_recursionerror ________________
+
+    def test_ops_guarded_widened_catches_recursionerror():
+        # _guarded 兜底口径 = judges.py 的 except Exception：解析点之外的意外
+        # 异常（含 RuntimeError 族）同样具名 ok:false，不穿出工具体。
+        from plaita_ai import ops_mcp
+    
+        @ops_mcp._guarded
+        def _raiser() -> str:
+            raise RecursionError("boom")
+    
+>       payload = json.loads(_raiser())
+                             ^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:375: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/ops_mcp.py:56: in wrapper
+    return _json(fn(*args, **kwargs))
+                 ^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    @ops_mcp._guarded
+    def _raiser() -> str:
+>       raise RecursionError("boom")
+E       RecursionError: boom
+
+plaita-ai/tests/test_json_guard.py:373: RecursionError
+__________________ test_dataset_deep_file_named_console_error __________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1129/test_dataset_deep_file_named_c0')
+
+    def test_dataset_deep_file_named_console_error(tmp_path):
+        file = tmp_path / "deep.json"
+        file.write_text(DEEP_JSON, encoding="utf-8")
+        with pytest.raises(ConsoleClientError) as ei:
+>           Dataset.load(str(file))
+
+plaita-ai/tests/test_json_guard.py:387: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/evals/evals.py:72: in load
+    return cls(cls._load_file(p), source=str(p))
+               ^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/evals/evals.py:78: in _load_file
+    raw = json.loads(file.read_text(encoding="utf-8"))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+__________ test_evaluate_dry_run_deep_error_payload_case_unavailable ___________
+
+    def test_evaluate_dry_run_deep_error_payload_case_unavailable():
+>       report = evaluate(_DeepErrorConsole(), "f", "v1", Dataset([{"id": "c1", "input": {}}]))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_json_guard.py:409: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_json_guard._DeepErrorConsole object at 0x11bbdbb60>
+flow_id = 'f', version = 'v1'
+dataset = <plaita_ai.evals.evals.Dataset object at 0x118e0c550>
+mode = 'dry-run', timeout_s = 120.0
+
+    def evaluate(
+        client: ConsoleClient,
+        flow_id: str,
+        version: str,
+        dataset: Dataset,
+        mode: str = "dry-run",
+        timeout_s: float = 120.0,
+    ) -> Dict[str, Any]:
+        """Run every case against one flow version and score the outputs.
+    
+        mode="dry-run" evaluates the saved definition in-process (fast, no
+        deployment); mode="execution" starts a real execution per case and waits.
+        """
+        mode = "execution" if str(mode).lower() in ("execution", "run", "real") else "dry-run"
+        definition: Optional[str] = None
+        if mode == "dry-run":
+            definition = client.get_version(flow_id, version).get("definition") or ""
+    
+        results: List[Dict[str, Any]] = []
+        started = time.monotonic()
+        for case in dataset.cases:
+            entry: Dict[str, Any] = {"id": case.id, "ok": False, "score": 0.0}
+            try:
+                if mode == "dry-run":
+                    out = client.dry_run(definition or "", input=case.input)
+                    if out.get("error"):
+>                       entry["error"] = str(out["error"])[:500]
+                                         ^^^^^^^^^^^^^^^^^
+E                       RecursionError: maximum recursion depth exceeded while getting the repr of an object
+
+plaita-ai/plaita_ai/evals/evals.py:228: RecursionError
+____________________ test_cli_load_json_arg_deep_named_exit ____________________
+
+    def test_cli_load_json_arg_deep_named_exit():
+        from plaita_ai.cli.main import _load_json_arg
+    
+        with pytest.raises(SystemExit) as ei:
+>           _load_json_arg(DEEP_JSON, {}, what="--input")
+E           TypeError: _load_json_arg() got an unexpected keyword argument 'what'
+
+plaita-ai/tests/test_json_guard.py:425: TypeError
+_______________ test_cli_load_json_arg_control_valid_and_default _______________
+
+    def test_cli_load_json_arg_control_valid_and_default():
+        from plaita_ai.cli.main import _load_json_arg
+    
+>       assert _load_json_arg('{"a": 1}', {}, what="--input") == {"a": 1}
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: _load_json_arg() got an unexpected keyword argument 'what'
+
+plaita-ai/tests/test_json_guard.py:433: TypeError
+___________________ test_cli_cmd_run_deep_input_exits_named ____________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1129/test_cli_cmd_run_deep_input_ex0')
+
+    def test_cli_cmd_run_deep_input_exits_named(tmp_path):
+        """端到端：`plaita-ai run <flow> --input <deep>` 具名退出，非裸 traceback。"""
+        from plaita_ai.cli.main import build_parser, cmd_run
+    
+        source = tmp_path / "flow.py"
+        source.write_text(SIMPLE_FLOW, encoding="utf-8")
+        args = build_parser().parse_args(["run", str(source), "--input", DEEP_JSON])
+        with pytest.raises(SystemExit) as ei:
+>           cmd_run(args)
+
+plaita-ai/tests/test_json_guard.py:446: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+plaita-ai/plaita_ai/cli/main.py:57: in cmd_run
+    inputs = _load_json_arg(args.input, {})
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita-ai/plaita_ai/cli/main.py:32: in _load_json_arg
+    return json.loads(raw)
+           ^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x105c97cb0>
+s = '[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+>           obj, end = self.scan_once(s, idx)
+                       ^^^^^^^^^^^^^^^^^^^^^^
+E           RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:361: RecursionError
+=========================== short test summary info ============================
+FAILED plaita-ai/tests/test_json_guard.py::test_mcp_flow_run_deep_inputs_json_named_degrade
+FAILED plaita-ai/tests/test_json_guard.py::test_mcp_flow_run_deep_globals_json_named_degrade
+FAILED plaita-ai/tests/test_json_guard.py::test_mcp_flow_from_json_deep_definition_named_degrade
+FAILED plaita-ai/tests/test_json_guard.py::test_result_json_deep_result_named_envelope
+FAILED plaita-ai/tests/test_json_guard.py::test_result_json_circular_result_named_envelope
+FAILED plaita-ai/tests/test_json_guard.py::test_sup_propose_deep_context_json_named_error_reply
+FAILED plaita-ai/tests/test_json_guard.py::test_sup_propose_control_bad_json_now_named_reply
+FAILED plaita-ai/tests/test_json_guard.py::test_sup_propose_no_proposer_early_exit_before_parse
+FAILED plaita-ai/tests/test_json_guard.py::test_sup_evaluate_deep_proposal_json_no_proposal
+FAILED plaita-ai/tests/test_json_guard.py::test_run_supervisor_flow_deep_verdict_string_flow_error
+FAILED plaita-ai/tests/test_json_guard.py::test_parse_legacy_json_deep_reply_none
+FAILED plaita-ai/tests/test_json_guard.py::test_emit_current_source_deep_json_empty_string
+FAILED plaita-ai/tests/test_json_guard.py::test_extract_rationale_deep_block_empty_string
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_console_run_start_deep_params_named
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_console_dry_run_deep_input_named
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_eval_compare_deep_base_named
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_eval_compare_deep_candidate_named
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_canary_shadow_once_deep_params_named
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_canary_verdict_deep_state_named
+FAILED plaita-ai/tests/test_json_guard.py::test_ops_guarded_widened_catches_recursionerror
+FAILED plaita-ai/tests/test_json_guard.py::test_dataset_deep_file_named_console_error
+FAILED plaita-ai/tests/test_json_guard.py::test_evaluate_dry_run_deep_error_payload_case_unavailable
+FAILED plaita-ai/tests/test_json_guard.py::test_cli_load_json_arg_deep_named_exit
+FAILED plaita-ai/tests/test_json_guard.py::test_cli_load_json_arg_control_valid_and_default
+FAILED plaita-ai/tests/test_json_guard.py::test_cli_cmd_run_deep_input_exits_named
+25 failed, 13 passed, 2 skipped in 1.19s
+prefixed-rc=1

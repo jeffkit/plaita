@@ -6,7 +6,6 @@ LangChain's tool-calling loop, exactly like user-provided tools.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from langchain.tools import tool
@@ -20,6 +19,7 @@ from plaita_ai.flow_runner import (
     result_json,
     run_flow,
 )
+from plaita_ai.json_guard import GuardedJsonError, guarded_json_loads
 
 
 def build_plaita_tools(
@@ -77,10 +77,16 @@ def build_plaita_tools(
             flow_id: Optional main flow function name.
             globals_json: Optional JSON object for flow.global_context ($GLOBAL.*).
         """
-        inputs: Dict[str, Any] = json.loads(inputs_json or "{}")
-        run_globals = ctx.copy()
-        if globals_json:
-            run_globals.update(json.loads(globals_json))
+        # inputs_json/globals_json 是调用方自控文本：深嵌套（~12k 层 ~24KB）
+        # 让 json.loads 抛 RecursionError（A2R52-05）。LangChain 的 tool 调用
+        # 循环虽会把异常折成错误消息，但工具体内先具名降级，与 MCP 面同口径。
+        try:
+            inputs: Dict[str, Any] = guarded_json_loads(inputs_json or "{}", what="inputs_json")
+            run_globals = ctx.copy()
+            if globals_json:
+                run_globals.update(guarded_json_loads(globals_json, what="globals_json"))
+        except GuardedJsonError as exc:
+            return result_json({"ok": False, "error": str(exc), "error_type": "GuardedJsonError"})
         return result_json(
             run_flow(source, inputs, flow_id=flow_id, globals_ctx=run_globals or None)
         )
