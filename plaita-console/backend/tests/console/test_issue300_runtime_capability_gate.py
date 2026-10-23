@@ -48,6 +48,15 @@ GO_SUPPORTED = ["assignment", "code", "end", "http", "parallel", "start", "switc
 GO_UNSUPPORTED = ["calculate", "case", "filter", "find", "map", "mock", "reference",
                   "reduce", "while"]
 
+# plaita-rs IR accept-list 代表性子集（真值=B4 第十二轮 capability_manifest()
+# 实产 25 类：ir_contract_version=2026-10-23.2；能力门只消费清单本身）。
+RS_SUPPORTED = ["assignment", "case", "child", "code", "end", "http", "if",
+                "loop", "map", "mock", "parallel", "reference", "start",
+                "switch"]
+# Rust 池明确拒载的 Python 家族代表（sql_query 在实产 unsupported 清单里）。
+RS_UNSUPPORTED = ["agentrun", "llm", "sql_query", "writefile"]
+RS_QUEUE = "plaita:flow:queue:rust"
+
 
 def _settings():
     from config import Settings
@@ -93,15 +102,17 @@ def _headers():
 
 
 def _register_worker(redis, instance_id, *, engine, supported=None,
-                     with_manifest=True):
+                     with_manifest=True, queue=None, unsupported=None):
     from plaita.server.capability import build_capability_manifest, python_worker_manifest
 
-    metadata = {"queue_name": GO_QUEUE if engine == "plaita-go" else DEFAULT_QUEUE}
+    metadata = {"queue_name": queue or (GO_QUEUE if engine == "plaita-go" else DEFAULT_QUEUE)}
     if with_manifest:
         manifest = (
             build_capability_manifest(
                 supported or [], engine=engine,
-                unsupported_node_types=GO_UNSUPPORTED if engine == "plaita-go" else (),
+                unsupported_node_types=unsupported
+                if unsupported is not None
+                else (GO_UNSUPPORTED if engine == "plaita-go" else ()),
             )
             if engine != "python"
             else python_worker_manifest()
@@ -147,6 +158,19 @@ def _plain_def(flow_id="plain", version="1.0.0"):
         "nodes": [
             {"type": "start", "id": "start", "next": "end"},
             {"type": "end", "id": "end", "output": "$INPUT.name", "resultType": "success"},
+        ],
+    })
+
+
+def _sql_query_def(flow_id="rsq", version="1.0.0"):
+    return json.dumps({
+        "flow_id": flow_id,
+        "inputType": {"dataType": "object"},
+        "nodes": [
+            {"type": "start", "id": "start", "next": "q"},
+            {"type": "sql_query", "id": "q", "query": "SELECT 1",
+             "credential": "pg-main", "next": "end"},
+            {"type": "end", "id": "end", "output": "$INPUT", "resultType": "success"},
         ],
     })
 
@@ -558,3 +582,80 @@ class TestRealGoWorkerRegistration:
         # 判定照样拒——与合成清单的代表性子集不同。
         assert "map" in go["capability_manifest"]["supported_node_types"]
         assert "sql_query" not in go["capability_manifest"]["supported_node_types"]
+
+
+class TestRustPoolGate:
+    """plaita-rs 引擎位次（B4 第十二轮全量入位第二步）：能力门对 rust 池生效。
+
+    负控矩阵承 go 池三景（严格交集 / 结构化 422 / 缺清单 fail-open），
+    第三引擎逐景守恒。
+    """
+
+    @pytest.fixture()
+    def redis_rs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("config.get_settings", lambda: _settings())
+        monkeypatch.setattr("auth.get_settings", lambda: _settings())
+        flow_store.init_engine(f"sqlite:///{tmp_path}/issue300rs.db")
+        r = FakeRedis(decode_responses=True)
+        _register_worker(r, "rs-1", engine="plaita-rs", supported=RS_SUPPORTED,
+                         unsupported=RS_UNSUPPORTED, queue=RS_QUEUE)
+        return r
+
+    def test_supported_flow_publish_start_lands_rust_queue(self, redis_rs):
+        client = _client(redis_rs)
+        flow_store.get_flow_store().create_flow("rsmap", tenant_id="default")
+        saved = _save(client, "rsmap", "1.0.0", _map_def("rsmap"), runtime="rust")
+        assert saved.status_code == 200, saved.text
+        resp = _publish(client, "rsmap", "1.0.0")
+        assert resp.status_code == 200, resp.text
+        resp = _start(client, "rsmap", "1.0.0")
+        assert resp.status_code == 200, resp.text
+        # 派发落 rust 池推导队列（不串 go/python 池）
+        assert redis_rs.xlen(RS_QUEUE) == 1
+        assert redis_rs.xlen(GO_QUEUE) == 0
+        assert redis_rs.xlen(DEFAULT_QUEUE) == 0
+
+    def test_sql_query_publish_422_structured(self, redis_rs):
+        client = _client(redis_rs)
+        flow_store.get_flow_store().create_flow("rsq", tenant_id="default")
+        resp = _save(client, "rsq", "1.0.0", _sql_query_def(), runtime="rust")
+        assert resp.status_code == 200, resp.text
+        resp = _publish(client, "rsq", "1.0.0")
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "unsupported_node_types"
+        assert detail["runtime"] == "rust"
+        assert detail["unsupported"] == ["sql_query"]
+        assert "map" in detail["supported"]
+        # 未发布：状态机不动（draft），引擎存储无键
+        row = flow_store.get_flow_store().get_version("rsq", "1.0.0")
+        assert row.status == "draft"
+        assert redis_rs.get("plaita:flow:rsq:1.0.0") is None
+
+    def test_manifest_missing_rust_worker_fails_open_with_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # 兜底守恒：rust worker 无清单（旧 build 形态）→ 放行 + 具名 WARNING
+        monkeypatch.setattr("config.get_settings", lambda: _settings())
+        monkeypatch.setattr("auth.get_settings", lambda: _settings())
+        flow_store.init_engine(f"sqlite:///{tmp_path}/issue300rs2.db")
+        r = FakeRedis(decode_responses=True)
+        _register_worker(r, "rs-old", engine="plaita-rs", with_manifest=False)
+        client = _client(r)
+        flow_store.get_flow_store().create_flow("rsmap", tenant_id="default")
+        saved = _save(client, "rsmap", "1.0.0", _map_def("rsmap"), runtime="rust")
+        assert saved.status_code == 200, saved.text
+        with caplog.at_level("WARNING"):
+            resp = _publish(client, "rsmap", "1.0.0")
+        assert resp.status_code == 200, resp.text
+        assert POOL_MANIFEST_MISSING_WARNING in caplog.text
+
+    def test_services_read_face_shows_rust_manifest(self, redis_rs):
+        client = _client(redis_rs)
+        resp = client.get("/api/services", headers=_headers())
+        assert resp.status_code == 200, resp.text
+        rows = {s["instance_id"]: s for s in resp.json()["services"]}
+        rs = rows["rs-1"]
+        assert rs["capability_manifest"]["engine"] == "plaita-rs"
+        assert rs["capability_manifest"]["ir_contract_version"]
+        assert rs["capability_manifest"]["supported_node_types"] == RS_SUPPORTED

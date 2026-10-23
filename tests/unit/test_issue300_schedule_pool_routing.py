@@ -128,6 +128,18 @@ class TestFireScheduleRowRuntimeRouting:
         assert fake.xlen(GO_QUEUE) == 0
         assert len(_start_messages(fake, DEFAULT_QUEUE_NAME)) == 2
 
+    def test_rust_row_lands_in_rust_queue(self):
+        """rust 池（plaita-rs，B4 第十二轮位次）走通用推导队列。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        msg_id = fire_schedule(
+            fake, _schedule(runtime="rust"), None,
+            trigger_kind="cron", due_at=1792700000002,
+        )
+        assert msg_id is not None
+        assert len(_start_messages(fake, "plaita:flow:queue:rust")) == 1
+        assert fake.xlen(GO_QUEUE) == 0
+        assert len(_start_messages(fake, DEFAULT_QUEUE_NAME)) == 0
+
     def test_explicit_queue_still_wins_over_row(self):
         # console manual 触发显式传按版本行现算的队列——行 runtime 不抢优先级
         fake = fakeredis.FakeRedis(decode_responses=True)
@@ -171,3 +183,34 @@ class TestCronLoopRouting:
         svc._fire_if_due(schedule, 1792700000000)
         assert len(_start_messages(fake, GO_QUEUE)) == 1
         assert fake.xlen(DEFAULT_QUEUE_NAME) == 0
+
+
+class TestRuntimeQueuesRustSlot:
+    """runtime 取值域/队列解析对 rust 池的接线（B4 第十二轮位次）。"""
+
+    def test_rust_is_valid_runtime(self):
+        from plaita.server.runtime_queues import VALID_RUNTIMES, normalize_runtime
+
+        assert "rust" in VALID_RUNTIMES
+        assert normalize_runtime("rust") == "rust"
+
+    def test_rust_queue_default_derivation_and_env_override(self, monkeypatch):
+        from plaita.server.runtime_queues import resolve_runtime_queue
+
+        monkeypatch.delenv("PLAITA_CONSOLE_RUNTIME_QUEUES", raising=False)
+        # 缺省通用推导（不设专用 env，等 worker 落地按实际部署再定）
+        assert resolve_runtime_queue("rust") == "plaita:flow:queue:rust"
+        # env 显式覆盖口径与任意 runtime 一致
+        monkeypatch.setenv(
+            "PLAITA_CONSOLE_RUNTIME_QUEUES",
+            json.dumps({"rust": "plaita:flow:queue:rs-alt"}),
+        )
+        assert resolve_runtime_queue("rust") == "plaita:flow:queue:rs-alt"
+
+    def test_invalid_runtime_still_rejected(self):
+        import pytest
+
+        from plaita.server.runtime_queues import normalize_runtime
+
+        with pytest.raises(ValueError):
+            normalize_runtime("banana")
