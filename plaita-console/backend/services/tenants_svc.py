@@ -268,20 +268,24 @@ def set_tenant_status(store, tenant_id: str, status: str, redis_client=None) -> 
 
 
 def _disable_tenant_schedules(store, tenant_id: str, redis_client) -> None:
-    """停用租户时同步停掉其调度（本地 SQLite 档 + 集群 Redis HASH 档）。"""
+    """停用租户时同步停掉其调度（本地 SQLite 档 + 集群 Redis HASH 档）。
+
+    本地档只改**调度行**（registry 域 ``schedule_store``），不触碰运行面
+    ``local_scheduler``（C1 边界：registry 不得依赖 gateway）。
+    """
     try:
-        from . import local_scheduler
+        from . import schedule_store
     except ImportError:
-        local_scheduler = None  # type: ignore
-    if local_scheduler is not None:
-        for s in local_scheduler.list_schedules(store):
+        schedule_store = None  # type: ignore
+    if schedule_store is not None:
+        for s in schedule_store.list_schedules(store):
             if (s.get("tenant_id") or DEFAULT_TENANT_ID) != tenant_id:
                 continue
             if not s.get("enabled"):
                 continue
             s["enabled"] = False
             s["next_run_at"] = ""
-            local_scheduler.update_schedule(store, s["schedule_id"], s)
+            schedule_store.update_schedule(store, s["schedule_id"], s)
 
     if redis_client is None:
         return

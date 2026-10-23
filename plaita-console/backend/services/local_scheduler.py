@@ -4,6 +4,12 @@
 的调度定义存 SQLite，由 console 进程内的守护线程扫描触发（直接进程内执行，
 不入队）。CRUD 与触发历史对外结构与集群档一致，前端无感。
 
+C1 控制面边界（plaita#323）：调度**行读写**（CRUD / 触发历史）已下沉
+:mod:`schedule_store`（registry 域，SQL 权威定义模型），本模块保留**运行面**
+——到点认领（``_claim_due``）、触发（``fire`` / ``trigger_now``）与扫描循环，
+并再导出行读写符号保持 ``api/flows``、``api/schedules`` 与既有测试调用面
+不变。
+
 该循环**只在本地档启动**（A48-01）：集群档的调度列表/触发都走 Redis，本地
 表里的遗留条目既不执行也不可见（保留原样，切回本地档仍可用）。到点触发以
 ``next_run_at`` 条件更新作为 due 幂等键（A48-02）：先推进再执行，同一 due
@@ -14,15 +20,13 @@ cron 语义与集群档共享同一实现（plaita.server.services.schedule_serv
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
-import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 
 try:
     from plaita.server.services.schedule_service import next_run_after, validate_cron
@@ -33,11 +37,30 @@ except ImportError:  # 兼容不同安装布局
     )
 
 try:
-    from ..models.flow import LocalSchedule, LocalScheduleFire
-    from .tenant_write_guard import assert_tenant_generation
+    from ..models.flow import LocalSchedule
+    # 行读写再导出（registry 域实现见 schedule_store）；调用面守恒。
+    from .schedule_store import (  # noqa: F401
+        _record_fire,
+        create_schedule,
+        delete_schedule,
+        fire_history,
+        fire_history_total,
+        get_schedule,
+        list_schedules,
+        update_schedule,
+    )
 except ImportError:
-    from models.flow import LocalSchedule, LocalScheduleFire  # type: ignore
-    from services.tenant_write_guard import assert_tenant_generation  # type: ignore
+    from models.flow import LocalSchedule  # type: ignore
+    from services.schedule_store import (  # type: ignore # noqa: F401
+        _record_fire,
+        create_schedule,
+        delete_schedule,
+        fire_history,
+        fire_history_total,
+        get_schedule,
+        list_schedules,
+        update_schedule,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -47,115 +70,7 @@ _thread: Optional[threading.Thread] = None
 _lock = threading.Lock()
 
 
-# ---- 行转视图（与集群档 _view 对齐） ----
-
-def _view(row: LocalSchedule) -> Dict[str, Any]:
-    return {
-        "schedule_id": row.schedule_id,
-        "tenant_id": getattr(row, "tenant_id", "") or "",
-        "name": row.name,
-        "flow_id": row.flow_id,
-        "version": row.version,
-        "cron": row.cron,
-        "params": json.loads(row.params_json) if row.params_json else {},
-        "enabled": row.enabled,
-        "created_by": row.created_by,
-        "created_at": row.created_at.isoformat() if row.created_at else "",
-        "updated_at": row.updated_at.isoformat() if row.updated_at else "",
-        "next_run_at": row.next_run_at or "",
-        "last_run_at": row.last_run_at or "",
-        "status": "running" if row.enabled else "paused",
-    }
-
-
-# ---- CRUD（api/schedules.py 本地分支调用） ----
-
-def create_schedule(store, schedule: Dict[str, Any]) -> Dict[str, Any]:
-    with store._session_local() as session:
-        session.add(
-            LocalSchedule(
-                schedule_id=schedule["schedule_id"],
-                tenant_id=schedule.get("tenant_id") or "",
-                name=schedule["name"],
-                flow_id=schedule["flow_id"],
-                version=schedule.get("version"),
-                cron=schedule["cron"],
-                params_json=json.dumps(schedule.get("params") or {}, ensure_ascii=False),
-                enabled=bool(schedule.get("enabled", True)),
-                created_by=schedule.get("created_by") or "",
-                next_run_at=schedule.get("next_run_at") or "",
-            )
-        )
-        session.flush()
-        assert_tenant_generation(session, schedule.get("tenant_id"))
-        session.commit()
-    return get_schedule(store, schedule["schedule_id"])
-
-
-def update_schedule(store, schedule_id: str, schedule: Dict[str, Any],
-                    tenant_id: Optional[str] = None) -> Dict[str, Any]:
-    with store._session_local() as session:
-        query = select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
-        if tenant_id is not None:
-            query = query.where(LocalSchedule.tenant_id == tenant_id)
-        row = session.scalars(query).first()
-        if row is None:
-            raise LookupError(schedule_id)
-        row.name = schedule["name"]
-        row.flow_id = schedule["flow_id"]
-        row.version = schedule.get("version")
-        row.cron = schedule["cron"]
-        row.params_json = json.dumps(schedule.get("params") or {}, ensure_ascii=False)
-        row.enabled = bool(schedule.get("enabled", True))
-        row.next_run_at = schedule.get("next_run_at") or ""
-        row.updated_at = datetime.utcnow()
-        session.flush()
-        assert_tenant_generation(session, tenant_id or row.tenant_id)
-        session.commit()
-    return get_schedule(store, schedule_id, tenant_id=tenant_id)
-
-
-def get_schedule(store, schedule_id: str,
-                 tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    with store._session_local() as session:
-        query = select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
-        if tenant_id is not None:
-            query = query.where(LocalSchedule.tenant_id == tenant_id)
-        row = session.scalars(query).first()
-        return _view(row) if row else None
-
-
-def list_schedules(store, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    with store._session_local() as session:
-        query = select(LocalSchedule)
-        if tenant_id is not None:
-            query = query.where(LocalSchedule.tenant_id == tenant_id)
-        rows = session.scalars(query).all()
-        return [_view(r) for r in rows]
-
-
-def delete_schedule(store, schedule_id: str,
-                    tenant_id: Optional[str] = None) -> bool:
-    with store._session_local() as session:
-        query = select(LocalSchedule).where(LocalSchedule.schedule_id == schedule_id)
-        if tenant_id is not None:
-            query = query.where(LocalSchedule.tenant_id == tenant_id)
-        row = session.scalars(query).first()
-        if row is None:
-            return False
-        session.delete(row)
-        fires = session.scalars(
-            select(LocalScheduleFire).where(LocalScheduleFire.schedule_id == schedule_id)
-        ).all()
-        for f in fires:
-            session.delete(f)
-        session.flush()
-        assert_tenant_generation(session, tenant_id or row.tenant_id)
-        session.commit()
-    return True
-
-
-# ---- 触发 ----
+# ---- 运行面：租户闸 / 到点认领 / 触发 ----
 
 def _tenant_executable(store, tenant_id: Optional[str]) -> bool:
     """运行面严格租户闸（#27 + #255 墓碑语义）。
@@ -260,64 +175,6 @@ def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optiona
 
 def trigger_now(store, schedule: Dict[str, Any]) -> Optional[str]:
     return fire(store, schedule, trigger_kind="manual")
-
-
-def fire_history_total(store, schedule_id: str) -> int:
-    """触发历史总条数（A2R24-05：``total`` 必须是匹配总数，不是本页条数）。"""
-    with store._session_local() as session:
-        return int(session.scalar(
-            select(func.count())
-            .select_from(LocalScheduleFire)
-            .where(LocalScheduleFire.schedule_id == schedule_id)
-        ) or 0)
-
-
-def fire_history(store, schedule_id: str, limit: int = 10, offset: int = 0,
-                 flow_id: str = "", version: str = "") -> List[Dict[str, Any]]:
-    """最近触发记录（A2R24 契约族余项：与集群档/前端统一字段形状）。
-
-    历史：本地档返回 ``{triggered_at, status, error, execution_id}``，而集群档
-    与前端 ``ScheduleFireRecord`` 用 ``{fired_at, flow_id, version, enqueue,
-    msg_id}``——本地档对话框的时间列恒空、状态恒显示「入队失败」。这里以集群
-    形状为准映射，并保留本地专有的 ``execution_id/status/error``。
-    """
-    with store._session_local() as session:
-        rows = session.scalars(
-            select(LocalScheduleFire)
-            .where(LocalScheduleFire.schedule_id == schedule_id)
-            .order_by(LocalScheduleFire.created_at.desc())
-            .offset(max(0, offset))
-            .limit(max(1, min(50, limit)))
-        ).all()
-        return [
-            {
-                "fired_at": r.created_at.isoformat() if r.created_at else "",
-                "trigger_kind": r.trigger_kind,
-                "flow_id": flow_id,
-                "version": version,
-                "enqueue": "ok" if r.status == "fired" else "failed",
-                "msg_id": None,
-                "execution_id": r.execution_id or None,
-                "status": r.status,
-                "error": r.error or None,
-            }
-            for r in rows
-        ]
-
-
-def _record_fire(store, schedule_id: str, execution_id: str, trigger_kind: str,
-                 status: str, error: str) -> None:
-    with store._session_local() as session:
-        session.add(
-            LocalScheduleFire(
-                schedule_id=schedule_id,
-                execution_id=execution_id,
-                trigger_kind=trigger_kind,
-                status=status,
-                error=error or "",
-            )
-        )
-        session.commit()
 
 
 # ---- 内置调度循环 ----
