@@ -34,6 +34,7 @@ from plaita.core.errors import (
     FlowErrorType,
     FlowExecutionException,
     FlowResultError,
+    FlowSuspendedCarrier,
     NodeException,
     NodeExecutionError,
     NodeTimeoutError,
@@ -678,6 +679,13 @@ class NodeRunner:
                     err.source_line = _node_source_loc(node)
                     raise err
                 return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
+            except FlowSuspendedCarrier:
+                # plaita#311 NS-M3：嵌套挂起载体与取消同待遇——先于重试分类与
+                # errorHandler 原样上抛（挂起不是节点失败；与上方
+                # _raise_if_cancel_requested 的逃逸先例同形）。不提前逃逸的话，
+                # 载体会被通用 except 包成节点错误：被重试 retryTimes 次、再被
+                # errorHandler continue 吞掉（rs 验证报告 Q1 的 stringify 同病）。
+                raise
             except (Exception, NodeException) as e:
                 # 取消优先于任何节点错误/重试分类：节点在取消后抛出的普通异常
                 # 不得被包装成 NodeExecutionError 或再重试一轮（#267）。

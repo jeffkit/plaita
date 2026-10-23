@@ -572,11 +572,16 @@ class ExecutionContext(_SystemStateAccessors):
         return self.get_state(f"{self.express_prefix}EXECUTION_ID", "")
 
     def get_or_create_event_bus(self):
-        if self.event_bus:
-            return self.event_bus
-        if self.parent and self.parent.event_bus:
-            self.event_bus = self.parent.event_bus
-            return self.event_bus
+        # plaita#311 NS-M3：沿父子链**递归**查找宿主注入的 event bus。历史上只看
+        # 一层——孙子执行（child→child 调用链）拿不到注入在根执行上的 bus，静默
+        # 落到进程级默认（或 None），嵌套挂起的订阅注册/注销随之脱离宿主的面
+        # （恢复消息路由不到根 checkpoint）。单层命中路径行为不变。
+        ctx = self
+        while ctx is not None:
+            if ctx.event_bus:
+                self.event_bus = ctx.event_bus
+                return self.event_bus
+            ctx = ctx.parent
         self.event_bus = _resolve_default_event_bus()
         return self.event_bus
 

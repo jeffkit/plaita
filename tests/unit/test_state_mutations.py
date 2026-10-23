@@ -31,7 +31,9 @@ class TestCheckpointSchemaExactKeys(unittest.TestCase):
         self.assertIn("$BRANCH", keys)
         self.assertIn("$FLOW_ID", keys)
         self.assertIn("$EXECUTION_ID", keys)
-        self.assertEqual(len(keys), 4)
+        # plaita#311 NS-M3：嵌套挂起帧路径键（$SUSPEND_FRAMES）入 schema。
+        self.assertIn("$SUSPEND_FRAMES", keys)
+        self.assertEqual(len(keys), 5)
 
     def test_system_keys_custom_prefix(self):
         """Kill prefix mutations."""
@@ -481,7 +483,7 @@ class TestCheckpointSchemaExtra(unittest.TestCase):
     def test_system_keys_custom_prefix(self):
         self.assertEqual(
             CheckpointSchema.system_keys("#"),
-            ["#LAST_NODE", "#BRANCH", "#FLOW_ID", "#EXECUTION_ID"],
+            ["#LAST_NODE", "#BRANCH", "#FLOW_ID", "#EXECUTION_ID", "#SUSPEND_FRAMES"],
         )
 
     def test_system_keys_count_matches_names(self):
@@ -838,7 +840,7 @@ class TestSchemaDefaults(unittest.TestCase):
     def test_system_keys_default_prefix(self):
         self.assertEqual(
             CheckpointSchema.system_keys(),
-            ["$LAST_NODE", "$BRANCH", "$FLOW_ID", "$EXECUTION_ID"],
+            ["$LAST_NODE", "$BRANCH", "$FLOW_ID", "$EXECUTION_ID", "$SUSPEND_FRAMES"],
         )
 
     def test_all_known_keys_default_prefix(self):
