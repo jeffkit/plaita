@@ -85,3 +85,4 @@ mkdocs build -f docs-site/mkdocs.yml --strict   # 改文档后
 | `docs/DOC_CODE_MAP.md` | 改代码后同步哪些文档 |
 | `MIGRATION.md` | 破坏性变更 |
 | `docs-site/` | 用户文档（mkdocs） |
+| `docs/governance/conformance-matrix.md` | 跨引擎行为一致性消费矩阵（#317）：三列 python/go/rust × 28 例；**已声明行为分叉（类 e）**口径所在——Go continue 载体从 flow 起点重入、已完成前序节点重放（副作用节点重复执行风险），Python 自 checkpoint 步进不重放=权威方向，go 列 R2=red-declared，收敛=Stage 1 中途入口单；改 `plaita-go/pkg/shadow` 语料须同步此矩阵（评审驳回项） |
