@@ -22,7 +22,9 @@ worker 在 registry（``{ns}:registry:flow_worker:{instance}``）metadata 的
 - ``supported_node_types`` **由 IR 白名单自动生成，不手写第二份**：Python 侧
   真源是进程默认 ``NodeRegistry``（内置 + ``plaita.nodes`` 插件 + 启动期显式
   注册的 CodeNode 等）；plaita-go 侧由 ``ir.SupportedNodeTypes()`` 导出
-  （见 #300 关联的 Go issue），两边共用本模块定义的 JSON 结构。
+  （见 #300 关联的 Go issue）；plaita-rs 侧由 ``plaita_engine::ir::
+  capability_manifest()`` 导出（键名与 Go json tags 逐字对齐）——
+  三引擎共用本模块定义的 JSON 结构。
 - ``unsupported_node_types`` 语义是「本 worker **明确知道且拒绝**的类型」
   （Go 侧对 Python 家族的反向声明）。Python 引擎对未注册类型的拒绝发生在
   解析期（``unRecognized node type``），没有一份有限的「已知但拒绝」全集
@@ -48,6 +50,7 @@ from ..node import NodeRegistry, get_default_registry
 __all__ = [
     "ENGINE_PYTHON",
     "ENGINE_GO",
+    "ENGINE_RS",
     "ENGINES",
     "ENGINE_TO_RUNTIME",
     "runtime_for_engine",
@@ -63,10 +66,11 @@ __all__ = [
 #: 引擎名（registry metadata ``engine`` 字段的合法值）。
 ENGINE_PYTHON = "python"
 ENGINE_GO = "plaita-go"
-ENGINES = (ENGINE_PYTHON, ENGINE_GO)
+ENGINE_RS = "plaita-rs"
+ENGINES = (ENGINE_PYTHON, ENGINE_GO, ENGINE_RS)
 
 #: engine → console 侧 runtime pool 键（flow_versions.runtime 的取值域）。
-ENGINE_TO_RUNTIME = {ENGINE_PYTHON: "python", ENGINE_GO: "go"}
+ENGINE_TO_RUNTIME = {ENGINE_PYTHON: "python", ENGINE_GO: "go", ENGINE_RS: "rust"}
 
 #: Python worker 旗舰能力声明（#300 示例集）。挂起恢复（delay/approval/
 #: event 挂起）、检查点（步界 checkpoint + 崩溃续跑）、HITL 等待（approval）。

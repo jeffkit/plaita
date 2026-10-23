@@ -15,6 +15,9 @@ import console）——触发面要按 flow 的 runtime 选池就必须共享这
   解析（``PLAITA_CONSOLE_TASK_QUEUE`` 覆盖继续生效）——存量部署零行为变化；
 - ``go``：``PLAITA_CONSOLE_GO_TASK_QUEUE`` 覆盖，缺省 ``plaita:flow:queue:go``
   （Go worker 以 ``PLAITA_QUEUE_NAME`` 指到同一队列，部署侧对齐）；
+- ``rust``：plaita-rs worker 池（plaita-rs#17 在建）；队列暂走通用推导
+  ``plaita:flow:queue:rust``（``PLAITA_CONSOLE_RUNTIME_QUEUES`` 可显式覆盖），
+  不设专用 env——等 worker 落地后按实际部署再定；
 - 任意其他 runtime：env ``PLAITA_CONSOLE_RUNTIME_QUEUES``（JSON 映射）显式
   给队列，未给的键按 ``plaita:flow:queue:{runtime}`` 推导。
 
@@ -29,7 +32,7 @@ from typing import Optional
 
 #: 合法 runtime 值（flow_versions.runtime 与调度行 runtime 冗余的取值域；
 #: 保存/触发路径据此 422 或具名 WARNING）。
-VALID_RUNTIMES = ("go", "python")
+VALID_RUNTIMES = ("go", "python", "rust")
 
 #: 默认 runtime（存量版本/旧调度行的迁移值；历史队列语义即 Python worker 池）。
 DEFAULT_RUNTIME = "python"

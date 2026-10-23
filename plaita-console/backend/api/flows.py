@@ -121,7 +121,7 @@ class VersionSummaryView(BaseModel):
 
     version: str
     status: str
-    # plaita#300：目标 runtime pool（go/python），节点面板/列表按池过滤展示
+    # plaita#300：目标 runtime pool（go/python/rust），节点面板/列表按池过滤展示
     runtime: str = "python"
     created_at: Optional[str] = None
     published_at: Optional[str] = None
@@ -146,7 +146,7 @@ class VersionView(BaseModel):
     status: str
     definition: str = ""
     layout: str = ""
-    # plaita#300：目标 runtime pool（go/python）——发布/启动能力门的判定池
+    # plaita#300：目标 runtime pool（go/python/rust）——发布/启动能力门的判定池
     runtime: str = "python"
     created_at: Optional[str] = None
     published_at: Optional[str] = None
@@ -161,10 +161,10 @@ class SaveVersionRequest(StrictRequestModel):
     definition: str = Field(..., description="Flow 定义 JSON 字符串")
     layout: str = Field("{}", description="画布坐标 JSON 字符串")
     created_by: str = Field("", description="保存人")
-    # plaita#300：目标 runtime pool（go/python）。None = 不改（新建为 python，
+    # plaita#300：目标 runtime pool（go/python/rust）。None = 不改（新建为 python，
     # 更新既有草稿保留原值）；非法值 422。
     runtime: Optional[str] = Field(
-        None, description="目标 runtime pool（go/python）；缺省不改/默认 python"
+        None, description="目标 runtime pool（go/python/rust）；缺省不改/默认 python"
     )
     # C5-1 乐观并发：调用方所基于版本的 updated_at（ISO 串）；不一致返回
     # 409（conflict=version_stale，带 latest_updated_at）。force=True 绕过。
