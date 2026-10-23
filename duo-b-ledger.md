@@ -1018,3 +1018,4 @@
 - **掩形加固**：pending deadline env 告警原 `%r` 回显 raw 值违 #151「env 投影」纪律——改 `_redact_env_value(raw)` 掩形（长度/形态），base.py 两 warning 站点随 taxonomy 入表。
 - 运维纪要：①接力判定与撞名复原（见基线行；`duo-b4-ledger.md` 邻席未提交附录〔B4 十三轮 plaita-rs 收官〕与 duo-a/duo-a2 untracked 台账全程原位未动）；②**taxonomy 系统性长红**（上，#332）；③unit 门口径自纠：家规「unit」=`tests/unit`（integ/e2e 另门），本席首跑 `tests/` 全收集致与 r87 台账数字不可对账+负载假红，已按家规复跑。
 - 终态：`a3a1409f`（阶段 1 实现+负控）+ 本提交（阶段 2 协议存档+文档+掩形加固+taxonomy 修+proofs+台账）推送；landing_gate 推前 rc=0；CI 终判推后核验（终态补记随 r87 惯例）。回评附 #320。
+- **终态补记（10-24 01:4x）**：push `664d1523..45f13fe7` CI 四腿终判全绿（CI 39995624004 / slow lane 39995624006 / Console E2E 39995624140 / Deploy docs 39995624041，均 success @45f13fe7）；landing_gate 推后核验 rc=0（`r88b-landing-gate-post.txt`）。#320 回评已发（逐点回执 A1 r138 五窗映射/四义务/写序不变量/验收补充两条）；taxonomy 背账单 #332 已立。

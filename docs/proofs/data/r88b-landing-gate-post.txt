@@ -1,0 +1,4 @@
+[landing-gate] main 最近完成 run：2026-10-23T17:30:27Z 45f13fe conclusion=success  |  docs(state): #320 A1 阶段 2——WORKER_PROTOCOL 协议存档+字段文档+env 掩形加
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（45f13fe）
+[landing-gate] ✅ 允许落地
