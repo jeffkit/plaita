@@ -1,0 +1,5 @@
+[landing-gate] main 最近完成 run：2026-10-23T18:50:16Z 655aa1c conclusion=success  |  merge: 并入 fix/issue317-matrix（r95:#317 消费矩阵——docs/governance
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（45f13fe）
+[landing-gate] ✅ 允许落地
+landing-gate-rc=0

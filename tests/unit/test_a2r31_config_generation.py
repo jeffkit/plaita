@@ -1,21 +1,21 @@
-"""A2R31 施工回归：配置代际 / 单一 resolver / 非法值口径（r31 B2 类）。
+"""A2R31 施工回归：单一 resolver / 非法值口径（r31 B2 类）。
 
-覆盖三条规格的验收与负控形态：
+覆盖两条规格的验收与负控形态：
 
-* ``B2R31-01`` — 三维代际（family/generation/budget）、首投/reclaim 同判、
-  重投继承、旧 PEL 预算不立即死信、租户状态纪元；
 * ``B2R31-02`` — queue/redis 单一 resolver + 空串统一拒绝 + 实例 id 对齐；
 * ``B2R31-03`` — identity/security/resource fail-fast、optional WARNING+
   安全默认、禁止静默回退/钳制。
 
-负控证据（pre-fix 精确红）见台账 r46：``/tmp/a2r31-r46/negcontrol/``。
+历史：``B2R31-01`` 三维配置代际（family/generation/budget 哈希）已由
+plaita#328 删除——版本维度收敛为 wire schema + IR；其负控由
+``test_issue328_version_dimensions.py`` 的快照信封/无 pending 判据接管。
+租户状态纪元（身份维度）与 group 拓扑负控保留在本文件。
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,12 +27,9 @@ pytest.importorskip("redis")
 import fakeredis
 
 from plaita import runtime_config as rc
-from plaita.server import task_queue as tq
 from plaita.server import tenant_status as ts
 from plaita.server.task_queue import (
-    LEGACY_GENERATION,
     RedisStreamTaskQueue,
-    StreamTask,
     enqueue_task,
 )
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
@@ -44,241 +41,11 @@ if str(CONSOLE_BACKEND) not in sys.path:
 STREAM = "test:r31-config"
 
 
-# ---------------------------------------------------------------------------
-# B2R31-01 — generation identity
-# ---------------------------------------------------------------------------
-def _generation(**kwargs):
-    base = dict(
-        queue_name="plaita:flow:queue",
-        consumer_group="plaita-workers",
-        dlq_key="plaita:flow:queue:dlq",
-        deployment_epoch="epoch-1",
-        tenant_status_epoch="epoch-1",
-        lease_ttl_seconds=300,
-        max_deliveries=5,
-        task_max_age_seconds=3600,
-        dlq_max_len=1000,
-    )
-    base.update(kwargs)
-    return rc.build_generation(**base)
-
-
-class TestGenerationCanonical:
-    def test_same_semantics_same_ids(self):
-        a = _generation(queue_name="  plaita:flow:queue  ")
-        b = _generation(queue_name="plaita:flow:queue")
-        assert a.family == b.family
-        assert a.generation == b.generation
-        assert a.budget == b.budget
-
-    def test_observability_knobs_do_not_change_generation(self, monkeypatch):
-        before = _generation()
-        monkeypatch.setenv("PLAITA_LOG_LEVEL", "DEBUG")
-        monkeypatch.setenv("PLAITA_METRICS_PORT", "9999")
-        after = _generation()
-        assert before.generation == after.generation
-
-    def test_queue_budget_epoch_change_ids(self):
-        base = _generation()
-        assert _generation(queue_name="other:queue").family != base.family
-        assert _generation(max_deliveries=3).budget != base.budget
-        assert _generation(max_deliveries=3).generation != base.generation
-        assert _generation(deployment_epoch="epoch-2").generation != base.generation
-
-    def test_producer_and_consumer_agree(self, monkeypatch):
-        for name in (
-            "PLAITA_DEPLOYMENT_EPOCH", "PLAITA_CONSUMER_GROUP", "PLAITA_DLQ_KEY",
-            "PLAITA_MAX_DELIVERIES", "PLAITA_LEASE_TTL_SECONDS", "QUEUE_NAME",
-            "PLAITA_QUEUE_NAME", "PLAITA_CONSOLE_TASK_QUEUE",
-        ):
-            monkeypatch.delenv(name, raising=False)
-        envelope = rc.envelope_for_stream("plaita:flow:queue", role="console")
-        local = rc.build_generation(queue_name="plaita:flow:queue")
-        assert envelope["config_family"] == local.family
-        assert envelope["budget_generation"] == local.budget
-
-    def test_generation_config_legacy_disable_dialect(self):
-        """DISABLE_* 仍只认精确 1；`true` 不改变安全语义，但必须 WARNING。"""
-        legacy = rc.load_runtime_config(
-            "worker",
-            environ={"PLAITA_DISABLE_FENCING": "true"},
-            strict=False,
-        )
-        assert legacy.fencing is True
-        assert any("DISABLE_FENCING" in w for w in legacy.warnings)
-        off = rc.load_runtime_config(
-            "worker",
-            environ={"PLAITA_DISABLE_FENCING": "1"},
-            strict=False,
-        )
-        assert off.fencing is False
-        assert off.generation.generation != legacy.generation.generation
-
-    def test_malformed_generation_is_legacy_not_current(self):
-        assert rc.normalize_generation("not-a-family", kind="family") == LEGACY_GENERATION
-        assert rc.normalize_generation(None, kind="budget") == LEGACY_GENERATION
-        valid = rc.build_generation(queue_name=STREAM).family
-        assert rc.normalize_generation(valid, kind="family") == valid
-
-
 def _queue(redis, **kwargs):
     kwargs.setdefault("group_name", "g")
     kwargs.setdefault("consumer_name", "c1")
     kwargs.setdefault("claim_min_idle_ms", 0)
     return RedisStreamTaskQueue(redis, STREAM, **kwargs)
-
-
-class TestFamilyGate:
-    def test_first_delivery_mismatch_leaves_pending(self, caplog):
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        enqueue_task(
-            redis, STREAM, {"type": "start", "flow_id": "f", "execution_id": "e1"},
-            config_family="cf1-bbbbbbbbbbbb",
-        )
-        queue = _queue(redis, config_family="cf1-aaaaaaaaaaaa")
-        with caplog.at_level("WARNING"):
-            assert queue.read(block_ms=1) is None
-        pending = redis.xpending_range(STREAM, "g", "-", "+", 10)
-        assert pending and pending[0]["times_delivered"] == 1
-        assert redis.xlen(STREAM) == 1
-        assert queue.stats()["config_family_mismatch"] == 1
-        assert "config.family_mismatch" in caplog.text
-
-    def test_legacy_message_still_executes(self):
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        enqueue_task(redis, STREAM, {"type": "start", "flow_id": "f", "execution_id": "e1"})
-        queue = _queue(redis, config_family="cf1-aaaaaaaaaaaa")
-        task = queue.read(block_ms=1)
-        assert task is not None
-        assert task.config_family == LEGACY_GENERATION
-
-    def test_reclaim_mismatch_does_not_burn_delivery(self):
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        msg = enqueue_task(
-            redis, STREAM, {"type": "start", "flow_id": "f", "execution_id": "e1"},
-            config_family="cf1-bbbbbbbbbbbb",
-        )
-        seed = _queue(redis, consumer_name="c1", config_family="cf1-bbbbbbbbbbbb")
-        seed.ensure_group()
-        assert seed.read(block_ms=1) is not None  # 首投进 PEL（times_delivered=1）
-        reader = _queue(redis, consumer_name="c2", config_family="cf1-aaaaaaaaaaaa")
-        assert reader.read(block_ms=1) is None
-        pending = redis.xpending_range(STREAM, "g", "-", "+", 10)
-        assert pending[0]["message_id"] == msg
-        assert pending[0]["times_delivered"] == 1, "family 预读必须在 XCLAIM 之前"
-        assert reader.stats()["config_family_mismatch"] == 1
-
-    def test_family_mismatch_over_age_is_dead_lettered(self, monkeypatch):
-        """A2R31-01：family 不匹配不能无限占 PEL——超过 task_max_age 进 DLQ。"""
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        enqueue_task(
-            redis, STREAM, {"type": "start", "flow_id": "f", "execution_id": "e1"},
-            config_family="cf1-bbbbbbbbbbbb",
-        )
-        seed = _queue(redis, consumer_name="c1", config_family="cf1-bbbbbbbbbbbb")
-        seed.ensure_group()
-        assert seed.read(block_ms=1) is not None
-        monkeypatch.setattr(
-            tq, "stream_id_timestamp",
-            lambda _mid: datetime.now() - timedelta(hours=2),
-        )
-        reader = _queue(
-            redis, consumer_name="c2", config_family="cf1-aaaaaaaaaaaa",
-            task_max_age_seconds=60,
-        )
-        assert reader.read(block_ms=1) is None
-        assert redis.xlen(f"{STREAM}:dlq") == 1
-        assert redis.xpending(STREAM, "g")["pending"] == 0
-        import json
-        envelope = json.loads(redis.xrange(f"{STREAM}:dlq")[0][1]["payload"])
-        assert envelope["config_family"] == "cf1-bbbbbbbbbbbb"
-        assert "config_family_mismatch_age" in envelope["reason"]
-
-
-class TestBudgetStale:
-    def test_old_pel_budget_not_immediately_dead_lettered(self):
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        old_budget = "bg1-111111111111"
-        local_budget = "bg1-222222222222"
-        msg = enqueue_task(
-            redis, STREAM, {"type": "start", "flow_id": "f", "execution_id": "e1"},
-            budget_generation=old_budget,
-        )
-        seed = _queue(redis, consumer_name="c1", max_deliveries=5)
-        seed.ensure_group()
-        redis.xreadgroup("g", "c1", {STREAM: ">"}, count=1)
-        for _ in range(3):
-            redis.xclaim(STREAM, "g", "c1", min_idle_time=0, message_ids=[msg])
-        pending = redis.xpending_range(STREAM, "g", "-", "+", 10)
-        assert pending[0]["times_delivered"] == 4
-
-        new = _queue(
-            redis, consumer_name="c2", max_deliveries=3,
-            budget_generation=local_budget,
-        )
-        assert new.read(block_ms=1) is None
-        assert redis.xlen(f"{STREAM}:dlq") == 0, "新预算不得立即死信旧 PEL"
-        assert redis.xpending(STREAM, "g")["pending"] == 1
-        assert new.stats()["config_budget_stale"] == 1
-
-    def test_same_budget_still_enforces_max_deliveries(self):
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        budget = "bg1-333333333333"
-        msg = enqueue_task(
-            redis, STREAM, {"type": "start", "flow_id": "f", "execution_id": "e1"},
-            budget_generation=budget,
-        )
-        seed = _queue(redis, consumer_name="c1", max_deliveries=5)
-        seed.ensure_group()
-        redis.xreadgroup("g", "c1", {STREAM: ">"}, count=1)
-        for _ in range(3):
-            redis.xclaim(STREAM, "g", "c1", min_idle_time=0, message_ids=[msg])
-        new = _queue(
-            redis, consumer_name="c2", max_deliveries=3, budget_generation=budget,
-        )
-        assert new.read(block_ms=1) is None
-        assert redis.xlen(f"{STREAM}:dlq") == 1
-
-
-class TestRequeueInheritance:
-    def test_source_generation_inherited(self):
-        from plaita.server.flow_worker import _requeue_envelope_kwargs
-
-        task = StreamTask(
-            message_id="1-0", body={}, schema_version=1,
-            config_family="cf1-aaaaaaaaaaaa",
-            config_generation="cfg1-aaaaaaaaaaaa",
-            budget_generation="bg1-aaaaaaaaaaaa",
-            config_effective_at="2026-10-20T00:00:00+00:00",
-        )
-        kwargs = _requeue_envelope_kwargs(task)
-        assert kwargs["schema_version"] == 1
-        assert kwargs["config_family"] == "cf1-aaaaaaaaaaaa"
-        assert kwargs["config_generation"] == "cfg1-aaaaaaaaaaaa"
-        assert kwargs["budget_generation"] == "bg1-aaaaaaaaaaaa"
-        assert kwargs["config_effective_at"] == "2026-10-20T00:00:00+00:00"
-
-    def test_legacy_source_does_not_fabricate_current(self):
-        from plaita.server.flow_worker import _requeue_envelope_kwargs
-
-        kwargs = _requeue_envelope_kwargs(StreamTask(message_id="1-0", body={}))
-        assert kwargs == {"schema_version": 1}
-
-    def test_dlq_envelope_preserves_generation(self):
-        redis = fakeredis.FakeRedis(decode_responses=True)
-        queue = _queue(redis)
-        task = StreamTask(
-            message_id="1-0", body={"x": 1}, delivery_count=1,
-            config_family="cf1-aaaaaaaaaaaa",
-            config_generation="cfg1-aaaaaaaaaaaa",
-            budget_generation="bg1-aaaaaaaaaaaa",
-        )
-        queue.dead_letter(task, reason="test")
-        raw = redis.xrange(f"{STREAM}:dlq")[0][1]["payload"]
-        import json
-        envelope = json.loads(raw)
-        assert envelope["config_family"] == "cf1-aaaaaaaaaaaa"
-        assert envelope["budget_generation"] == "bg1-aaaaaaaaaaaa"
 
 
 class TestGroupRenameAndOrphan:
@@ -311,38 +78,11 @@ class TestGroupRenameAndOrphan:
         assert "config.orphan_stream" in caplog.text
 
 
-class TestDispatchFamily:
-    def test_mixed_generation_candidate_is_rejected(self):
-        from plaita.server.capacity import DispatchCandidate, decide_route
-
-        a = DispatchCandidate(
-            instance_id="a", metadata={"queue_name": STREAM, "config_family": "cf1-aaaaaaaaaaaa"},
-        )
-        b = DispatchCandidate(
-            instance_id="b", metadata={"queue_name": STREAM, "config_family": "cf1-bbbbbbbbbbbb"},
-        )
-        decision = decide_route(
-            [a, b], queue_name=STREAM, config_family="cf1-aaaaaaaaaaaa"
-        )
-        assert decision.target is a
-        assert [r.instance_id for r in decision.rejected] == ["b"]
-        assert "config: family mismatch" in decision.rejected[0].reason
-
-    def test_legacy_candidate_is_not_filtered(self):
-        from plaita.server.capacity import DispatchCandidate, decide_route
-
-        legacy = DispatchCandidate(
-            instance_id="old", metadata={"queue_name": STREAM},
-        )
-        decision = decide_route(
-            [legacy], queue_name=STREAM, config_family="cf1-aaaaaaaaaaaa"
-        )
-        assert decision.target is legacy
-
-
 # ---------------------------------------------------------------------------
-# B2R31-01 — tenant status epoch
+# tenant status epoch（plaita#328 后保留：身份维度，非版本代际）
 # ---------------------------------------------------------------------------
+
+
 class TestTenantStatusEpoch:
     def test_restore_after_disable_is_rejected_non_default(self):
         fake = fakeredis.FakeRedis(decode_responses=True)
@@ -438,6 +178,22 @@ class TestUnifiedResolvers:
 # B2R31-03 — invalid-value policy
 # ---------------------------------------------------------------------------
 class TestInvalidValuePolicy:
+    def test_disable_dialect_exact_one_only(self):
+        """DISABLE_* 仍只认精确 1；`true` 不改变安全语义，但必须 WARNING。"""
+        legacy = rc.load_runtime_config(
+            "worker",
+            environ={"PLAITA_DISABLE_FENCING": "true"},
+            strict=False,
+        )
+        assert legacy.fencing is True
+        assert any("DISABLE_FENCING" in w for w in legacy.warnings)
+        off = rc.load_runtime_config(
+            "worker",
+            environ={"PLAITA_DISABLE_FENCING": "1"},
+            strict=False,
+        )
+        assert off.fencing is False
+
     def test_strict_bool_accepts_on(self):
         assert rc.parse_bool("on", "X") is True
         assert rc.parse_bool(" OFF ", "X") is False

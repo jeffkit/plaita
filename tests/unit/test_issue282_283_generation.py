@@ -78,6 +78,7 @@ class TestReclaimTenantRejection:
             STREAM,
             {"type": "start", "tenant_id": TENANT, "execution_id": "e"},
             tenant_generation="gen-1",
+            max_deliveries=None,  # legacy 载体：预算由队列本地值（1）裁判
         )
         queue = _queue(fake, max_deliveries=1)
         queue.ensure_group()

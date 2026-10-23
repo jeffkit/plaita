@@ -126,7 +126,7 @@ def _body(exec_id, tenant):
 
 def _to_pel(fake, body):
     """入队并把唯一消息拉进 PEL（模拟已消费/超投递后的 pending 状态）。"""
-    enqueue_task(fake, QUEUE, dict(body))
+    enqueue_task(fake, QUEUE, dict(body), max_deliveries=None)  # legacy 载体：预算由队列本地值裁判
     fake.xgroup_create(QUEUE, GROUP, id="0")
     resp = fake.xreadgroup(GROUP, "c1", {QUEUE: ">"}, count=10)
     ids = [
@@ -180,7 +180,7 @@ class TestFourQuadrants:
         fake.hset(TENANT_STATUS_KEY, "acme", "disabled")
         queue.ensure_group()
 
-        enqueue_task(fake, QUEUE, _body("exec-loop", "acme"))
+        enqueue_task(fake, QUEUE, _body("exec-loop", "acme"), max_deliveries=None)  # legacy 载体：预算由队列本地值裁判
         assert queue.read(block_ms=1) is not None  # 首投 → PEL
 
         # 修前：每轮 reclaim 泵 1 条副本 + 拒绝留 pending（A1 探针 R1 泵循环）。

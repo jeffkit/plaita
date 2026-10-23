@@ -153,7 +153,8 @@ class TestDeadLetterGuard(unittest.TestCase):
             consumer_name="c1", claim_min_idle_ms=1, max_deliveries=max_deliveries,
         )
         mid = writer.enqueue(
-            {"type": "resume", "flow_id": "f", "execution_id": "e1", "resume_type": "continue"}
+            {"type": "resume", "flow_id": "f", "execution_id": "e1", "resume_type": "continue"},
+            max_deliveries=None,  # plaita#328：legacy 载体——预算由队列本地值（测试参数）裁判
         )
         first = writer.read(block_ms=100)
         self.assertIsNotNone(first)

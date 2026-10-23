@@ -21,6 +21,18 @@ gov:
   # 合法 runtime 集（多平台引擎）：python=本仓，go=plaita-go，rust=plaita-rs。
   runtime_valid_set: [go, python, rust]
 
+  # 消息/定义的版本维度（plaita#328 收敛，F1）：只允许两个维度——
+  #   wire_schema = 任务信封 schema_version（plaita/server/task_queue.py
+  #                 TASK_SCHEMA_VERSION；唯一版本类死信路径 schema_too_new）；
+  #   ir          = 定义 IR 契约代际（plaita/server/capability.py
+  #                 ir_contract_version，能力清单）。
+  # 新增版本维度须立 ADR 并附删除计划（#328 边界）。B2R31-01 的
+  # config_family / config_generation / budget_generation / config_effective_at
+  # 四个哈希维度已于 #328 删除（拓扑一致性改走 worker 启动校验；投递预算改
+  # 为信封上的 max_deliveries 快照；tenant_generation 是身份字段不计入）。
+  # 大仓根 DOC_ASSERTIONS.yml 可按 gov.version_dimensions 断言本集合。
+  version_dimensions: [ir, wire_schema]
+
   # 治理 owner（不得为 TBD/占位符）。
   owner: jeffkit
 

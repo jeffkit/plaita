@@ -1,12 +1,7 @@
-"""Runtime configuration: single resolver + config generations (A2R31).
+"""Runtime configuration: single typed env resolver (A2R31).
 
-This module is the foundation-layer home of the three r31 contracts:
+This module is the foundation-layer home of the r31 contracts:
 
-* **B2R31-01** — three-dimensional config identity. ``config_family`` is the
-  hard compatibility key (can a process consume this carrier at all),
-  ``config_generation`` is the fleet-observability hash, and
-  ``budget_generation`` isolates delivery/lease/TTL budgets so a budget change
-  is not mistaken for a message-incompatibility change.
 * **B2R31-02** — one typed resolver for the env names that used to be read at
   several places with different empty-string/alias semantics
   (``PLAITA_QUEUE_NAME`` / ``QUEUE_NAME`` / ``PLAITA_CONSOLE_TASK_QUEUE``,
@@ -15,20 +10,25 @@ This module is the foundation-layer home of the three r31 contracts:
   security values fail fast; resource caps reject negatives instead of
   silently clamping; optional tuning values fall back with a WARNING.
 
+历史（plaita#328 收敛）：B2R31-01 的三维配置代际（config_family /
+config_generation / budget_generation 哈希）已删除——版本维度收敛为
+wire schema + IR；拓扑一致性（queue/group/dlq/namespace）由 worker
+启动校验把守，投递预算以消息上的 ``max_deliveries`` 快照随信封走
+（:func:`envelope_max_deliveries`）。``LEGACY_GENERATION`` 仍被
+deployment/tenant 纪元语义沿用。
+
 The module deliberately imports nothing from ``plaita.server`` or
 ``plaita-console`` (foundation layering). Process entry points call
 :func:`load_runtime_config` once and pass the frozen result down.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from plaita.core.retention import task_max_age_seconds as _task_max_age_seconds
@@ -47,17 +47,14 @@ DEFAULT_MAX_DELIVERIES = 5
 #: 与 ``execution_lease.DEFAULT_LEASE_TTL_SECONDS``（worker 实际 acquire/renew
 #: 的默认值）及 ops-runbook 文档的 120 对齐（b94-02）。此模块不得 import
 #: ``plaita.server``（分层约束），故以常量单源对齐；改这里必须同步
-#: ``plaita/server/execution_lease.py``，否则预算代际哈希会再次与实际生效值脱钩。
+#: ``plaita/server/execution_lease.py``，否则快照预算与实际生效值会再次脱钩
+#: （plaita#328：预算以消息上的 ``max_deliveries`` 快照随信封走）。
 DEFAULT_LEASE_TTL_SECONDS = 120
 DEFAULT_TASK_MAX_AGE_SECONDS = 30 * 24 * 3600
 DEFAULT_TENANT_STATUS_RECONCILE_SECONDS = 60.0
 DEFAULT_TENANT_NAMESPACE_VERSION = "v1"
 
 LEGACY_GENERATION = "legacy"
-FAMILY_PREFIX = "cf1-"
-GENERATION_PREFIX = "cfg1-"
-BUDGET_PREFIX = "bg1-"
-_GENERATION_ID_RE = re.compile(r"^(cf1|cfg1|bg1)-[0-9a-f]{12}$")
 
 TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -269,218 +266,6 @@ def _parse_typed(spec: FieldSpec, text: str, source: str) -> Any:
     if spec.kind == "enum":
         return parse_enum(text, source, spec.choices)
     raise ConfigError([f"{spec.name}: unsupported kind {spec.kind!r}"])
-
-
-# ---------------------------------------------------------------------------
-# Canonical generation IDs.
-# ---------------------------------------------------------------------------
-def _canonical_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return None
-    return value
-
-
-def canonical_json(fields: Mapping[str, Any]) -> str:
-    """Stable canonical JSON: sorted keys, no whitespace, ``None`` dropped."""
-    payload = {
-        key: _canonical_value(value)
-        for key, value in fields.items()
-        if value is not None
-    }
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    )
-
-
-def _hash(prefix: str, fields: Mapping[str, Any]) -> str:
-    digest = hashlib.sha256(canonical_json(fields).encode("utf-8")).hexdigest()
-    return f"{prefix}{digest[:12]}"
-
-
-@dataclass(frozen=True)
-class ConfigGeneration:
-    """Three independent generations plus their effective timestamp."""
-
-    family: str
-    generation: str
-    budget: str
-    effective_at: str
-    details: Mapping[str, Any] = field(default_factory=dict)
-
-    def envelope_fields(self) -> Dict[str, str]:
-        return {
-            "config_family": self.family,
-            "config_generation": self.generation,
-            "budget_generation": self.budget,
-            "config_effective_at": self.effective_at,
-        }
-
-
-def _family_fields(
-    *,
-    queue_name: str,
-    consumer_group: str,
-    dlq_key: str,
-    schema_version: int,
-    max_schema_version: Optional[int],
-    tenant_namespace_version: str,
-) -> Dict[str, Any]:
-    return {
-        "queue_name": queue_name,
-        "consumer_group": consumer_group,
-        "dlq_key": dlq_key,
-        "schema_version": int(schema_version),
-        "max_schema_version": (
-            None if max_schema_version is None else int(max_schema_version)
-        ),
-        "tenant_namespace_version": tenant_namespace_version,
-    }
-
-
-def config_family(
-    *,
-    queue_name: str,
-    consumer_group: str,
-    dlq_key: str,
-    schema_version: int = 1,
-    max_schema_version: Optional[int] = None,
-    tenant_namespace_version: str = DEFAULT_TENANT_NAMESPACE_VERSION,
-) -> str:
-    return _hash(
-        FAMILY_PREFIX,
-        _family_fields(
-            queue_name=queue_name,
-            consumer_group=consumer_group,
-            dlq_key=dlq_key,
-            schema_version=schema_version,
-            max_schema_version=max_schema_version,
-            tenant_namespace_version=tenant_namespace_version,
-        ),
-    )
-
-
-def budget_generation(
-    *,
-    max_deliveries: int,
-    lease_ttl_seconds: int,
-    task_max_age_seconds: int,
-    dlq_max_len: int,
-) -> str:
-    return _hash(
-        BUDGET_PREFIX,
-        {
-            "max_deliveries": int(max_deliveries),
-            "lease_ttl_seconds": int(lease_ttl_seconds),
-            "task_max_age_seconds": int(task_max_age_seconds),
-            "dlq_max_len": int(dlq_max_len),
-        },
-    )
-
-
-def build_generation(
-    *,
-    queue_name: str,
-    consumer_group: str = DEFAULT_CONSUMER_GROUP,
-    dlq_key: Optional[str] = None,
-    schema_version: int = 1,
-    max_schema_version: Optional[int] = None,
-    tenant_namespace_version: str = DEFAULT_TENANT_NAMESPACE_VERSION,
-    deployment_epoch: str = LEGACY_GENERATION,
-    tenant_status_epoch: str = LEGACY_GENERATION,
-    lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
-    max_deliveries: int = DEFAULT_MAX_DELIVERIES,
-    task_max_age_seconds: int = DEFAULT_TASK_MAX_AGE_SECONDS,
-    dlq_max_len: int = DEFAULT_DLQ_MAX_LEN,
-    fencing: bool = True,
-    tenant_quota: bool = True,
-    dispatch_target: bool = True,
-    affinity: bool = True,
-    tenant_status_gate: bool = True,
-    effective_at: Optional[str] = None,
-) -> ConfigGeneration:
-    """Build the three generation IDs from the effective configuration.
-
-    ``config_generation`` intentionally excludes pure observability knobs
-    (log level, metrics port); changing them must not change the generation.
-    """
-    dlq = dlq_key or f"{queue_name}{DEFAULT_DLQ_SUFFIX}"
-    family_fields = _family_fields(
-        queue_name=queue_name,
-        consumer_group=consumer_group,
-        dlq_key=dlq,
-        schema_version=schema_version,
-        max_schema_version=max_schema_version,
-        tenant_namespace_version=tenant_namespace_version,
-    )
-    budget = budget_generation(
-        max_deliveries=max_deliveries,
-        lease_ttl_seconds=lease_ttl_seconds,
-        task_max_age_seconds=task_max_age_seconds,
-        dlq_max_len=dlq_max_len,
-    )
-    all_fields = dict(family_fields)
-    all_fields.update(
-        {
-            "deployment_epoch": deployment_epoch,
-            "tenant_status_epoch": tenant_status_epoch,
-            "lease_ttl_seconds": int(lease_ttl_seconds),
-            "max_deliveries": int(max_deliveries),
-            "task_max_age_seconds": int(task_max_age_seconds),
-            "dlq_max_len": int(dlq_max_len),
-            "fencing": fencing,
-            "tenant_quota": tenant_quota,
-            "dispatch_target": dispatch_target,
-            "affinity": affinity,
-            "tenant_status_gate": tenant_status_gate,
-        }
-    )
-    stamp = effective_at or datetime.now(timezone.utc).isoformat()
-    return ConfigGeneration(
-        family=_hash(FAMILY_PREFIX, family_fields),
-        generation=_hash(GENERATION_PREFIX, all_fields),
-        budget=budget,
-        effective_at=stamp,
-        details=all_fields,
-    )
-
-
-def is_valid_generation(value: Any, prefix: Optional[str] = None) -> bool:
-    if not isinstance(value, str):
-        return False
-    if prefix is None:
-        return bool(_GENERATION_ID_RE.match(value))
-    return bool(re.fullmatch(re.escape(prefix) + r"[0-9a-f]{12}", value))
-
-
-def normalize_generation(value: Any, *, kind: str) -> str:
-    """Malformed/missing envelope generation → ``legacy`` + WARNING.
-
-    Never replaces a malformed value with the *current* generation: a carrier
-    with a broken envelope must keep its unknown provenance (B2R31-01).
-    """
-    prefix = {"family": FAMILY_PREFIX, "generation": GENERATION_PREFIX,
-              "budget": BUDGET_PREFIX}[kind]
-    if value is None:
-        return LEGACY_GENERATION
-    if isinstance(value, bytes):
-        value = value.decode(errors="replace")
-    text = str(value).strip()
-    if not text:
-        return LEGACY_GENERATION
-    if is_valid_generation(text, prefix):
-        return text
-    _warn_once(
-        f"config_{kind}",
-        text,
-        LEGACY_GENERATION,
-        f"消息信封 config_{kind}={_redact(text)!r} 畸形，按 legacy 处理"
-        "（不猜测代际，B2R31-01）",
-    )
-    return LEGACY_GENERATION
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +503,6 @@ class RuntimeConfig:
     affinity: bool
     tenant_status_gate: bool
     instance_id: Optional[str] = None
-    generation: Optional[ConfigGeneration] = None
     warnings: Tuple[str, ...] = ()
     errors: Tuple[str, ...] = ()
 
@@ -1009,25 +793,6 @@ def load_runtime_config(
         )
         namespace = DEFAULT_TENANT_NAMESPACE_VERSION
 
-    generation = build_generation(
-        queue_name=queue_name,
-        consumer_group=consumer_group,
-        dlq_key=dlq_key,
-        max_schema_version=overrides.get("max_schema_version"),
-        tenant_namespace_version=namespace,
-        deployment_epoch=deployment_epoch,
-        tenant_status_epoch=tenant_status_epoch,
-        lease_ttl_seconds=lease_ttl,
-        max_deliveries=max_deliveries,
-        task_max_age_seconds=task_max_age,
-        dlq_max_len=dlq_max_len,
-        fencing=fencing,
-        tenant_quota=tenant_quota,
-        dispatch_target=dispatch_target,
-        affinity=affinity,
-        tenant_status_gate=tenant_status_gate,
-    )
-
     config = RuntimeConfig(
         role=role,
         queue_name=queue_name,
@@ -1049,7 +814,6 @@ def load_runtime_config(
         affinity=affinity,
         tenant_status_gate=tenant_status_gate,
         instance_id=instance_id,
-        generation=generation,
         warnings=tuple(warnings),
         errors=tuple(errors),
     )
@@ -1062,12 +826,10 @@ def load_runtime_config(
 
 def log_config_effective(logger_: logging.Logger, config: RuntimeConfig) -> None:
     """Emit the ``event=config.effective`` startup line (secrets masked)."""
-    generation = config.generation
     logger_.info(
         "event=config.effective role=%s queue=%s redis=%s group=%s dlq=%s "
         "max_deliveries=%s lease_ttl=%s task_max_age=%s dlq_max_len=%s "
         "deployment_epoch=%s tenant_status_epoch=%s "
-        "config_family=%s config_generation=%s budget_generation=%s "
         "fencing=%s tenant_quota=%s dispatch_target=%s affinity=%s "
         "tenant_status_gate=%s warnings=%s",
         config.role,
@@ -1081,9 +843,6 @@ def log_config_effective(logger_: logging.Logger, config: RuntimeConfig) -> None
         config.dlq_max_len,
         config.deployment_epoch,
         config.tenant_status_epoch,
-        generation.family if generation else LEGACY_GENERATION,
-        generation.generation if generation else LEGACY_GENERATION,
-        generation.budget if generation else LEGACY_GENERATION,
         config.fencing,
         config.tenant_quota,
         config.dispatch_target,
@@ -1328,13 +1087,15 @@ def preflight_security_and_limits(environ: Optional[Mapping[str, str]] = None) -
 def envelope_budget_values(
     environ: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, int]:
-    """The four budget inputs producers hash into ``budget_generation``.
+    """The four budget values shared by producers and the worker CLI preflight.
 
-    Single source for ``envelope_for_stream`` and the worker CLI preflight
-    (plaita#272). Producers only read env; a worker CLI budget override that
-    differs makes the two ends hash different budgets, so reclaim rejects the
-    new task's PEL forever. Callers compare their actual worker values with
-    this tuple and fail fast on mismatch.
+    Single source for the ``max_deliveries`` budget snapshot stamped on every
+    new message (plaita#328) and the worker CLI preflight (plaita#272).
+    Producers only read env; the snapshot rides the envelope so a consumer
+    never strands a message over budget-generation disagreement — the message
+    dead-letters at its own budget instead. Callers compare their actual
+    worker values with this tuple and fail fast on mismatch (deployment
+    consistency, not a version gate).
     """
     env: Mapping[str, str] = os.environ if environ is None else environ
     return {
@@ -1353,65 +1114,14 @@ def envelope_budget_values(
     }
 
 
-def envelope_for_stream(
-    stream_key: str,
-    *,
-    role: str = "console",
-    consumer_group: Optional[str] = None,
-    dlq_key: Optional[str] = None,
-    schema_version: int = 1,
-    max_schema_version: Optional[int] = None,
-    environ: Optional[Mapping[str, str]] = None,
-) -> Dict[str, str]:
-    """Current-generation envelope fields for a producer writing to a stream.
+def envelope_max_deliveries(environ: Optional[Mapping[str, str]] = None) -> int:
+    """Producer-side delivery budget snapshot (plaita#328).
 
-    Producers compute the family from the *actual* destination stream plus the
-    effective group/DLQ, not from the producer's own queue env (console and
-    worker use different env names). Invalid values degrade to ``legacy`` with
-    a WARNING rather than failing the enqueue path.
+    ``enqueue_task`` writes this on every new message when the caller does
+    not pass an explicit ``max_deliveries``; requeue/replay paths must pass
+    the **source** value (or ``None`` for legacy carriers) instead.
     """
-    env: Mapping[str, str] = os.environ if environ is None else environ
-    group = consumer_group
-    if group is None:
-        try:
-            group = resolve_consumer_group(None, env)
-        except ConfigError:
-            group = DEFAULT_CONSUMER_GROUP
-    dlq = dlq_key
-    if dlq is None:
-        try:
-            dlq = resolve_dlq_key(stream_key, None, env, empty_policy="default")
-        except ConfigError:
-            dlq = f"{stream_key}{DEFAULT_DLQ_SUFFIX}"
-    deployment_epoch = env.get("PLAITA_DEPLOYMENT_EPOCH", LEGACY_GENERATION).strip()
-    deployment_epoch = deployment_epoch or LEGACY_GENERATION
-    # Producers do not own the delivery budget of the consumer; the four
-    # values come from env only and are the same tuple the worker CLI
-    # preflight compares against (#272).
-    budget = envelope_budget_values(env)
-    max_deliveries = budget["max_deliveries"]
-    lease_ttl = budget["lease_ttl_seconds"]
-    task_max_age = budget["task_max_age_seconds"]
-    dlq_max_len = budget["dlq_max_len"]
-    namespace = (
-        env.get("PLAITA_TENANT_NAMESPACE_VERSION", DEFAULT_TENANT_NAMESPACE_VERSION)
-        or DEFAULT_TENANT_NAMESPACE_VERSION
-    ).strip() or DEFAULT_TENANT_NAMESPACE_VERSION
-    generation = build_generation(
-        queue_name=stream_key,
-        consumer_group=group,
-        dlq_key=dlq,
-        schema_version=schema_version,
-        max_schema_version=max_schema_version,
-        tenant_namespace_version=namespace,
-        deployment_epoch=deployment_epoch,
-        tenant_status_epoch=deployment_epoch,
-        lease_ttl_seconds=lease_ttl,
-        max_deliveries=max_deliveries,
-        task_max_age_seconds=task_max_age,
-        dlq_max_len=dlq_max_len,
-    )
-    return generation.envelope_fields()
+    return envelope_budget_values(environ)["max_deliveries"]
 
 
 def _safe_int(raw: Any, default: int) -> int:

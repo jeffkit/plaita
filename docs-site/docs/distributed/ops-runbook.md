@@ -105,7 +105,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSUMER_NAME` | instance_id / `worker-<pid>` | `startup` | 本实例 consumer 名 | 多实例不要手工设成同值 |
 | `PLAITA_CLAIM_MIN_IDLE_MS` | `60000` | `startup` | pending 可被回收的最短空闲（毫秒） | 过小会抢走兄弟 worker 处理中的任务；非整数启动 `ValueError` |
 | `PLAITA_LEASE_TTL_SECONDS` | `120` | `startup` | resume 租约 TTL（秒） | 非整数启动 `ValueError` |
-| `PLAITA_MAX_DELIVERIES` | `5` | `startup` | 超过后进 DLQ | 同时约束正常重投、DLQ 重复副本、定义重试三条路径；调大可能挤掉真实死信。消息信封带 `budget_generation` 后，改预算不会作用到旧代际的 PEL（留 pending + WARNING，见配置代际小节） |
+| `PLAITA_MAX_DELIVERIES` | `5` | `startup` | 超过后进 DLQ | 同时约束正常重投、DLQ 重复副本、定义重试三条路径；调大可能挤掉真实死信。plaita#328：生产者入队时把该值作为**预算快照**写进信封 `max_deliveries`，消费端按源快照死信；无快照的旧格式消息按消费端本地值（见「版本维度」小节） |
 | `PLAITA_DEPLOYMENT_EPOCH` | `legacy` | `startup` | 部署纪元（`plaita:tenant_status:epoch` 的权威锚点） | 锚点在部署配置而非 Redis 快照，Redis-only 恢复不会把它一起回滚；空串启动预检拒绝 |
 | `PLAITA_TENANT_STATUS_RECONCILE_SECONDS` | `60` | `startup`（console lifespan） | 运行中租户状态周期对账；`0` = 关闭（启动 WARNING） | 关闭后 Redis-only 恢复的墓碑回滚只能靠 `POST /api/cluster/tenant-status/reconcile` 手动纠正 |
 | `PLAITA_TENANT_STATUS_EPOCH_STRICT` | unset（部署纪元存在时启用） | `startup` | 显式 `0` = 关闭 worker 的租户状态纪元闸（回滚到 #237 fail-open，启动 WARNING） | 关闭后旧快照里的 `active` 会再次放行已删租户 |
@@ -302,43 +302,38 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
 | **运行期/执行期才失败** | `PLAITA_SANDBOX_DOCKER_MEMORY_MB`（0/负传给 docker）、`PLAITA_SANDBOX_NODE_BIN`（缺失）、`PLAITA_BG_*_WORKERS=0/负`（首次建池）、`PLAITA_CODE_BACKEND`（直接 `register_code_node` 不传白名单） |
 | **接受任意值/仅特定值特殊** | `PLAITA_CONSOLE_ENV`、`PLAITA_SANDBOX_LIFECYCLE`/`PLAITA_EXECUTION_EVENTS_PUBLISH`/`PLAITA_WORKER_LANGFUSE`（legacy 精确 0/1）、`PLAITA_DISABLE_*`（strip 后等于 1） |
 
-### 配置代际（A2R31 / B2R31-01）
+### 版本维度（A2R31 / plaita#328 收敛）
 
-worker 启动时计算并打印 `event=config.effective`，同时写入 registry metadata 与
-容量块：
+消息/定义只保留两个版本维度——**wire schema**（信封 `schema_version`）与
+**IR**（`ir_contract_version`，能力清单）；治理账本
+`docs/governance/architecture.yaml` 的 `gov.version_dimensions` 是机器可读
+事实源，**新增维度须立 ADR 并附删除计划**。B2R31-01 的三维配置代际哈希
+（`config_family` / `config_generation` / `budget_generation` 及
+`config_effective_at`）已删除，它们制造的两条**永久 pending** 路径随之消失：
 
-| 字段 | 生成 | 用途 |
+| 维度 | 旧机制（已删） | 现机制 |
 |---|---|---|
-| `config_family` | `cf1-` + sha256(queue/group/dlq/schema/namespace)[:12] | **硬兼容键**：两端都非 legacy 且不同 → 首投不执行、reclaim 不 XCLAIM，留 pending + WARNING |
-| `config_generation` | `cfg1-` + sha256(全部影响语义字段)[:12] | 机队一致性/控制面混跑视图；不含 `LOG_LEVEL` 等纯观测项 |
-| `budget_generation` | `bg1-` + sha256(max_deliveries/lease_ttl/task_max_age/dlq_max_len)[:12] | 预算变更不误判为消息不兼容；旧 PEL 留 pending 等 drain/匹配代际 |
+| 拓扑一致性（queue/group/dlq/namespace） | 逐消息 `config_family` 闸：不匹配留 pending 等匹配 worker | **worker 启动校验**：`--queue-name`/`--consumer-group`/`--dlq-key` 与 env 不一致、或 `PLAITA_TENANT_NAMESPACE_VERSION` 为空 ⇒ 拒绝启动（exit 2） |
+| 投递预算 | `budget_generation` 哈希：不匹配的 PEL 跳过 reclaim（留 pending） | **信封快照** `max_deliveries`（生产者入队时写入的整数）：消费端按源快照死信；缺失/畸形 = legacy，按本地 `PLAITA_MAX_DELIVERIES` |
+| 租户世代 | — | `tenant_generation` 保留为**身份字段**（#277/#283），不计入版本预算 |
 
-- 消息信封新增 `config_family` / `config_generation` / `budget_generation` /
-  `config_effective_at`；旧消费者忽略未知字段。重投/交接/克隆/DLQ replay
-  **继承源值**，缺失按 `legacy`（不 gate，不伪造当前值）。
-- 控制面：`GET /api/cluster/config` 返回 console 的派生哈希；`GET
-  /api/cluster/instances` 显示每个外部实例的三维代际；`/api/services` 的
-  worker metadata 含同样字段。
-- **指标**：`queue_config_family_mismatch_total`、`queue_config_legacy_total`、
-  `queue_config_budget_stale_total`、`tenant_status_stale_epoch_total`。
-- **迁移**：queue/group/DLQ 改名仍需 drain；新消费组对已存在 Stream 用
-  `PLAITA_CONSUMER_GROUP_START_ID=$` 避免重放。family 不匹配的消息会留 pending，
-  需要匹配代际的 worker 或迁移 runbook 处理，不会无限烧 delivery。
-- **b94-02 预算哈希迁移**：默认 `PLAITA_LEASE_TTL_SECONDS` 由 300 对齐为
-  **120**（与 `execution_lease` 实际默认及本文档一致），且
-  `load_runtime_config` 现在消费 worker 构造/CLI 的预算四键（不再是
-  env-only）。默认部署的 `budget_generation` 及含预算字段的
-  `config_generation` 会**一次性翻转**；在途消息携带旧哈希，滚动升级窗口会
-  触发 `queue_config_budget_stale_total` / `config.budget_stale` 告警。这是
-  迁移面而非数据损坏：drain 旧消息或接受一次性告警，待全部 worker/console
-  重启到新构建后收敛，新消息按新哈希写入。
-- **预算四键只走 env（#272）**：`PLAITA_LEASE_TTL_SECONDS` /
-  `PLAITA_MAX_DELIVERIES` / `PLAITA_TASK_MAX_AGE_SECONDS` /
-  `PLAITA_DLQ_MAX_LEN` 是生产者信封（console/schedule/event_filter）与
-  worker 共用的唯一预算来源。worker CLI `--lease-ttl-seconds` /
-  `--max-deliveries` 必须与 env 一致；不一致时启动即 `ConfigError`（给两边
-  值与 env 键名），否则新任务带旧 `budget_generation`，失败载体在 PEL 中
-  永久 `config_budget_stale`（直到 30 天年龄闸），reclaim 无法接管。
+- 信封最终只剩 `schema_version` + `tenant_generation` + `max_deliveries`；
+  重投/交接/克隆/DLQ replay **继承源值**，缺失按 legacy，不伪造当前值。
+  除 `schema_too_new → DLQ` 外不再有永久 pending 路径。
+- 控制面：`GET /api/cluster/config` / `GET /api/cluster/instances` 只保留
+  `deployment_epoch`（部署纪元，另一维度）；代际哈希字段与 DLQ replay 的
+  `target_config_family` / `allow_family_mismatch` 请求参数已删除。
+- **指标**：`queue_config_family_mismatch_total` / `queue_config_legacy_total` /
+  `queue_config_budget_stale_total` 已删除；`queue_schema_rejected_total` 与
+  `tenant_status_stale_epoch_total` 保留。
+- **迁移**：queue/group/DLQ 改名不再有消息卡 pending（外族戳被忽略）；新消费
+  组对已存在 Stream 仍用 `PLAITA_CONSUMER_GROUP_START_ID=$` 避免重放；连错
+  队列的 worker 在启动期即被拒绝。旧格式在途消息（无 `max_deliveries`）按
+  消费端本地预算判定，滚动升级零分叉、无需 drain。
+- **预算 env 不再要求 worker CLI 与 env 一致（#272 检查已删）**：预算随
+  信封走后，worker-only 的 `--max-deliveries` / `--lease-ttl-seconds` 覆盖
+  不会再搁浅 PEL（只影响 legacy 载体的本地判定）；两者 `<1` 仍在启动期
+  拒绝。默认 `PLAITA_LEASE_TTL_SECONDS` 保持 **120**（b94-02 对齐）。
 - **CLI identity 与 env 同源（#275）**：`--consumer-group` / `--dlq-key` /
   `--queue-name` 在启动时先 strip 并写回实际使用的参数；与 env/default 不一致
   即 `ConfigError`/exit 2（给出两边值）。尾随空格不会再产生独立 consumer

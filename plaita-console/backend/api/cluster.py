@@ -280,10 +280,9 @@ class ManagedInstanceResponse(_RedactedResponseModel):
     start_time: str
     error_message: Optional[str] = None
     managed_by: str = "console"  # console 或 external (Redis 注册)
-    # B2R31-01：代际视图（旧注册项缺失 = None；控制面据此发现混跑）。
-    config_family: Optional[str] = None
-    config_generation: Optional[str] = None
-    budget_generation: Optional[str] = None
+    # plaita#328：B2R31-01 代际视图（config_family/config_generation/
+    # budget_generation）已删除——版本维度收敛为 wire schema + IR；
+    # deployment_epoch 是部署纪元，保留为只读观测。
     deployment_epoch: Optional[str] = None
 
 
@@ -308,12 +307,9 @@ class ClusterConfigResponse(_RedactedResponseModel):
     """集群配置响应"""
     mode: str
     config_path: str
-    # B2R31-01：派生的配置代际（控制面可核对 console 的生效配置）。
-    config_family: Optional[str] = None
-    config_generation: Optional[str] = None
-    budget_generation: Optional[str] = None
+    # plaita#328：派生代际四哈希（config_family/config_generation/
+    # budget_generation/config_hash）已删除；deployment_epoch 保留。
     deployment_epoch: Optional[str] = None
-    config_hash: Optional[str] = None
 
 
 class SwitchModeRequest(StrictRequestModel):
@@ -649,9 +645,6 @@ async def list_managed_instances(
                     start_time=info.get("start_time", ""),
                     error_message=None,
                     managed_by="external",
-                    config_family=_metadata_value(info, "config_family"),
-                    config_generation=_metadata_value(info, "config_generation"),
-                    budget_generation=_metadata_value(info, "budget_generation"),
                     deployment_epoch=_metadata_value(info, "deployment_epoch"),
                 ))
                 seen_ids.add(instance_id)
@@ -680,24 +673,17 @@ async def get_cluster_config(
         http_request, identity, action="cluster.config.read", resource="cluster",
     )
     manager = _require_service_manager()
-    # B2R31-01：返回 console 进程的派生代际（与启动日志 event=config.effective
-    # 同源）；读失败不阻断控制面（字段留空）。
+    # plaita#328：代际哈希已删除；只读观测保留部署纪元。读失败不阻断控制面。
     try:
-        from plaita.runtime_config import load_runtime_config
-
-        generation = load_runtime_config("console", strict=False).generation
+        deployment_epoch = load_runtime_config(
+            "console", strict=False
+        ).deployment_epoch
     except Exception:  # noqa: BLE001 — 控制面只读视图，失败留空
-        generation = None
+        deployment_epoch = None
     return ClusterConfigResponse(
         mode=manager.config.mode,
         config_path=manager.config_path,
-        config_family=generation.family if generation else None,
-        config_generation=generation.generation if generation else None,
-        budget_generation=generation.budget if generation else None,
-        deployment_epoch=(
-            generation.details.get("deployment_epoch") if generation else None
-        ),
-        config_hash=generation.generation if generation else None,
+        deployment_epoch=deployment_epoch,
     )
 
 

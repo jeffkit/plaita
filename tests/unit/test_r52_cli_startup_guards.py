@@ -1,10 +1,12 @@
 """#269/#270 (r95): CLI overrides must not bypass startup fail-fast.
 
 #269: ``--consumer-group`` / ``--dlq-key`` are worker-only overrides while
-console/schedule/event_filter derive ``config_family`` from env. A mismatch
-makes the family gate reject every foreign task (pending until the age gate).
-The CLI preflight must reject a mismatching override with both values; a CLI
-value matching env is accepted.
+console/schedule/event_filter write the env-resolved stream/group/DLQ. A
+mismatching worker consumes a different topology than producers write to
+(plaita#328: this startup check **is** the family gate now — the per-message
+``config_family`` gate was deleted; a wrong-queue worker must fail to start
+instead of stranding messages in PEL). The CLI preflight must reject a
+mismatching override with both values; a CLI value matching env is accepted.
 
 #270: ``--lease-ttl-seconds`` / ``--max-deliveries`` 0/negative previously
 bypassed ``load_runtime_config(strict=True)`` (which ran before argparse) and
@@ -28,7 +30,6 @@ pytest.importorskip("redis")
 import fakeredis
 
 from plaita.runtime_config import (
-    envelope_for_stream,
     resolve_consumer_group,
     resolve_dlq_key,
     resolve_queue_name,
@@ -140,19 +141,22 @@ def _worker(**kwargs):
     return RedisFlowWorker(**values)
 
 
-class TestFamilyAlignment:
-    @pytest.mark.parametrize("role", ["console", "schedule", "event_filter"])
-    def test_accepted_cli_values_keep_producer_family(self, role):
-        """#269 positive: accepted (env-matching) worker values == producer family."""
-        worker = _worker()
-        envelope = envelope_for_stream(resolve_queue_name("worker"), role=role)
-        assert worker._config_family == envelope["config_family"]
+class TestTopologyAlignment:
+    """plaita#328：family 哈希已删除——「同一部署」的判据直接是 worker 实际
+    消费的 queue/group/dlq 三元组与生产者 env 解析值逐项相等。"""
 
-    def test_worker_only_group_override_diverges_from_producer(self):
-        """Documents the pre-fix mechanism the CLI preflight now rejects."""
-        worker = _worker(consumer_group="cli-group")
-        envelope = envelope_for_stream(resolve_queue_name("worker"), role="console")
-        assert worker._config_family != envelope["config_family"]
+    def test_accepted_cli_values_match_producer_topology(self):
+        """#269 positive: accepted (env-matching) worker values == producer topology."""
+        worker = _worker()
+        queue = resolve_queue_name("worker")
+        assert worker.queue_name == queue
+        assert worker._consumer_group == resolve_consumer_group()
+        assert worker._dlq_key == resolve_dlq_key(queue, empty_policy="default")
+
+    def test_worker_only_group_override_is_rejected_at_startup(self):
+        """旧 family 分叉机制已不存在；worker-only 覆盖由启动预检直接拒绝。"""
+        problems = _cli_startup_problems(_args(consumer_group="cli-group"))
+        assert problems and "--consumer-group" in "\n".join(problems)
 
 
 

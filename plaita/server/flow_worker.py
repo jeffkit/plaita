@@ -57,9 +57,6 @@ from plaita.redis_client import make_redis_client
 from plaita.writefile_jail import apply_writefile_jail
 from plaita.runtime_config import (
     ConfigError,
-    ConfigGeneration,
-    LEGACY_GENERATION,
-    envelope_budget_values,
     load_runtime_config,
     log_config_effective,
     preflight_security_and_limits,
@@ -281,16 +278,12 @@ def _requeue_envelope_kwargs(source: Any) -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {}
     if isinstance(version, int) and not isinstance(version, bool):
         kwargs["schema_version"] = version
-    # B2R31-01：重投/交接/克隆/DLQ replay 继承**源**代际，绝不盖当前值。
-    # 源缺失/legacy 时不写字段（消费侧按 legacy 处理），因此旧测试的
+    # plaita#328：重投/交接/克隆/DLQ replay 继承**源**预算快照，绝不盖当前值；
+    # 源缺失（legacy 载体）时不写字段（消费端按本地预算），旧测试的
     # ``kwargs == {"schema_version": ...}`` 形状保持不变。
-    for attr in ("config_family", "config_generation", "budget_generation"):
-        value = getattr(source, attr, None)
-        if isinstance(value, str) and value and value != LEGACY_GENERATION:
-            kwargs[attr] = value
-    effective_at = getattr(source, "config_effective_at", None)
-    if isinstance(effective_at, str) and effective_at:
-        kwargs["config_effective_at"] = effective_at
+    snapshot = getattr(source, "max_deliveries", None)
+    if isinstance(snapshot, int) and not isinstance(snapshot, bool) and snapshot >= 1:
+        kwargs["max_deliveries"] = snapshot
     # plaita#283：源租户世代随副本走；旧副本不得在新租户下被读成当前世代。
     tenant_generation = getattr(source, "tenant_generation", None)
     if isinstance(tenant_generation, str) and tenant_generation:
@@ -5191,9 +5184,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         self._dlq_key = dlq_key
         self._task_queue: Optional[RedisStreamTaskQueue] = None
 
-        # B2R31-01/02/03：本进程的配置视图与三维代际。库内构造用非 strict
-        # （非法值 WARNING + 安全默认，不阻断嵌入式使用）；CLI 入口另走
-        # preflight 严格校验。显式构造参数优先于 env。
+        # B2R31-02：本进程的配置视图。库内构造用非 strict（非法值 WARNING +
+        # 安全默认，不阻断嵌入式使用）；CLI 入口另走 preflight 严格校验。
+        # 显式构造参数优先于 env。plaita#328：B2R31-01 三维代际已删除——
+        # 版本维度收敛为 wire schema + IR；拓扑一致性（queue/group/dlq/
+        # namespace）由 CLI 启动校验把守（``_cli_startup_problems``），
+        # 投递预算以消息上的 ``max_deliveries`` 快照随信封走。
         resolved_dlq = dlq_key
         if resolved_dlq is None:
             try:
@@ -5219,19 +5215,6 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 "dlq_max_len": _dlq_max_len_from_env(),
             },
         )
-        self._config_generation: Optional[ConfigGeneration] = (
-            self._runtime_config.generation
-        )
-        if self._config_generation is not None:
-            self._config_family = self._config_generation.family
-            self._config_generation_id = self._config_generation.generation
-            self._budget_generation = self._config_generation.budget
-            self._config_effective_at = self._config_generation.effective_at
-        else:  # pragma: no cover - build_generation always returns an object
-            self._config_family = LEGACY_GENERATION
-            self._config_generation_id = LEGACY_GENERATION
-            self._budget_generation = LEGACY_GENERATION
-            self._config_effective_at = None
         self._tenant_status_epoch = self._runtime_config.tenant_status_epoch
         self._dlq_key = resolved_dlq
         log_config_effective(logger, self._runtime_config)
@@ -5309,13 +5292,11 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     "queue_contract_version": 2,
                     "consumer_group": self._consumer_group,
                     "dlq_key": self._dlq_key,
-                    # B2R31-01：代际与脱敏关键值进注册 metadata——控制面
-                    # （/api/cluster/instances、capacity、drift 预检）据此
-                    # 发现混跑；旧 build 忽略未知键。
-                    "config_family": self._config_family,
-                    "config_generation": self._config_generation_id,
-                    "budget_generation": self._budget_generation,
-                    "config_effective_at": self._config_effective_at,
+                    # plaita#328：B2R31-01 代际哈希（config_family/
+                    # config_generation/budget_generation/config_effective_at）
+                    # 已从注册 metadata 删除——版本维度收敛为 wire schema + IR，
+                    # 拓扑一致性由启动校验把守；max_deliveries/lease_ttl 等
+                    # 预算观测值保留（只观测、不做兼容闸）。
                     "max_deliveries": self._max_deliveries,
                     "lease_ttl_seconds": lease_ttl_seconds,
                     "task_max_age_seconds": self._runtime_config.task_max_age_seconds,
@@ -5383,14 +5364,10 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             queue_params = inspect.signature(
                 RedisStreamTaskQueue.__init__
             ).parameters
-            # B2R31-01：本进程代际进队列；family 不匹配的载体不执行、
-            # 不 XCLAIM（留 pending 等匹配代际的 worker）。按签名探测，
-            # 兼容只实现旧参数的队列桩/并行合入版本。
+            # plaita#328：family/budget 代际参数已从队列构造删除（逐消息
+            # family 闸退役，拓扑一致性走启动校验）。按签名探测
+            # ``task_max_age_seconds``，兼容只实现该参数的队列桩。
             for key, value in (
-                ("config_family", self._config_family),
-                ("config_generation", self._config_generation_id),
-                ("budget_generation", self._budget_generation),
-                ("config_effective_at", self._config_effective_at),
                 ("task_max_age_seconds", self._runtime_config.task_max_age_seconds),
             ):
                 if key in queue_params:
@@ -5533,17 +5510,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # event/cancel/timeout 唤醒；运维升级后可从 DLQ 重放（ops-runbook）。
         # 也刻意跳过下方「节点重试预算耗尽 → 终态化」分支：版本拒收不是节点
         # 反复失败，不能据此把执行打成 error。
-        if getattr(task, "schema_rejected", False) or getattr(
-            task, "config_rejected", False
-        ):
+        if getattr(task, "schema_rejected", False):
             logger.error(
-                "执行 %s 的消息信封版本/配置代际（schema=%s, family=%s, budget=%s）"
-                "与本进程不兼容，拒收后不再克隆恢复副本（克隆继承同代际，会自持"
-                "循环）；放行死信一次: %s",
+                "执行 %s 的消息信封 schema 版本（schema=%s）比本 build 新，"
+                "拒收后不再克隆恢复副本（克隆继承同一超版本，会自持循环）；"
+                "放行死信一次: %s",
                 execution_id,
                 getattr(task, "schema_version", "?"),
-                getattr(task, "config_family", "?"),
-                getattr(task, "budget_generation", "?"),
                 getattr(task, "message_id", "?"),
             )
             return True
@@ -7641,9 +7614,6 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
             disk_blocked=bool(self.__dict__.get("_disk_guard_active")),
             active_tasks=getattr(self, "_active_task_count", 0) or 0,
             concurrency=getattr(self, "concurrency", 1) or 1,
-            config_family=getattr(self, "_config_family", None),
-            config_generation=getattr(self, "_config_generation_id", None),
-            budget_generation=getattr(self, "_budget_generation", None),
             deployment_epoch=(
                 self._runtime_config.deployment_epoch
                 if getattr(self, "_runtime_config", None) is not None
@@ -8227,64 +8197,41 @@ def _cli_startup_problems(args) -> list:
 
     - ``--lease-ttl-seconds`` / ``--max-deliveries`` below 1: the env knobs
       already fail fast; a CLI 0/negative must not be silently clamped to 1.
-    - ``--consumer-group`` / ``--dlq-key``: producers (console/schedule/
-      event_filter) derive ``config_family`` from env only. A worker-only CLI
-      override makes the family gate reject every foreign task (no ack/DLX,
-      pending until the 30-day age gate). Require the whole deployment to use
-      the env value; a matching CLI value is accepted.
+    - ``--queue-name`` / ``--consumer-group`` / ``--dlq-key``: producers
+      (console/schedule/event_filter) write the env-resolved stream and the
+      worker must consume exactly that topology. plaita#328 made this check
+      **the** family gate: the per-message ``config_family`` gate (which left
+      foreign tasks pending until the 30-day age gate) was deleted, so a
+      worker wired to the wrong queue/group/DLQ must fail to start instead of
+      stranding messages. Require the whole deployment to use the env value;
+      a matching CLI value is accepted. (Namespace: an empty
+      ``PLAITA_TENANT_NAMESPACE_VERSION`` is rejected by
+      ``load_runtime_config(strict=True)`` before argparse.)
+
+    plaita#328 also removed the #272 budget-consistency check: delivery budget
+    now travels on each message as a ``max_deliveries`` snapshot, and legacy
+    (snapshot-less) carriers are judged by the consumer's local budget — a
+    worker-only budget override no longer strands PEL entries, so it is no
+    longer a startup error.
     """
     problems = []
     # #275：判定前把 CLI 值规范化并**写回实际使用的 args**。此前只 strip 比较
     # 副本，``--consumer-group "plaita-workers "`` 会被放行而 worker 实际加入
     # 带空格的独立 consumer group（同一消息两组各投一次）；DLQ/queue 同理。
-    # family 的 canonical_json 又会 strip，哈希相同但 Redis 键/组不同，更隐蔽。
     args.queue_name = str(args.queue_name or "").strip()
     args.consumer_group = str(args.consumer_group or "").strip()
     args.dlq_key = str(args.dlq_key or "").strip()
-    invalid_budget_keys = set()
     if int(args.lease_ttl_seconds) < 1:
         problems.append(
             f"--lease-ttl-seconds: {args.lease_ttl_seconds} < minimum 1 "
             "(resume lease TTL; 0/negative makes acquire/renew invalid, and a "
             "silent clamp to 1 leaves no renewal headroom)"
         )
-        invalid_budget_keys.add("lease_ttl_seconds")
     if int(args.max_deliveries) < 1:
         problems.append(
             f"--max-deliveries: {args.max_deliveries} < minimum 1 "
             "(a silent clamp to 1 dead-letters on the first failure)"
         )
-        invalid_budget_keys.add("max_deliveries")
-
-    # #272：生产者（console/schedule/event_filter）只从 env 算 budget_generation。
-    # worker 的 CLI 预算覆盖若与 env-resolved 值不同，新任务信封仍带 env 预算；
-    # 首投可执行，但失败/崩溃留下的 PEL 会被 worker 按不同预算判 stale，永久
-    # 跳过 reclaim（直到 30 天年龄闸）。要求预算四键全部署同源：不一致即拒启。
-    producer_budget = envelope_budget_values()
-    worker_budget = {
-        "lease_ttl_seconds": int(args.lease_ttl_seconds),
-        "max_deliveries": int(args.max_deliveries),
-        "task_max_age_seconds": task_max_age_seconds(),
-        "dlq_max_len": _dlq_max_len_from_env(),
-    }
-    budget_labels = (
-        ("lease_ttl_seconds", "--lease-ttl-seconds", "PLAITA_LEASE_TTL_SECONDS"),
-        ("max_deliveries", "--max-deliveries", "PLAITA_MAX_DELIVERIES"),
-        ("task_max_age_seconds", "task_max_age_seconds", "PLAITA_TASK_MAX_AGE_SECONDS"),
-        ("dlq_max_len", "dlq_max_len", "PLAITA_DLQ_MAX_LEN"),
-    )
-    for key, label, env_key in budget_labels:
-        if key in invalid_budget_keys:
-            continue
-        actual = worker_budget[key]
-        expected = producer_budget[key]
-        if actual != expected:
-            problems.append(
-                f"{label}: worker actual {actual} != producer/env/default "
-                f"{expected} ({env_key}); console/schedule/event_filter hash "
-                f"env only — set {env_key} for the whole deployment instead "
-                "of a worker-only CLI override"
-            )
 
     queue_name = args.queue_name
     if not queue_name:
@@ -8311,7 +8258,7 @@ def _cli_startup_problems(args) -> list:
         if group != producer_group:
             problems.append(
                 f"--consumer-group {group!r} != env/default {producer_group!r}: "
-                "console/schedule/event_filter derive config_family from env; "
+                "console/schedule/event_filter write the env-resolved group; "
                 "set PLAITA_CONSUMER_GROUP for the whole deployment instead of "
                 "a worker-only CLI override"
             )
@@ -8324,7 +8271,7 @@ def _cli_startup_problems(args) -> list:
         if dlq != producer_dlq:
             problems.append(
                 f"--dlq-key {dlq!r} != env/default {producer_dlq!r}: "
-                "producers derive config_family from env; set PLAITA_DLQ_KEY "
+                "producers write the env-resolved DLQ; set PLAITA_DLQ_KEY "
                 "for the whole deployment instead of a worker-only CLI override"
             )
     return problems

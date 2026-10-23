@@ -120,7 +120,7 @@ def _body(exec_id, tenant):
 
 def _enqueue_with_group(fake, body):
     """入队 + 建组（不预投递——预投递的 idle≈0 不可 reclaim，会造成假绿）。"""
-    enqueue_task(fake, QUEUE, dict(body))
+    enqueue_task(fake, QUEUE, dict(body), max_deliveries=None)  # legacy 载体：预算由队列本地值裁判
     fake.xgroup_create(QUEUE, GROUP, id="0")
 
 

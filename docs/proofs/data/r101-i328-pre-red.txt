@@ -1,0 +1,241 @@
+FFFFFFF...F.FFF...FF                                                     [100%]
+=================================== FAILURES ===================================
+_________ TestEnvelopeShape.test_envelope_is_schema_tenant_budget_only _________
+
+self = <tests.unit.test_issue328_version_dimensions.TestEnvelopeShape object at 0x10534c690>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1053288a0>
+
+    def test_envelope_is_schema_tenant_budget_only(self, monkeypatch):
+        monkeypatch.setenv("PLAITA_MAX_DELIVERIES", "3")
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        msg = enqueue_task(redis, STREAM, _body(), tenant_generation="t1")
+        fields = _fields(redis, msg)
+>       assert set(fields) == {
+            PAYLOAD_FIELD, SCHEMA_FIELD, "max_deliveries", "tenant_generation",
+        }
+E       AssertionError: assert {'payload', '...t_generation'} == {'max_deliver...t_generation'}
+E         
+E         Extra items in the right set:
+E         'max_deliveries'
+E         Use -v to get more diff
+
+tests/unit/test_issue328_version_dimensions.py:80: AssertionError
+_________ TestEnvelopeShape.test_explicit_none_writes_legacy_envelope __________
+
+self = <tests.unit.test_issue328_version_dimensions.TestEnvelopeShape object at 0x112b0dbd0>
+
+    def test_explicit_none_writes_legacy_envelope(self):
+        """重投路径显式 ``max_deliveries=None`` = 源是 legacy 载体，不得盖当前预算。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+>       msg = enqueue_task(
+            redis, STREAM, _body(),
+            schema_version=1, max_deliveries=None, tenant_generation=None,
+        )
+E       TypeError: enqueue_task() got an unexpected keyword argument 'max_deliveries'
+
+tests/unit/test_issue328_version_dimensions.py:90: TypeError
+_______________ TestEnvelopeShape.test_explicit_snapshot_travels _______________
+
+self = <tests.unit.test_issue328_version_dimensions.TestEnvelopeShape object at 0x112b688a0>
+
+    def test_explicit_snapshot_travels(self):
+        redis = fakeredis.FakeRedis(decode_responses=True)
+>       msg = enqueue_task(redis, STREAM, _body(), max_deliveries=2)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: enqueue_task() got an unexpected keyword argument 'max_deliveries'
+
+tests/unit/test_issue328_version_dimensions.py:98: TypeError
+______ TestFamilyStampNoLongerStrands.test_foreign_family_stamp_is_served ______
+
+self = <tests.unit.test_issue328_version_dimensions.TestFamilyStampNoLongerStrands object at 0x112b0da90>
+
+    def test_foreign_family_stamp_is_served(self):
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        redis.xadd(STREAM, {
+            PAYLOAD_FIELD: json.dumps(_body()),
+            SCHEMA_FIELD: "1",
+            "config_family": "cf1-bbbbbbbbbbbb",
+        })
+        queue = _queue(redis, config_family="cf1-aaaaaaaaaaaa")
+        task = queue.read(block_ms=1)
+>       assert task is not None, "family 戳不匹配的消息必须被消费，不得留 pending"
+E       AssertionError: family 戳不匹配的消息必须被消费，不得留 pending
+E       assert None is not None
+
+tests/unit/test_issue328_version_dimensions.py:115: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:701 新消费组 g（stream=test:i328-versions）从 id=0 建立，将重放 1 条历史条目；若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ （B2R31-01：改名不重放）
+WARNING  plaita.server.task_queue:task_queue.py:1078 event=config.family_mismatch source_family=cf1-bbbbbbbbbbbb local_family=cf1-aaaaaaaaaaaa queue=test:i328-versions message_id=1792770388873-0 delivery_count=1——消息不执行，留 pending 等匹配代际的 worker（B2R31-01）
+__ TestFamilyStampNoLongerStrands.test_foreign_family_stamp_reclaim_is_served __
+
+self = <tests.unit.test_issue328_version_dimensions.TestFamilyStampNoLongerStrands object at 0x112b0dd10>
+
+    def test_foreign_family_stamp_reclaim_is_served(self):
+        """reclaim 路径同判：外族戳不得跳过 XCLAIM（B2R31-01 旧行为=永久 pending）。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        msg = redis.xadd(STREAM, {
+            PAYLOAD_FIELD: json.dumps(_body()),
+            SCHEMA_FIELD: "1",
+            "config_family": "cf1-bbbbbbbbbbbb",
+        })
+        seed = _queue(redis, consumer_name="c1", config_family="cf1-bbbbbbbbbbbb")
+        seed.ensure_group()
+        assert seed.read(block_ms=1) is not None
+        reader = _queue(redis, consumer_name="c2", config_family="cf1-aaaaaaaaaaaa")
+        task = reader.read(block_ms=1)
+>       assert task is not None
+E       assert None is not None
+
+tests/unit/test_issue328_version_dimensions.py:131: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:701 新消费组 g（stream=test:i328-versions）从 id=0 建立，将重放 1 条历史条目；若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ （B2R31-01：改名不重放）
+WARNING  plaita.server.task_queue:task_queue.py:1078 event=config.family_mismatch source_family=cf1-bbbbbbbbbbbb local_family=cf1-aaaaaaaaaaaa queue=test:i328-versions message_id=1792770388878-0 delivery_count=1——消息不执行，留 pending 等匹配代际的 worker（B2R31-01）
+__ TestFamilyStampNoLongerStrands.test_old_budget_generation_stamp_is_served ___
+
+self = <tests.unit.test_issue328_version_dimensions.TestFamilyStampNoLongerStrands object at 0x112b689d0>
+
+    def test_old_budget_generation_stamp_is_served(self):
+        """budget 代际戳不匹配不得留 pending（#328 永久 pending 路径之二）。
+    
+        旧实现只在 reclaim（PEL）路径判 budget 代际——按 reclaim 形态构造。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        msg = redis.xadd(STREAM, {
+            PAYLOAD_FIELD: json.dumps(_body()),
+            SCHEMA_FIELD: "1",
+            "budget_generation": "bg1-111111111111",
+        })
+        seed = _queue(redis, consumer_name="c1", budget_generation="bg1-111111111111")
+        seed.ensure_group()
+        assert seed.read(block_ms=1) is not None
+        redis.xclaim(STREAM, "g", "c1", min_idle_time=0, message_ids=[msg])
+        reader = _queue(redis, consumer_name="c2", budget_generation="bg1-222222222222")
+        task = reader.read(block_ms=1)
+>       assert task is not None, "budget 代际不匹配的 PEL 条目必须被消费/死信，不得跳过"
+E       AssertionError: budget 代际不匹配的 PEL 条目必须被消费/死信，不得跳过
+E       assert None is not None
+
+tests/unit/test_issue328_version_dimensions.py:149: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:701 新消费组 g（stream=test:i328-versions）从 id=0 建立，将重放 1 条历史条目；若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ （B2R31-01：改名不重放）
+WARNING  plaita.server.task_queue:task_queue.py:876 event=config.budget_stale queue=test:i328-versions local_budget_generation=bg1-222222222222 stale=1 legacy=0 scanned=1——PEL 中存在按旧预算投递的条目；本次变更要求 drain 或按源预算宽限后再生效（B2R31-01）
+WARNING  plaita.server.task_queue:task_queue.py:1111 event=config.budget_stale queue=test:i328-versions message_id=1792770388884-0 source_budget_generation=bg1-111111111111 local_budget_generation=bg1-222222222222 delivery_count=2——新预算不得作用旧 PEL；消息留 pending，要求 drain 或按源预算宽限（B2R31-01）
+____ TestBudgetSnapshot.test_snapshot_budget_dead_letters_at_source_budget _____
+
+self = <tests.unit.test_issue328_version_dimensions.TestBudgetSnapshot object at 0x112b0de50>
+
+    def test_snapshot_budget_dead_letters_at_source_budget(self):
+        """消息自带快照 2、消费端本地 5：达 2 次投递即按源预算死信，不再执行。"""
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        self._seed_delivered(
+            redis,
+            {
+                PAYLOAD_FIELD: json.dumps(_body()),
+                SCHEMA_FIELD: "1",
+                "max_deliveries": "2",
+            },
+            claims=1,
+        )
+        reader = _queue(redis, consumer_name="c2", max_deliveries=5)
+        task = reader.read(block_ms=1)
+>       assert task is None, "快照预算已耗尽必须死信，不得继续执行"
+E       AssertionError: 快照预算已耗尽必须死信，不得继续执行
+E       assert StreamTask(message_id='1792770388890-0', body={'type': 'start', 'flow_id': 'f', 'execution_id': 'e1'}, delivery_count=...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation=None) is None
+
+tests/unit/test_issue328_version_dimensions.py:179: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:701 新消费组 g（stream=test:i328-versions）从 id=0 建立，将重放 1 条历史条目；若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ （B2R31-01：改名不重放）
+_________ TestInheritanceSurfaces.test_requeue_kwargs_inherit_snapshot _________
+
+self = <tests.unit.test_issue328_version_dimensions.TestInheritanceSurfaces object at 0x112385090>
+
+    def test_requeue_kwargs_inherit_snapshot(self):
+>       task = StreamTask(
+            message_id="1-0", body={}, schema_version=1,
+            max_deliveries=2, tenant_generation="t9",
+        )
+E       TypeError: StreamTask.__init__() got an unexpected keyword argument 'max_deliveries'
+
+tests/unit/test_issue328_version_dimensions.py:235: TypeError
+____ TestInheritanceSurfaces.test_dlq_envelope_carries_snapshot_not_hashes _____
+
+self = <tests.unit.test_issue328_version_dimensions.TestInheritanceSurfaces object at 0x112b68c30>
+
+    def test_dlq_envelope_carries_snapshot_not_hashes(self):
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        queue = _queue(redis)
+>       task = StreamTask(
+            message_id="1-0", body={"x": 1}, delivery_count=1,
+            max_deliveries=2, tenant_generation="t1",
+        )
+E       TypeError: StreamTask.__init__() got an unexpected keyword argument 'max_deliveries'
+
+tests/unit/test_issue328_version_dimensions.py:251: TypeError
+_________ TestInheritanceSurfaces.test_replay_has_no_family_parameters _________
+
+self = <tests.unit.test_issue328_version_dimensions.TestInheritanceSurfaces object at 0x112b68d60>
+
+    def test_replay_has_no_family_parameters(self):
+        params = inspect.signature(dlq_replay.replay_dead_letter).parameters
+        for gone in (
+            "target_config_family", "allow_family_mismatch",
+            "target_consumer_group", "target_dlq_key",
+        ):
+>           assert gone not in params
+E           assert 'target_config_family' not in mappingproxy(OrderedDict({'redis': <Parameter "redis">, 'dlq_key': <Parameter "dlq_key: 'str'">, 'dlq_id': <Parameter ...rget_dlq_key: 'Optional[str]' = None">, 'allow_family_mismatch': <Parameter "allow_family_mismatch: 'bool' = False">}))
+
+tests/unit/test_issue328_version_dimensions.py:270: AssertionError
+____________ TestInheritanceSurfaces.test_replay_inherits_snapshot _____________
+
+self = <tests.unit.test_issue328_version_dimensions.TestInheritanceSurfaces object at 0x112bad130>
+
+    def test_replay_inherits_snapshot(self):
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        queue = _queue(redis)
+        queue.dead_letter(
+>           StreamTask(
+                message_id="1-0", body=_body("e-dlq"), delivery_count=3,
+                schema_version=1, max_deliveries=2, tenant_generation="t1",
+            ),
+            reason="max_deliveries=2",
+        )
+E       TypeError: StreamTask.__init__() got an unexpected keyword argument 'max_deliveries'
+
+tests/unit/test_issue328_version_dimensions.py:276: TypeError
+_____ TestMetricsConverged.test_generation_counters_removed_from_registry ______
+
+self = <tests.unit.test_issue328_version_dimensions.TestMetricsConverged object at 0x112b0e350>
+
+    def test_generation_counters_removed_from_registry(self):
+        names = {name for name, _op, _doc in metrics_mod.QUEUE_COUNTERS}
+        for gone in ("config_family_mismatch", "config_budget_stale", "config_legacy"):
+>           assert gone not in names
+E           AssertionError: assert 'config_family_mismatch' not in {'acked', 'config_budget_stale', 'config_family_mismatch', 'config_legacy', 'dead_lettered', 'dlq_ack_failures', ...}
+
+tests/unit/test_issue328_version_dimensions.py:335: AssertionError
+______ TestMetricsConverged.test_queue_stats_dropped_generation_counters _______
+
+self = <tests.unit.test_issue328_version_dimensions.TestMetricsConverged object at 0x112b0e490>
+
+    def test_queue_stats_dropped_generation_counters(self):
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        stats = _queue(redis).stats()
+        for gone in ("config_family_mismatch", "config_budget_stale", "config_legacy"):
+>           assert gone not in stats
+E           AssertionError: assert 'config_family_mismatch' not in {'stream_key': 'test:i328-versions', 'dlq_key': 'test:i328-versions:dlq', 'group': 'g', 'consumer': 'c1', ...}
+
+tests/unit/test_issue328_version_dimensions.py:341: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue328_version_dimensions.py::TestEnvelopeShape::test_envelope_is_schema_tenant_budget_only
+FAILED tests/unit/test_issue328_version_dimensions.py::TestEnvelopeShape::test_explicit_none_writes_legacy_envelope
+FAILED tests/unit/test_issue328_version_dimensions.py::TestEnvelopeShape::test_explicit_snapshot_travels
+FAILED tests/unit/test_issue328_version_dimensions.py::TestFamilyStampNoLongerStrands::test_foreign_family_stamp_is_served
+FAILED tests/unit/test_issue328_version_dimensions.py::TestFamilyStampNoLongerStrands::test_foreign_family_stamp_reclaim_is_served
+FAILED tests/unit/test_issue328_version_dimensions.py::TestFamilyStampNoLongerStrands::test_old_budget_generation_stamp_is_served
+FAILED tests/unit/test_issue328_version_dimensions.py::TestBudgetSnapshot::test_snapshot_budget_dead_letters_at_source_budget
+FAILED tests/unit/test_issue328_version_dimensions.py::TestInheritanceSurfaces::test_requeue_kwargs_inherit_snapshot
+FAILED tests/unit/test_issue328_version_dimensions.py::TestInheritanceSurfaces::test_dlq_envelope_carries_snapshot_not_hashes
+FAILED tests/unit/test_issue328_version_dimensions.py::TestInheritanceSurfaces::test_replay_has_no_family_parameters
+FAILED tests/unit/test_issue328_version_dimensions.py::TestInheritanceSurfaces::test_replay_inherits_snapshot
+FAILED tests/unit/test_issue328_version_dimensions.py::TestMetricsConverged::test_generation_counters_removed_from_registry
+FAILED tests/unit/test_issue328_version_dimensions.py::TestMetricsConverged::test_queue_stats_dropped_generation_counters
+13 failed, 7 passed in 0.60s
