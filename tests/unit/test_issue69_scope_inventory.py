@@ -74,10 +74,14 @@ class TestIssue69ScopeInventory(unittest.TestCase):
             kinds[info["kind"]] = kinds.get(info["kind"], 0) + 1
         # plaita#268：摘除嵌套表达式串的递归求值 ⇒ `_compile_variable.thunk` 里
         # `parser.evaluate` 的 explore-scope 点 15 → 14，总数 88 → 87。
+        # NS-M3（plaita#311）：_FrameExecutionView 的三处委托入账——
+        # evaluate→state-scope 27→28、run_compatible/arun_compatible→child-input
+        # 25→27（恢复会话帧执行视图，语义归属与 facade 委托同族）。
         self.assertEqual(
-            {"explore-scope": 14, "state-scope": 27, "child-input": 25,
+            {"explore-scope": 14, "state-scope": 28, "child-input": 27,
              "materialise": 14, "fresh-register": 7}, kinds)
-        self.assertEqual(87, len(found))
+        # 87 → 90（NS-M3 _FrameExecutionView 三处委托入账，见上）。
+        self.assertEqual(90, len(found))
 
     def test_unclassified_site_would_trip_the_guard(self):
         """负控：拿掉任意一条 ⇒ missing 非空；凭空多一条 ⇒ stale 非空（判定不是恒真）。"""
