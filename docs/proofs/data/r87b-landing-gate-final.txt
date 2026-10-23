@@ -1,0 +1,13 @@
+[landing-gate] main 最近完成 run：2026-10-23T10:26:55Z c7e4681 conclusion=success  |  merge: 并入 fix/nested-suspend 追加提交（NS-M4 case 09 缺陷修复：恢复续跑帧推进
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（c7e4681）
+[landing-gate] ✅ 允许落地
+
+----
+# 终判补记（2026-10-23 19:2x）
+# 本 push（7bae61a5）的 CI/slow lane 在 5m 处被 4 分钟后 B2 r94 的 push（0652c1bb，
+# 本席 7bae61a5 为其祖先）按 concurrency 组取消——按 r85 判据「相邻推送后者的 CI
+# 才是终判，前者 cancelled 不算红」：
+#   后继 run 39943651465（树含本轮全部代码）CI conclusion=success
+#   Console E2E 未触发（本轮零 console 面，路径过滤）；Deploy docs success
+# 终判绿成立。
