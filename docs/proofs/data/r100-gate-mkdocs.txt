@@ -20,7 +20,7 @@ INFO    -  MERMAID2  - Using javascript library (10.4.0):
 INFO    -  Cleaning site directory
 INFO    -  Building documentation to directory: /private/tmp/plaita-b3-r100/docs-site/site
 INFO    -  mkdocstrings_handlers: Formatting signatures requires either Black or Ruff to be installed.
-INFO    -  MERMAID2  - Found superfences config: {'custom_fences': [{'name': 'mermaid', 'class': 'mermaid', 'format': functools.partial(<function fence_mermaid at 0x1052c6830>, custom=True)}]}
+INFO    -  MERMAID2  - Found superfences config: {'custom_fences': [{'name': 'mermaid', 'class': 'mermaid', 'format': functools.partial(<function fence_mermaid at 0x104d6a830>, custom=True)}]}
 INFO    -  MERMAID2  - Found 'fence_mermaid_custom' function: activate custom loader for superfences
 INFO    -  MERMAID2  - Custom loader activated
 INFO    -  MERMAID2  - Page 'AI 集成（plaita-ai）': found 1 diagrams, adding scripts
@@ -65,4 +65,4 @@ INFO    -  Doc file 'distributed/flow-worker.md' contains a link '../guide/callb
 INFO    -  Doc file 'distributed/ops-runbook.md' contains a link 'flow-worker.md#start-dedup-受理状态机', but the doc 'distributed/flow-worker.md' does not contain an anchor '#start-dedup-受理状态机'.
 INFO    -  Doc file 'guide/code-dsl.md' contains a link '#子流程-childflow--child', but there is no such anchor on this page.
 INFO    -  Doc file 'guide/expressions.md' contains a link '#内置函数一览', but there is no such anchor on this page.
-INFO    -  Documentation built in 6.14 seconds
+INFO    -  Documentation built in 6.30 seconds

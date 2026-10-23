@@ -26,4 +26,4 @@ tests/e2e/test_wheel_contents.py::TestWheelContents::test_no_test_files_in_wheel
     fixturefunc = resolve_fixture_function(fixturedef, request)
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-74 passed, 3 skipped, 5 warnings in 4.32s
+74 passed, 3 skipped, 5 warnings in 4.78s

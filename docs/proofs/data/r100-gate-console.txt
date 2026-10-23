@@ -2,24 +2,25 @@
 ........................................................................ [  9%]
 ........................................................................ [ 13%]
 ........................................................................ [ 18%]
-..................................ss.................................... [ 22%]
-............................................ssssssssss.................. [ 27%]
-........................................................................ [ 32%]
+......................................................ss................ [ 22%]
+................................................................ssssssss [ 27%]
+ss...................................................................... [ 31%]
 ........................................................................ [ 36%]
-........................................................................ [ 41%]
+........................................................................ [ 40%]
 ........................................................................ [ 45%]
-........................................................................ [ 50%]
+........................................................................ [ 49%]
 ........................................................................ [ 54%]
-........................................................................ [ 59%]
-........................................................................ [ 64%]
-........................................................................ [ 68%]
-........................................................................ [ 73%]
-........................................................................ [ 77%]
-........................................................................ [ 82%]
-.......................................................s................ [ 87%]
-........................................................................ [ 91%]
-.........................................................s.............. [ 96%]
-...........................................................              [100%]
+........................................................................ [ 58%]
+........................................................................ [ 63%]
+........................................................................ [ 67%]
+........................................................................ [ 72%]
+........................................................................ [ 76%]
+........................................................................ [ 81%]
+........................................................................ [ 85%]
+...s.................................................................... [ 90%]
+........................................................................ [ 95%]
+.....s.................................................................. [ 99%]
+.......                                                                  [100%]
 =============================== warnings summary ===============================
 config.py:18
   /private/tmp/plaita-b3-r100/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
@@ -558,7 +559,7 @@ plaita-console/backend/tests/console/test_r55_audit_observability.py::test_sched
 plaita-console/backend/tests/console/test_r55_audit_observability.py::test_schedule_crud_trigger_are_audited
 plaita-console/backend/tests/console/test_r55_audit_observability.py::test_schedule_crud_trigger_are_audited
 plaita-console/backend/tests/console/test_tenants.py::test_disable_tenant_stops_its_local_schedules
-  /private/tmp/plaita-b3-r100/plaita-console/backend/services/local_scheduler.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  /private/tmp/plaita-b3-r100/plaita-console/backend/services/schedule_store.py:92: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
     row.updated_at = datetime.utcnow()
 
 plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_record_fire_failure_does_not_replay_same_due
@@ -566,7 +567,7 @@ plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test
 plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_cron_success_advances_once_and_paused_skips
 plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_active_tenant_stale_snapshot_still_fires
 plaita-console/backend/tests/console/test_local_scheduler.py::test_due_schedule_auto_fires_and_records_history
-  /private/tmp/plaita-b3-r100/plaita-console/backend/services/local_scheduler.py:208: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  /private/tmp/plaita-b3-r100/plaita-console/backend/services/local_scheduler.py:123: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
     updated_at=datetime.utcnow(),
 
 plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_pre_delete_assets_are_visible
@@ -610,4 +611,4 @@ plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_delete_exec
     "start_time": datetime.utcnow().isoformat(),
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-1557 passed, 14 skipped, 14799 warnings in 223.23s (0:03:43)
+1577 passed, 14 skipped, 14799 warnings in 200.50s (0:03:20)
