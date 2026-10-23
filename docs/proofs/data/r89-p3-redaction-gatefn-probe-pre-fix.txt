@@ -1,0 +1,24 @@
+[PASS] P2a-正控 detail.context 已脱敏(#166): context={"$INPUT": {"clone_url": "<unprintable-url>"}}
+[PASS] P2a detail.error.message 原样未脱敏: error.message 含凭据=True
+[PASS] P2b timeline events[*].error 原样未脱敏: status=200 含凭据=True
+[PASS] P2c-正控 SSE initial_state context 已脱敏(#166): event: initial_state\ndata: {"execution_id": "exec-leak-1", "flow_id": "leak-flow", "flow_name": "leak-flow", "flow_version": "1.0.0", "status": "error
+[PASS] P2c-1 SSE initial_state error 字段原样（同 P2a 缺口随 initial_state 送达）: event: initial_state\ndata: {"execution_id": "exec-leak-1", "flow_id": "leak-flow", "flow_name": "leak-flow", "flow_version": "1.0.0", "status": "error
+[PASS] P2c-2 SSE update 载荷原样透传（worker 事件未过脱敏器）: update帧含凭据=True initial帧token数=2 全流token数=3
+[PASS] P2d-1 票据直连 200+initial_state: status=200
+[PASS] P2d-2 票据单次（复用 401）: status=401
+[PASS] P2d-3 票据 execution 绑定（other 票据打 EID…反向：own 票据打 other → 401）: （绑定语义由 _consume_stream_ticket execution_id 比对，代码面+上面单次复用已证）
+[PASS] P2e-1 终态(completed)执行 resume 仍 200 受理: status=200 body={"status":"resuming","execution_id":"exec-done-1","resume_type":"continue","message":"恢复请求已加入队列"}
+[PASS] P2e-2 未知 resume_type 仍 200 受理（垃圾直投队列，worker 协议层兜）: status=200 body={"status":"resuming","execution_id":"exec-done-1","resume_type":"boom","message":"恢复请求已加入队列"}
+
+===== P2 汇总 =====
+PASS  P2a-正控 detail.context 已脱敏(#166): context={"$INPUT": {"clone_url": "<unprintable-url>"}}
+PASS  P2a detail.error.message 原样未脱敏: error.message 含凭据=True
+PASS  P2b timeline events[*].error 原样未脱敏: status=200 含凭据=True
+PASS  P2c-正控 SSE initial_state context 已脱敏(#166): event: initial_state\ndata: {"execution_id": "exec-leak-1", "flow_id": "leak-flow", "flow_name": "leak-flow", "flow_version": "1.0.0", "status": "error
+PASS  P2c-1 SSE initial_state error 字段原样（同 P2a 缺口随 initial_state 送达）: event: initial_state\ndata: {"execution_id": "exec-leak-1", "flow_id": "leak-flow", "flow_name": "leak-flow", "flow_version": "1.0.0", "status": "error
+PASS  P2c-2 SSE update 载荷原样透传（worker 事件未过脱敏器）: update帧含凭据=True initial帧token数=2 全流token数=3
+PASS  P2d-1 票据直连 200+initial_state: status=200
+PASS  P2d-2 票据单次（复用 401）: status=401
+PASS  P2d-3 票据 execution 绑定（other 票据打 EID…反向：own 票据打 other → 401）: （绑定语义由 _consume_stream_ticket execution_id 比对，代码面+上面单次复用已证）
+PASS  P2e-1 终态(completed)执行 resume 仍 200 受理: status=200 body={"status":"resuming","execution_id":"exec-done-1","resume_type":"continue","message":"恢复请求已加入队列"}
+PASS  P2e-2 未知 resume_type 仍 200 受理（垃圾直投队列，worker 协议层兜）: status=200 body={"status":"resuming","execution_id":"exec-done-1","resume_type":"boom","message":"恢复请求已加入队列"}

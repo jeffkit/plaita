@@ -68,19 +68,18 @@ def _client(redis, *, local=None) -> TestClient:
     return TestClient(app)
 
 
-def _seed(redis, eid: str, context=None, status: str = "suspended") -> None:
-    redis.set(
-        f"plaita:execution:{eid}",
-        json.dumps(
-            {
-                "execution_id": eid,
-                "flow_id": "f1",
-                "flow_version": "1.0.0",
-                "status": status,
-                "context": {"$INPUT": PARAMS, "$LAST_NODE": "start"} if context is None else context,
-            }
-        ),
-    )
+def _seed(redis, eid: str, context=None, status: str = "suspended",
+          error: dict | None = None) -> None:
+    row = {
+        "execution_id": eid,
+        "flow_id": "f1",
+        "flow_version": "1.0.0",
+        "status": status,
+        "context": {"$INPUT": PARAMS, "$LAST_NODE": "start"} if context is None else context,
+    }
+    if error is not None:
+        row["error"] = error
+    redis.set(f"plaita:execution:{eid}", json.dumps(row))
 
 
 def _assert_no_needle(text: str) -> None:
@@ -175,6 +174,181 @@ class TestDetailRepresentationIsRedacted:
         _assert_no_needle(r.text)
 
 
+# A2R49-02：error 是 #166 字段集的**第五字段**——worker 写
+# ``state.error = {"message": str(e), **_error_fields(e)}``，``message`` 是
+# 原样异常文本（``_error_fields`` 的结构化 ``response`` 自带脱敏，``message``
+# 没有），与 ``context`` 同一威胁模型（同租户 viewer 可读）。
+ERROR_NEEDLE = "sk-live-error-face-needle"
+ERROR_MESSAGE = (
+    "节点执行失败: requests.ConnectionError: Max retries exceeded with "
+    "url: /api/run?token=" + ERROR_NEEDLE
+)
+
+
+def _error_seed(redis, eid: str, message: str) -> None:
+    _seed(redis, eid, status="error", error={
+        "code": -500,
+        "error_type": "NodeExecutionError",
+        "message": message,
+    })
+
+
+def _assert_no_error_needle(text: str) -> None:
+    leaked = [n for n in NEEDLES if n in text] + (
+        [ERROR_NEEDLE] if ERROR_NEEDLE in text else []
+    )
+    assert not leaked, f"执行表示里仍留着明文凭据：{leaked}\n{text[:600]}"
+
+
+class TestErrorFaceIsRedacted:
+    """``error`` 读面（detail / SSE ``initial_state``）——第五字段同判。"""
+
+    def test_cluster_detail_error_message_has_no_needle(self):
+        redis = FakeRedis(decode_responses=True)
+        _error_seed(redis, "e166-5", ERROR_MESSAGE)
+
+        r = _client(redis).get("/api/executions/e166-5")
+
+        assert r.status_code == 200, r.text
+        _assert_no_error_needle(r.text)
+
+    def test_cluster_detail_error_keeps_diagnosis_and_shape(self):
+        """负控：脱敏是具名的——非凭据诊断文本与结构化字段原样。
+
+        消息刻意不带 ``key: 'value'`` / URL / ``token=`` 形（那是掩码族与
+        读面共用的既有判据，见 ``_mask_credential_runs``；本单不新起判据）。
+        """
+        redis = FakeRedis(decode_responses=True)
+        message = "节点执行失败（重试 3 次后仍失败）: 节点 boom 执行超时"
+        _error_seed(redis, "e166-6", message)
+
+        err = _client(redis).get("/api/executions/e166-6").json()["error"]
+
+        assert err["message"] == message
+        assert err["code"] == -500
+        assert err["error_type"] == "NodeExecutionError"
+
+    def test_sse_initial_state_error_face_has_no_needle(self, monkeypatch):
+        """集群档 ``initial_state`` 是整行表示——``error`` 随行，同一条脱敏。"""
+        redis = FakeRedis(decode_responses=True)
+        first = TestSseInitialStateIsRedacted()._first_event(
+            monkeypatch, redis, "e166-7",
+            error={"code": -500, "error_type": "NodeExecutionError",
+                   "message": ERROR_MESSAGE},
+        )
+        text = first if isinstance(first, str) else json.dumps(first, default=str)
+
+        assert "initial_state" in text, text[:300]
+        _assert_no_error_needle(text)
+
+    def test_sse_initial_state_row_timeline_error_has_no_needle(self, monkeypatch):
+        """整行里的 ``timeline.events[*].error``（worker 落盘事件流）同判——
+
+        A2R49-02 探针残面：``/timeline`` 端点已 scrub 不代表随整行 dump 的
+        ``timeline`` 字段也 scrub 过。
+        """
+        redis = FakeRedis(decode_responses=True)
+        row = {
+            "execution_id": "e166-8b",
+            "flow_id": "f1",
+            "flow_version": "1.0.0",
+            "status": "error",
+            "timeline": {"events": [
+                {"seq": 1, "type": "node_end", "node_id": "call", "ok": False,
+                 "error": "ConnectionError: url /api/run?token=" + ERROR_NEEDLE},
+            ], "dropped": 0, "max_events": 500},
+        }
+        redis.set("plaita:execution:e166-8b", json.dumps(row))
+        first = TestSseInitialStateIsRedacted()._first_event(
+            monkeypatch, redis, "e166-8b")
+        text = first if isinstance(first, str) else json.dumps(first, default=str)
+
+        assert "initial_state" in text, text[:300]
+        assert ERROR_NEEDLE not in text, text[:400]
+
+
+class TestSseUpdatePayloadScrub:
+    """集群档 update 帧的接码侧 scrub（``_scrub_update_payload``）。
+
+    worker 是频道唯一发布者、事件 ``error`` 在构造处已过 scrub；消费侧再兜
+    一层是给滚动部署窗（旧版 worker 仍在发布未 scrub 载荷）与非 worker
+    写入方的 fail-closed 面。
+    """
+
+    def test_raw_event_payload_error_is_scrubbed(self):
+        from api.executions import _scrub_update_payload
+
+        raw = json.dumps({
+            "execution_id": "e1", "seq": 4, "type": "node_end",
+            "node_id": "call2", "attempt": 1, "ok": False,
+            "error": "ConnectionError: url /api/run?token=" + ERROR_NEEDLE,
+        }, ensure_ascii=False)
+
+        out = _scrub_update_payload(raw)
+
+        assert ERROR_NEEDLE not in out
+        assert "ConnectionError" in out
+
+    def test_clean_payload_is_byte_identical(self):
+        """scrub 无变化时保持原字节（零重序列化）。"""
+        from api.executions import _scrub_update_payload
+
+        raw = json.dumps({
+            "execution_id": "e1", "seq": 5, "type": "run_end",
+            "status": "completed", "final": True,
+        }, ensure_ascii=False)
+
+        assert _scrub_update_payload(raw) == raw
+
+    def test_non_json_payload_passes_through(self):
+        from api.executions import _scrub_update_payload
+
+        assert _scrub_update_payload("not-json") == "not-json"
+        assert _scrub_update_payload("[1, 2]") == "[1, 2]"
+
+
+def _sse_first_event(monkeypatch, redis, eid: str, *, error: dict | None = None):
+    """驱动 ``stream_execution_endpoint`` 取首帧（``error`` 注入执行行）。"""
+    import anyio
+    from starlette.requests import Request
+
+    monkeypatch.setattr("config.get_settings", lambda: _settings())
+    monkeypatch.setattr("auth.get_settings", lambda: _settings())
+    _seed(redis, eid, error=error)
+
+    app = FastAPI()
+    app.state.redis = redis
+    app.state.local_mode = False
+    app.state.execution_sse_aioredis = _StubAsyncClient()
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": f"/api/executions/{eid}/stream",
+            "raw_path": f"/api/executions/{eid}/stream".encode(),
+            "query_string": b"",
+            "root_path": "",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "headers": [(b"x-admin-api-key", ADMIN_KEY.encode())],
+            "path_params": {"execution_id": eid},
+            "app": app,
+        }
+    )
+
+    async def _run():
+        response = await executions_api.stream_execution_endpoint(request)
+        agen = response.body_iterator
+        try:
+            return await agen.__anext__()
+        finally:
+            await agen.aclose()
+
+    return anyio.run(_run)
+
+
 class TestSseInitialStateIsRedacted:
     """SSE ``initial_state`` 同样是整行执行表示——同一条脱敏必须覆盖它。
 
@@ -182,45 +356,8 @@ class TestSseInitialStateIsRedacted:
     pubsub 客户端换成桩——这样「路由有没有把脱敏接上」是自测的，而不是靠读代码。
     """
 
-    def _first_event(self, monkeypatch, redis, eid: str):
-        import anyio
-        from starlette.requests import Request
-
-        monkeypatch.setattr("config.get_settings", lambda: _settings())
-        monkeypatch.setattr("auth.get_settings", lambda: _settings())
-        _seed(redis, eid)
-
-        app = FastAPI()
-        app.state.redis = redis
-        app.state.local_mode = False
-        app.state.execution_sse_aioredis = _StubAsyncClient()
-        request = Request(
-            {
-                "type": "http",
-                "http_version": "1.1",
-                "method": "GET",
-                "scheme": "http",
-                "path": f"/api/executions/{eid}/stream",
-                "raw_path": f"/api/executions/{eid}/stream".encode(),
-                "query_string": b"",
-                "root_path": "",
-                "server": ("testserver", 80),
-                "client": ("testclient", 50000),
-                "headers": [(b"x-admin-api-key", ADMIN_KEY.encode())],
-                "path_params": {"execution_id": eid},
-                "app": app,
-            }
-        )
-
-        async def _run():
-            response = await executions_api.stream_execution_endpoint(request)
-            agen = response.body_iterator
-            try:
-                return await agen.__anext__()
-            finally:
-                await agen.aclose()
-
-        return anyio.run(_run)
+    def _first_event(self, monkeypatch, redis, eid: str, *, error: dict | None = None):
+        return _sse_first_event(monkeypatch, redis, eid, error=error)
 
     def test_initial_state_event_has_no_needle(self, monkeypatch):
         first = self._first_event(monkeypatch, FakeRedis(decode_responses=True), "e166-4")

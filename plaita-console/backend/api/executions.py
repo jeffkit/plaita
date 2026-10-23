@@ -631,9 +631,17 @@ def find_flow_version_active_executions(
 # ``assignment(output="$INPUT")`` / ``end(output="$INPUT")`` 会整份回显入参，
 # http 节点响应体也整段进 ``nodes[*].output``。遍历面因此扩到这四个字段；
 # ``redact_credential_values`` 已支持 list 递归，无需新判据。
+#
+# A2R49-02：``error`` 是第五字段——worker 写 ``state.error = {"message":
+# str(e), **_error_fields(e)}``，``message`` 是原样异常文本（结构化
+# ``response`` 自带脱敏，``message`` 没有），与 ``context`` 同一威胁模型。
+# ``timeline``（worker 落盘的事件流，``events[*].error`` 同为 str(exception)）
+# 随整行进 SSE ``initial_state``——同一批第六字段（detail 响应的
+# ``ExecutionInfo`` 不含 timeline，此字段只服务整行 dump 的 SSE 面）。
 def _redact_execution_view(info: Dict[str, Any]) -> Dict[str, Any]:
-    """执行表示的读面副本：``context`` / ``input`` / ``output`` / ``nodes``
-    里的凭据值换占位（#166；遍历面扩至 ``output``/``nodes`` 见 #222）。
+    """执行表示的读面副本：``context`` / ``input`` / ``output`` / ``nodes`` /
+    ``error`` / ``timeline`` 里的凭据值换占位（#166；遍历面扩至
+    ``output``/``nodes`` 见 #222，扩至 ``error``/``timeline`` 见 A2R49-02）。
 
     返回**新 dict**（每个被遍历的字段也是新对象；``nodes`` 是 list-of-dict，
     ``redact_credential_values`` 已递归 list）：调用方拿到的盘上对象本体一个
@@ -644,7 +652,7 @@ def _redact_execution_view(info: Dict[str, Any]) -> Dict[str, Any]:
     （含凭据）回显到这两处，故与 ``context``/``input`` 同属读面（#222）。
     """
     out = dict(info)
-    for field in ("context", "input", "output", "nodes"):
+    for field in ("context", "input", "output", "nodes", "error", "timeline"):
         value = out.get(field)
         if value is not None:
             out[field] = redact_credential_values(value)
@@ -3161,6 +3169,30 @@ def _execution_stream_async_redis(request: Request):
     return get_sse_async_redis(request)
 
 
+def _scrub_update_payload(payload: str) -> str:
+    """A2R49-02：SSE update 帧载荷的时间线事件 ``error``/``reason`` 过 scrub。
+
+    载荷是 worker 发布的时间线事件 JSON（频道唯一发布者，事件 ``error`` 在
+    ``execution_timeline._error_text`` 构造处已过 scrub）；这里在**消费侧**
+    再兜一层——滚动部署窗内旧版 worker 仍在发布未 scrub 的存量载荷，且
+    频道写入方不受 console 控制。解析失败（非事件 JSON）原样透传；scrub
+    无变化时保持原字节（零改写零重序列化）。
+    """
+    try:
+        obj = json.loads(payload)
+    except (ValueError, TypeError):
+        return payload
+    if not isinstance(obj, dict):
+        return payload
+    try:
+        scrubbed = _scrub_timeline_events([obj])[0]
+    except Exception:  # noqa: BLE001 — 清洗失败不得炸流，载荷按原样消费
+        return payload
+    if scrubbed == obj:
+        return payload
+    return json.dumps(scrubbed, ensure_ascii=False, default=str)
+
+
 async def _execution_event_stream(request: Request, data: Dict[str, Any], channel: str):
     """集群档 SSE 事件流（redis.asyncio pubsub，非阻塞消费）。
 
@@ -3205,7 +3237,7 @@ async def _execution_event_stream(request: Request, data: Dict[str, Any], channe
                 if isinstance(payload, bytes):
                     payload = payload.decode("utf-8", "replace")
                 if payload is not None:
-                    yield {"event": "update", "data": payload}
+                    yield {"event": "update", "data": _scrub_update_payload(payload)}
 
             # 检查客户端是否断开
             if await request.is_disconnected():
@@ -3275,8 +3307,9 @@ async def stream_execution_endpoint(request: Request):
 
     channel = f"plaita:execution:events:{execution_id}"
     # #166：cluster 档的 initial_state 是整行执行表示（含 context.$INPUT），
-    # 与详情路由共用同一条脱敏；update 事件是 worker 发布的事件载荷（另一个面，
-    # 不在本单口径内）。
+    # 与详情路由共用同一条脱敏；update 事件是 worker 发布的时间线事件载荷
+    # （A2R49-02 起同在口径内）：worker 是频道唯一发布者，事件 ``error``
+    # 在构造处（execution_timeline._error_text）已过 _scrub_url_text。
     return EventSourceResponse(
         _execution_event_stream(request, _redact_execution_view(dict(data)), channel)
     )
@@ -3301,6 +3334,29 @@ _TIMELINE_NODE_START = "node_start"
 _TIMELINE_NODE_END = "node_end"
 
 
+def _scrub_timeline_events(events: List[Any]) -> List[Any]:
+    """A2R49-02：信封内 ``events[*].error``/``reason`` 过 ``_scrub_url_text``。
+
+    事件 ``error`` 是 ``str(exception)`` 原样（worker 侧
+    ``execution_timeline._error_text`` 构造、本地档 nodes trace 直拷），落盘
+    早于本次修复的存量行只有读面能兜；scrub 放在**信封构造处**（FastAPI
+    序列化之前），集群/本地两路投影共用。只抹凭据分量，诊断语义原样；
+    ``error`` 为 None（成功节点）不动。
+    """
+    out: List[Any] = []
+    for event in events:
+        if not isinstance(event, dict):
+            out.append(event)
+            continue
+        scrubbed = dict(event)
+        for key in ("error", "reason"):
+            value = scrubbed.get(key)
+            if isinstance(value, str) and value:
+                scrubbed[key] = _scrub_url_text(value)
+        out.append(scrubbed)
+    return out
+
+
 def _timeline_envelope(execution_id: Optional[str], status: Optional[str],
                        source: str, timeline: Optional[Dict[str, Any]],
                        *, collected: bool, start_time: Any = None,
@@ -3320,7 +3376,7 @@ def _timeline_envelope(execution_id: Optional[str], status: Optional[str],
         "status": status,
         "source": source,
         "collected": collected,
-        "events": events,
+        "events": _scrub_timeline_events(events),
         "dropped": int(tl.get("dropped") or 0),
         "max_events": tl.get("max_events"),
         "enqueued_at": tl.get("enqueued_at"),
