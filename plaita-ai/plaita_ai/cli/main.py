@@ -16,6 +16,7 @@ from plaita_ai.flow_runner import (
     result_json,
     run_flow,
 )
+from plaita_ai.json_guard import GuardedJsonError, guarded_json_loads
 
 
 def _read_source(path: Optional[str], stdin: bool) -> str:
@@ -26,10 +27,15 @@ def _read_source(path: Optional[str], stdin: bool) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def _load_json_arg(raw: Optional[str], default: Any) -> Any:
+def _load_json_arg(raw: Optional[str], default: Any, *, what: str = "JSON argument") -> Any:
     if raw is None:
         return default
-    return json.loads(raw)
+    try:
+        return guarded_json_loads(raw, what=what)
+    except GuardedJsonError as exc:
+        # 入口语义：具名错误退出（非 0 rc），不裸穿 traceback——深嵌套参数
+        # （~12k 层 ~24KB）同样在此收口（cmd_run --input/--globals）。
+        raise SystemExit(f"error: {exc}") from exc
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
@@ -54,8 +60,8 @@ def cmd_emit(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     source = _read_source(args.source, args.stdin)
-    inputs = _load_json_arg(args.input, {})
-    globals_ctx = _load_json_arg(args.globals, None)
+    inputs = _load_json_arg(args.input, {}, what="--input")
+    globals_ctx = _load_json_arg(args.globals, None, what="--globals")
     result = run_flow(
         source,
         inputs,

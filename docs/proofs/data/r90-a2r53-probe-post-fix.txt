@@ -1,0 +1,28 @@
+
+[R53-03a/对照绿] sup_evaluate 普通坏 JSON → {'status': 'no_proposal', 'reason': 'proposer produced no definition'}（ValueError 被捕，优雅）
+.
+[R53-03a] sup_evaluate 深嵌套 proposal_json（24000B）→ NoneType 穿出工具体（:85-88 try 只捕 ValueError；ToolNode 零包裹 → 穿出引擎节点层；同函数对 ValueError 已优雅=守卫存在但窄口径）
+.[R53-03b/对照绿] _parse_legacy_json 普通坏 JSON → None（ValueError 被捕）
+.
+[R53-03b] _parse_legacy_json 深嵌套 LLM 回复 → NoneType 穿出（supervisor.py:216/222 只捕 ValueError；judges.py 同输入形状已示范 except Exception 全拦降级 unavailable）
+.
+[R53-03c] _emit_current_source 深嵌套 definition → NoneType 穿出（docstring 承诺「任何失败都降级为空串」，实现只捕 ValueError/SyntaxError——承诺与实现不符）
+.
+[R53-03d] _extract_rationale 深嵌套 rationale（72013B）→ NoneType 穿出（supervisor.py:387-390 只捕 ValueError；rationale 由 LLM 回复自控，同族窄口径）
+.
+[A2R53 矿脉③ 清点] LLM/工具回调 JSON 解析点 try 覆盖面：
+  judges.py:153/161                      judge 回复解析×2                       except Exception             达标（A2R45-02 修）
+  judges.py:113-124                      judge 输入序列化                        except Exception             达标（A2R46-01 修）
+  supervisor_flow.py:73                  sup_propose                        裸（无 try）                     A2R52-05 已录 P3
+  supervisor_flow.py:86                  sup_evaluate                       except ValueError            本格 R53-03a 实弹红
+  supervisor.py:216/222                  PromptProposer._parse_legacy_json  except ValueError            本格 R53-03b 实弹红
+  supervisor.py:156                      PromptProposer._emit_current_source except ValueError+SyntaxError 本格 R53-03c 实弹红（docstring 承诺失守）
+  supervisor.py:388                      FlowSourceProposer._extract_rationale except ValueError            本格 R53-03d 实弹红
+  mcp/server.py:111                      flow_compile definition            except ValueError            A2R52-06 已录扩展面
+  react/tools.py:80/83                   plaita_run_flow inputs/globals     裸（无 try）                     A2R52-05 已录 code-read
+  ops_mcp.py:188/209/238/239/293/304     ops 工具×6                           _guarded 窄口径                 A2R52-06 已录 P3
+  evals.py:78                            Dataset._load_file                 except (OSError, ValueError) 本地文件面，低危可容忍
+  ⇒ 系统性结论：主链（judges/evaluate_proposal）已达标，supervisor 族与 ops/_guarded 仍是 ValueError 窄口径；建议 B 线一轮收口=统一 guarded helper
+.
+7 passed in 0.35s
+probe53-post-rc=0

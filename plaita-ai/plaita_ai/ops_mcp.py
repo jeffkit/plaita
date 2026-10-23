@@ -14,6 +14,7 @@ import json
 from typing import Any, Dict, Optional
 
 from plaita_ai.console_client import ConsoleClient, ConsoleClientError, client_from_env
+from plaita_ai.json_guard import guarded_json_loads
 from plaita_ai.ops import flow_metrics, flow_versions, version_diff
 from plaita_ai.supervisor import (
     FlowSourceProposer,
@@ -44,7 +45,11 @@ def _json(payload: Any) -> str:
 
 
 def _guarded(fn):
-    """Run a tool body, turning ConsoleClientError into an ok:false payload.
+    """Run a tool body, turning any failure into an ok:false payload.
+
+    judges.py 口径（A2R52-06 收口）：从工具体穿出的任何异常都是「本次调用
+    不可用」，不是部分结果——ConsoleClientError 带 detail，其余（含深嵌套
+    载荷的 RecursionError 这类 RuntimeError 族）按类型名具名降级，不穿出。
 
     functools.wraps + an explicit ``__signature__`` keep FastMCP's schema
     generation (name, doc, parameter types) pointed at the real function.
@@ -56,7 +61,7 @@ def _guarded(fn):
             return _json(fn(*args, **kwargs))
         except ConsoleClientError as exc:
             return _json({"ok": False, "error": str(exc), "detail": exc.detail})
-        except (ValueError, KeyError) as exc:
+        except Exception as exc:  # noqa: BLE001 — 兜底口径=judges.py（A2R52-06：RecursionError 族不得穿出）
             return _json({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
     wrapper.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]
@@ -185,7 +190,7 @@ def register(mcp: Any) -> None:
         Args:
             params_json: JSON object passed as flow input fields.
         """
-        params = json.loads(params_json) if params_json else {}
+        params = guarded_json_loads(params_json, what="params_json") if params_json else {}
         started = _get_client().start_execution(flow_id, version=version, params=params)
         if wait and started.get("execution_id"):
             return _get_client().wait_execution(str(started["execution_id"]), timeout_s=timeout_s)
@@ -206,7 +211,10 @@ def register(mcp: Any) -> None:
             flow_json: Flow definition as a JSON string.
             input_json: JSON object passed as flow input.
         """
-        return _get_client().dry_run(flow_json, input=json.loads(input_json) if input_json else {})
+        # 先解析后取 client：input_json 坏形状（含深嵌套 RecursionError）
+        # 的具名降级不依赖 console 配置是否在场。
+        inputs = guarded_json_loads(input_json, what="input_json") if input_json else {}
+        return _get_client().dry_run(flow_json, input=inputs)
 
     # -- evaluation -----------------------------------------------------------
 
@@ -235,8 +243,8 @@ def register(mcp: Any) -> None:
         regressed case ids."""
         from plaita_ai.evals import compare
 
-        base = json.loads(base_json)
-        candidate = json.loads(candidate_json)
+        base = guarded_json_loads(base_json, what="base_json")
+        candidate = guarded_json_loads(candidate_json, what="candidate_json")
         return compare(base, candidate)
 
     # -- supervisor ---------------------------------------------------------
@@ -290,7 +298,7 @@ def register(mcp: Any) -> None:
         Returns both outputs side by side — the zero-risk pre-promote check."""
         from plaita_ai.canary import shadow_once
 
-        params = json.loads(params_json) if params_json else {}
+        params = guarded_json_loads(params_json, what="params_json") if params_json else {}
         return shadow_once(_get_client(), flow_id, candidate_version, params, baseline_version=baseline_version)
 
     @mcp.tool()
@@ -301,5 +309,8 @@ def register(mcp: Any) -> None:
         "records"} dict)."""
         from plaita_ai.canary import CanaryRun
 
-        run = CanaryRun.from_dict(_get_client(), json.loads(state_json))
+        # 先解析后取 client：state_json 坏形状（含深嵌套 RecursionError）
+        # 的具名降级不依赖 console 配置是否在场。
+        state = guarded_json_loads(state_json, what="state_json")
+        run = CanaryRun.from_dict(_get_client(), state)
         return run.verdict(min_count=min_count, tolerance=tolerance)

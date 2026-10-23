@@ -29,6 +29,7 @@ from plaita_ai.agent.fot.tools import register_tools_from_module, tool
 from plaita_ai.console_client import ConsoleClient
 from plaita_ai.evals import Dataset
 from plaita_ai.flow_runner import run_flow
+from plaita_ai.json_guard import GuardedJsonError, guarded_json_loads
 from plaita_ai.supervisor import Proposer, Supervisor, SupervisorPolicy
 
 SUPERVISOR_FLOW_SOURCE = '''
@@ -70,9 +71,15 @@ def make_tools_module(
     def sup_propose(context_json: str) -> str:
         """Ask the session's proposer for one improved definition.
         Returns {"definition": "...", "rationale": "..."} or {"error": "..."}."""
-        context = json.loads(context_json)
         if sup.proposer is None:
             return json.dumps({"error": "no proposer configured"})
+        # context_json 是上游工具体（sup_context）的产出、经引擎帧传回——
+        # 坏形状（含 ~12k 层深嵌套的 RecursionError，A2R52-05）按本工具的
+        # 契约形状具名降级为 {"error": ...}，不穿出工具体。
+        try:
+            context = guarded_json_loads(context_json, what="context_json")
+        except GuardedJsonError as exc:
+            return json.dumps({"error": str(exc)})
         proposal = sup.proposer.propose(context) or {}
         return json.dumps(proposal, ensure_ascii=False, default=str)
 
@@ -82,9 +89,11 @@ def make_tools_module(
         against the dataset, compare with the baseline, and return the gated
         verdict. Never publishes: on real improvement the verdict carries a
         promotion_ticket for a human to apply."""
+        # 不可解析 == 无提案（含深嵌套 RecursionError，A2R53-04①——try 窄口径
+        # 只捕 ValueError 时穿出工具体），统一走 no_proposal 优雅路径。
         try:
-            proposal = json.loads(proposal_json)
-        except ValueError:
+            proposal = guarded_json_loads(proposal_json, what="proposal_json")
+        except GuardedJsonError:
             proposal = {}
         if not proposal.get("definition"):
             return json.dumps({"status": "no_proposal", "reason": "proposer produced no definition"})
@@ -125,6 +134,9 @@ def run_supervisor_flow(
     if not result.ok:
         return {"status": "flow_error", "error": result.error}
     try:
+        # 同族口径（A2R53-04 收口）：verdict 串深嵌套时 json.loads 抛
+        # RecursionError（RuntimeError 族），原 (ValueError, TypeError) 窄
+        # 口径拦不住——任何解析失败都是「意外的 flow 输出」。
         return json.loads(result.result) if isinstance(result.result, str) else dict(result.result)
-    except (ValueError, TypeError):
+    except Exception:  # noqa: BLE001 — 同族口径收口（深嵌套 verdict 串 RecursionError 拦为 flow_error）
         return {"status": "flow_error", "error": f"unexpected flow output: {result.result!r}"}

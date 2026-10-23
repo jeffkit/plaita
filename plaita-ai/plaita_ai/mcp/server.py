@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 import logging
 import os
 import sys
@@ -19,6 +18,7 @@ from plaita_ai.flow_runner import (
     result_json,
     run_flow,
 )
+from plaita_ai.json_guard import GuardedJsonError, guarded_json_loads
 
 try:
     from plaita.dsl.codeflow import EmitError, emit_source
@@ -108,9 +108,9 @@ def flow_from_json(definition: str) -> str:
     if emit_source is None:  # pragma: no cover
         return result_json({"ok": False, "error": "plaita runtime with emit_source unavailable"})
     try:
-        ir = json.loads(definition)
-    except ValueError as exc:
-        return result_json({"ok": False, "error": f"definition is not valid JSON: {exc}"})
+        ir = guarded_json_loads(definition, what="definition")
+    except GuardedJsonError as exc:
+        return result_json({"ok": False, "error": str(exc)})
     try:
         source = emit_source(ir)
     except EmitError as exc:
@@ -147,10 +147,16 @@ def flow_run(
     Returns:
         JSON: {ok, result, error, error_type}
     """
-    inputs: Dict[str, Any] = json.loads(inputs_json or "{}")
-    globals_ctx: Optional[Dict[str, Any]] = None
-    if globals_json:
-        globals_ctx = json.loads(globals_json)
+    # inputs_json/globals_json 是调用方自控文本：~12k 层嵌套（~24KB）就能让
+    # json.loads 抛 RecursionError（A2R51-02），与坏语法同口径降级为具名
+    # ok:false 信封，不得穿出工具体。
+    try:
+        inputs: Dict[str, Any] = guarded_json_loads(inputs_json or "{}", what="inputs_json")
+        globals_ctx: Optional[Dict[str, Any]] = None
+        if globals_json:
+            globals_ctx = guarded_json_loads(globals_json, what="globals_json")
+    except GuardedJsonError as exc:
+        return result_json({"ok": False, "error": str(exc), "error_type": "GuardedJsonError"})
     result = run_flow(source, inputs, flow_id=flow_id, globals_ctx=globals_ctx)
     return result_json(result)
 

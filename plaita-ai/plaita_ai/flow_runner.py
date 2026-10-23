@@ -263,6 +263,21 @@ def dumps_json(data: Any) -> str:
 
 
 def result_json(data: Any) -> str:
-    if hasattr(data, "to_dict"):
-        return dumps_json(data.to_dict())
-    return dumps_json(data)
+    try:
+        if hasattr(data, "to_dict"):
+            return dumps_json(data.to_dict())
+        return dumps_json(data)
+    except Exception as exc:  # noqa: BLE001 — 盲捕是守卫本体（深嵌套/循环引用整族具名降级）
+        # result 由候选 flow 自控：深嵌套结构（~10k 层约 20KB）让 json.dumps
+        # 抛 RecursionError，循环引用抛 ValueError（A2R51-02 第二面）。这是
+        # 「结果不可序列化」，不是执行失败——以 RunResult 同形状的具名信封
+        # 降级，不穿出工具体（MCP/CLI/ReAct 三面共用此出口）。
+        return json.dumps(
+            {
+                "ok": False,
+                "result": None,
+                "error": f"result is not JSON-serializable: {type(exc).__name__}: {exc}"[:500],
+                "error_type": type(exc).__name__,
+            },
+            ensure_ascii=False,
+        )

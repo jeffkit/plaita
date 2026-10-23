@@ -25,6 +25,7 @@ from plaita_ai.agent.fot.prompts import format_compile_errors
 from plaita_ai.console_client import ConsoleClient, ConsoleClientError
 from plaita_ai.evals import Dataset, compare, evaluate
 from plaita_ai.flow_runner import compile_flow, get_skill_reference
+from plaita_ai.json_guard import GuardedJsonError, guarded_json_loads
 from plaita_ai.ops import latest_version, next_patch_version, parse_semver, published_version
 
 _log = logging.getLogger(__name__)
@@ -152,14 +153,17 @@ class PromptProposer:
             return ""
         ir = definition
         if isinstance(ir, str):
+            # docstring 承诺「任何失败都降级为空串」：深嵌套串让 json.loads
+            # 抛 RecursionError（A2R53-04③，ValueError 窄口径拦不住），
+            # literal_eval 兜底腿同样对任意失败收口。
             try:
-                ir = json.loads(ir)
-            except ValueError:
+                ir = guarded_json_loads(ir, what="definition")
+            except GuardedJsonError:
                 try:
                     import ast
 
                     ir = ast.literal_eval(ir)
-                except (ValueError, SyntaxError):
+                except Exception:  # noqa: BLE001 — docstring 承诺任何失败降级空串（RecursionError 含内）
                     return ""
         if not isinstance(ir, dict):
             return ""
@@ -213,14 +217,14 @@ class PromptProposer:
     @staticmethod
     def _parse_legacy_json(content: str) -> Optional[Dict[str, Any]]:
         try:
-            parsed = json.loads(content)
-        except ValueError:
+            parsed = guarded_json_loads(content, what="proposer reply")
+        except GuardedJsonError:
             start, end = content.find("{"), content.rfind("}")
             if start < 0 or end <= start:
                 return None
             try:
-                parsed = json.loads(content[start : end + 1])
-            except ValueError:
+                parsed = guarded_json_loads(content[start : end + 1], what="proposer reply")
+            except GuardedJsonError:
                 return None
         if not isinstance(parsed, dict) or not parsed.get("definition"):
             return None
@@ -384,9 +388,11 @@ current_definition (flow IR JSON):
         match = self._RATIONALE_RE.search(content)
         if not match:
             return ""
+        # rationale 块由 LLM 回复自控：深嵌套让 json.loads 抛 RecursionError
+        # （A2R53-04④），与坏 JSON 同口径降级空串。
         try:
-            parsed = json.loads(match.group(1))
-        except ValueError:
+            parsed = guarded_json_loads(match.group(1), what="rationale")
+        except GuardedJsonError:
             return ""
         return str(parsed.get("rationale", ""))[:500] if isinstance(parsed, dict) else ""
 
