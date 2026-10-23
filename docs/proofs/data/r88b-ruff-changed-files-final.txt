@@ -1,0 +1,153 @@
+# ruff check（本轮变更 py 文件：a3a1409f + 工作区收尾）rc=1：14 条全为 BLE001 前在裸 catch（与 r88 会话首跑 14 条同数——本轮零新增；#320 新增 except 已带 # noqa: BLE001）
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/core/strategies.py:1303:12
+     |
+1301 |         context.update_node_result(node, node_state)
+1302 |         return True
+1303 |     except Exception as e:
+     |            ^^^^^^^^^
+1304 |         error_state = node.on_error(context, f"Subscribe failed: {e}")
+1305 |         context.update_node_result(node, error_state)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:2113:16
+     |
+2111 |         try:
+2112 |             return bool(redis_client.exists(self._cancel_flag_key(execution_id)))
+2113 |         except Exception as e:
+     |                ^^^^^^^^^
+2114 |             logger.warning(
+2115 |                 "取消标志检查失败（视为未取消，下个步界重试）: %s: %s", execution_id, _scrub_url_text(e)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:2747:24
+     |
+2745 |                 try:
+2746 |                     self.flow_storage.diagnose_missing_flow(flow_id)
+2747 |                 except Exception as exc:
+     |                        ^^^^^^^^^
+2748 |                     logger.warning("flow_storage.diagnose_missing_flow(%s) failed: %s", flow_id, _scrub_exception_text(exc))
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:2761:16
+     |
+2759 |             logger.info("成功获取流程定义: %s, 数据: %s", flow_id, flow_definition.get('name', 'unknown'))
+2760 |             flow = Flow.model_validate(flow_definition)
+2761 |         except Exception as e:
+     |                ^^^^^^^^^
+2762 |             error_msg = f"解析流程定义失败: {e}"
+2763 |             logger.error(error_msg)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:3260:20
+     |
+3258 |                 elif callable(flusher):
+3259 |                     flusher()
+3260 |             except Exception as exc:
+     |                    ^^^^^^^^^
+3261 |                 logger.warning("观测回调终态收尾失败: %r: %s", handler, _scrub_exception_text(exc))
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:3275:24
+     |
+3273 |                 try:
+3274 |                     binder(execution)
+3275 |                 except Exception as exc:
+     |                        ^^^^^^^^^
+3276 |                     logger.warning("观测回调 bind_execution 失败: %r: %s", handler, _scrub_exception_text(exc))
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:3614:16
+     |
+3612 |             raise
+3613 |
+3614 |         except Exception as e:
+     |                ^^^^^^^^^
+3615 |             logger.error("执行流程出错: %s", _scrub_exception_text(e))
+3616 |             # 波次③步内取消：start 路径首个节点在途命中取消监听 →
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:7539:24
+     |
+7537 |                     queue.note_poison()
+7538 |                     acked = True
+7539 |                 except Exception as exc:
+     |                        ^^^^^^^^^
+7540 |                     # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
+7541 |                     # 刻意放在 except ValueError 之后——存储层抛出的
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8074:16
+     |
+8072 |         try:
+8073 |             status["queue"] = self._get_task_queue().stats()
+8074 |         except Exception as exc:
+     |                ^^^^^^^^^
+8075 |             status["queue_error"] = str(exc)
+8076 |         return status
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8088:16
+     |
+8086 |         try:
+8087 |             stats = self._get_task_queue().stats()
+8088 |         except Exception as exc:
+     |                ^^^^^^^^^
+8089 |             logger.warning("读取队列 stats 失败（/metrics 仅返回 worker 指标）: %s", _scrub_url_text(exc))
+8090 |             stats = {"stream_key": self.queue_name}
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8509:16
+     |
+8507 |             register()
+8508 |             logger.info("已加载外部节点模块: %s", mod_path)
+8509 |         except Exception as e:
+     |                ^^^^^^^^^
+8510 |             logger.error("外部节点模块加载失败 %s: %s", mod_path, _scrub_exception_text(e))
+8511 |             raise SystemExit(f"外部节点模块加载失败: {mod_path}")
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8610:12
+     |
+8608 |         worker.run()
+8609 |
+8610 |     except Exception as e:
+     |            ^^^^^^^^^
+8611 |         logger.error("流程工作器启动失败: %s", _scrub_url_text(e))
+8612 |         sys.exit(1)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/storage/fenced.py:226:16
+    |
+224 |                 execution_id,
+225 |             )
+226 |         except Exception as e:
+    |                ^^^^^^^^^
+227 |             logger.error("Fenced save execution state %s failed: %s", execution_id, _scrub_url_text(e))
+228 |             return False
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/storage/fenced.py:323:16
+    |
+321 |                 tombstone_payload,
+322 |             )
+323 |         except Exception as e:
+    |                ^^^^^^^^^
+324 |             logger.error(
+325 |                 "Fenced delete execution state %s failed: %s",
+    |
+
+Found 14 errors.

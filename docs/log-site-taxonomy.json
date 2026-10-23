@@ -3,16 +3,16 @@
   "issue": "plaita#168",
   "coverage_grep": "grep -rn \"logger\\.(info|warning|error|debug)\" plaita/",
   "counts": {
-   "grep_hit_lines": 815,
-   "ast_associated_calls": 799,
-   "interpolated_sites": 650,
+   "grep_hit_lines": 818,
+   "ast_associated_calls": 802,
+   "interpolated_sites": 653,
    "constant_message_sites": 149,
    "grep_false_hits": 16
   },
   "class_distribution": {
    "A": 249,
    "B": 85,
-   "C": 316,
+   "C": 319,
    "N/A": 165
   },
   "note": "site = 文件:行（验收 grep 命中行）；class ∈ A/B/C/D/N/A；判据=docs/log-site-taxonomy.md §3 与 scripts/log_site_taxonomy.py 规则表（一一对应）"
@@ -4311,6 +4311,16 @@
    "rationale": "exc ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）"
   },
   {
+   "site": "plaita/server/flow_worker.py:4895",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "_scrub_url_text(e)"
+   ],
+   "rationale": "_scrub_url_text(e) ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）"
+  },
+  {
    "site": "plaita/server/flow_worker.py:4779",
    "method": "error",
    "interp": true,
@@ -7552,6 +7562,28 @@
     "tenant_id"
    ],
    "rationale": "tenant_id ⇒ A（流程/运行实体标识（跨日志可回查））"
+  },
+  {
+   "site": "plaita/storage/base.py:69",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "_redact_env_value(raw)",
+    "PENDING_EVENT_DEADLINE_DEFAULT_SECONDS"
+   ],
+   "rationale": "_redact_env_value(raw) ⇒ C（环境投影值：插值变量在所在函数内赋值自 os.environ/os.getenv）; PENDING_EVENT_DEADLINE_DEFAULT_SECONDS ⇒ B（引擎常量（数值/键名/env 变量名/具名原因串））"
+  },
+  {
+   "site": "plaita/storage/base.py:75",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "_redact_env_value(raw)",
+    "PENDING_EVENT_DEADLINE_DEFAULT_SECONDS"
+   ],
+   "rationale": "_redact_env_value(raw) ⇒ C（环境投影值：插值变量在所在函数内赋值自 os.environ/os.getenv）; PENDING_EVENT_DEADLINE_DEFAULT_SECONDS ⇒ B（引擎常量（数值/键名/env 变量名/具名原因串））"
   },
   {
    "site": "plaita/storage/base.py:175",

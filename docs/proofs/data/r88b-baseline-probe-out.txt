@@ -1,0 +1,3 @@
+raised: ServiceDispatchError
+BASELINE dispatch_pending: null
+BASELINE pending attr: {'kind': 'service', 'ref_id': None, 'node_id': 'a', 'payload': {'service_type': 'delay', 'service_config': {'type': 'delay', 'delay_ms': 100}}, 'recorded_at': '2026-10-23T23:28:25.808295'}

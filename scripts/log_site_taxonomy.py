@@ -52,7 +52,7 @@ OVERRIDES: dict[tuple[str, str], tuple[str, str]] = {
         "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
     ("plaita/event/redis.py:2943", "task"): (
         "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
-    ("plaita/core/parallel_executor.py:104", "entry[0]"): (
+    ("plaita/core/parallel_executor.py:114", "entry[0]"): (
         "B", "fork 池缓存的 pid（消息模板 'cached pid %s'）"),
 }
 

@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional, List, Union
 from pydantic import BaseModel, Field
 
 from ..logger import logger
-from plaita.core.url_redaction import _scrub_url_text
+from plaita.core.url_redaction import _redact_env_value, _scrub_url_text
 
 
 class StateSerializationError(RuntimeError):
@@ -55,7 +55,11 @@ PENDING_EVENT_DEADLINE_DEFAULT_SECONDS = 30 * 86400
 
 
 def pending_event_deadline_default_seconds() -> float:
-    """读 ``PLAITA_PENDING_EVENT_DEADLINE_SECONDS`` 环境覆盖；非法值回落缺省。"""
+    """读 ``PLAITA_PENDING_EVENT_DEADLINE_SECONDS`` 环境覆盖；非法值回落缺省。
+
+    告警里的非法值经 :func:`_redact_env_value` 掩形（#151 C 类「env 投影」：
+    绝不回显值本体，只留长度/形态）。
+    """
     raw = os.environ.get("PLAITA_PENDING_EVENT_DEADLINE_SECONDS", "")
     if not raw:
         return float(PENDING_EVENT_DEADLINE_DEFAULT_SECONDS)
@@ -63,14 +67,14 @@ def pending_event_deadline_default_seconds() -> float:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "PLAITA_PENDING_EVENT_DEADLINE_SECONDS=%r 不是正数，回落缺省 %ss",
-            raw, PENDING_EVENT_DEADLINE_DEFAULT_SECONDS,
+            "PLAITA_PENDING_EVENT_DEADLINE_SECONDS=%s 不是正数，回落缺省 %ss",
+            _redact_env_value(raw), PENDING_EVENT_DEADLINE_DEFAULT_SECONDS,
         )
         return float(PENDING_EVENT_DEADLINE_DEFAULT_SECONDS)
     if value <= 0:
         logger.warning(
-            "PLAITA_PENDING_EVENT_DEADLINE_SECONDS=%r 不是正数，回落缺省 %ss",
-            raw, PENDING_EVENT_DEADLINE_DEFAULT_SECONDS,
+            "PLAITA_PENDING_EVENT_DEADLINE_SECONDS=%s 不是正数，回落缺省 %ss",
+            _redact_env_value(raw), PENDING_EVENT_DEADLINE_DEFAULT_SECONDS,
         )
         return float(PENDING_EVENT_DEADLINE_DEFAULT_SECONDS)
     return value

@@ -1,0 +1,4 @@
+[landing-gate] main 最近完成 run：2026-10-23T14:47:27Z 664d152 conclusion=success  |  merge: 并入 fix/e-line-wave1（r100:E 线第一切——#326 start 闸三格边界[读失败
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（664d152）
+[landing-gate] ✅ 允许落地

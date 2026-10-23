@@ -1,0 +1,68 @@
+
+[31m │  ⚠  Warning from the Material for MkDocs team[0m
+[31m │[0m
+[31m │[0m  MkDocs 2.0, the underlying framework of Material for MkDocs,
+[31m │[0m  will introduce backward-incompatible changes, including:
+[31m │[0m
+[31m │  × [0mAll plugins will stop working – the plugin system has been removed
+[31m │  × [0mAll theme overrides will break – the theming system has been rewritten
+[31m │  × [0mNo migration path exists – existing projects cannot be upgraded
+[31m │  × [0mClosed contribution model – community members can't report bugs
+[31m │  × [0mCurrently unlicensed – unsuitable for production use
+[31m │[0m
+[31m │[0m  Our full analysis:
+[31m │[0m
+[31m │[0m  [4mhttps://squidfunk.github.io/mkdocs-material/blog/2026/02/18/mkdocs-2.0/[0m
+[0m
+INFO    -  MERMAID2  - Initialization arguments: {'theme': '{\n  "dark": "dark",\n  "default": "default"\n}\n'}
+INFO    -  MERMAID2  - Using javascript library (10.4.0):
+   https://unpkg.com/mermaid@10.4.0/dist/mermaid.esm.min.mjs
+INFO    -  Cleaning site directory
+INFO    -  Building documentation to directory: /Users/kong/projects/infra4agent/plaita/docs-site/site
+INFO    -  mkdocstrings_handlers: Formatting signatures requires either Black or Ruff to be installed.
+INFO    -  MERMAID2  - Found superfences config: {'custom_fences': [{'name': 'mermaid', 'class': 'mermaid', 'format': functools.partial(<function fence_mermaid at 0x1055e1e40>, custom=True)}]}
+INFO    -  MERMAID2  - Found 'fence_mermaid_custom' function: activate custom loader for superfences
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page 'AI 集成（plaita-ai）': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page 'FoT Agent': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page 'MCP 服务': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '工具节点与数据源': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '架构': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '执行引擎': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '分层约束': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '总览': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '状态管理': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '断点续执': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page 'Checkpoint 概念': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page 'FlowWorker': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '外延服务': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '@flow DSL': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '流程编写方式': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page 'Agent 编排': found 2 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '审批流': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '队列触发': found 1 diagrams, adding scripts
+INFO    -  MERMAID2  - Custom loader activated
+INFO    -  MERMAID2  - Page '沙箱化 Coding Agent': found 1 diagrams, adding scripts
+INFO    -  Doc file 'distributed/flow-worker.md' contains a link '../guide/callbacks.md#集成-langfuse-plaita-obs-langfusecallback', but the doc 'guide/callbacks.md' does not contain an anchor '#集成-langfuse-plaita-obs-langfusecallback'.
+INFO    -  Doc file 'distributed/ops-runbook.md' contains a link 'flow-worker.md#start-dedup-受理状态机', but the doc 'distributed/flow-worker.md' does not contain an anchor '#start-dedup-受理状态机'.
+INFO    -  Doc file 'guide/code-dsl.md' contains a link '#子流程-childflow--child', but there is no such anchor on this page.
+INFO    -  Doc file 'guide/expressions.md' contains a link '#内置函数一览', but there is no such anchor on this page.
+INFO    -  Documentation built in 4.98 seconds

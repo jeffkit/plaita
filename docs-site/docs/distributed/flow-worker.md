@@ -737,6 +737,30 @@ flowchart TD
 | `trigger` | 触发归因（可选，A2R44-02）：调度触发的执行带 `{kind, schedule_id, schedule_name}`——触发侧写入 queued 占位行、worker 接管落行时随 start 消息透传并贯穿终态写；`None` = 手动启动/老执行 |
 | `node_timings` | 节点级耗时（可选）：`node_id → {started_at, ended_at, started_ms, ended_ms, duration_ms, total_duration_ms, attempts, failed}`。由 worker 按执行挂载的 `NodeTimingCallback` 采集、在落盘收口处写入；同节点多次执行（循环/重试）时 `duration_ms` 取最后一次、`total_duration_ms` 累计、`attempts` 计数。**老状态/宿主未挂采集器时为 `None`**，读取方必须按缺省处理。 |
 
+### 执行意图引用与写序（plaita#320，write-ahead state）
+
+四个新字段把「为什么停下、在等什么」从队列消息搬进状态行（**状态行是真相**）：
+
+| 字段 | 语义 |
+|------|------|
+| `pending` | 执行意图引用：`{kind: event\|timer\|service\|start\|cancel, ref_id, event_type, due_at, deadline, node_id, payload, recorded_at}`。本轮写路径产出 `event`（订阅等待，`deadline` 必填——超期可检可终局，缺省 30 天/`PLAITA_PENDING_EVENT_DEADLINE_SECONDS` 可调）与 `service`（外延服务派发凭据，原 `dispatch_pending` 的推广）两 kind。`node_id` = **最内层挂起节点**（嵌套帧栈对齐） |
+| `generation` | 复用 fence 世代（fenced CAS 落盘时盖章）；#321 对账器幂等键 `execution_id + generation` 的取值源 |
+| `progress_at` | 步提交前进时刻：行创建置 now、**仅 step_persist 刷新**（与看门狗刷的 `last_update_time` 正交——租约=活性、本字段=前进，长节点卡死双信号） |
+| `next_step` | 预分配的下一步 `{node_id, step_id, parent_step_id}`（`step_id` 键位留给 #322 step token）；挂起行/终态行为 None |
+
+写序纪律（不变量，`docs/WORKER_PROTOCOL.md` 为权威存档）：
+
+1. **挂起落盘 = 一次 CAS**：状态（suspended）+ pending 引用 + next_step 置 None
+   同写，先于载体物化（服务任务 rpush）；「落盘→物化」窗口被杀由 pending 补偿
+   （重投载体幂等补派恰一次，随后 pending 与 legacy `dispatch_pending` **双清**）。
+2. **终态迁移与 pending 清除同一次 CAS**：机械化于 `_persist_state_or_raise`
+   咽喉——终态写自动清 `pending`/`dispatch_pending`/`next_step`，终态行不可
+   能带 armed 引用。
+3. **事件消费与 running 迁移同一次 CAS 清 pending**（步界循环顶清、随下次落盘
+   生效）。
+4. `dispatch_pending` **已退役**：停写，仅作存量行的只读迁移别名
+   （`ExecutionState.effective_pending()` 读面惰性推导，不回写；90 天观察窗）。
+
 ## 存储后端
 
 生产路径（`FlowWorker` CLI / `create_storage_component`）仅支持同步契约后端：
