@@ -109,8 +109,9 @@ REASON_QUEUE_MISMATCH = "queue: mismatch"
 #: B75-01：候选没有可证明的消费队列（缺失/空白/非字符串）——**不等于**
 #: 默认队列。unknown 在默认 ``skip`` 策略下永不进入 ``allowed``/``target``。
 REASON_QUEUE_UNKNOWN = "queue: unknown"
-#: B2R31-01：配置族不同（queue/group/dlq/schema/namespace 任一）⇒ 不得派发。
-REASON_CONFIG_FAMILY_MISMATCH = "config: family mismatch"
+#: plaita#328：B2R31-01 的 ``REASON_CONFIG_FAMILY_MISMATCH`` 随逐消息 family
+#: 闸一起删除——拓扑一致性（queue/group/dlq/namespace）由 worker 启动校验
+#: 把守，本模块只保留队列维度（REASON_QUEUE_MISMATCH/UNKNOWN）。
 REASON_DISK = "disk: low free space"
 REASON_SATURATED = "saturated: active_tasks >= concurrency"
 REASON_DRAINING = "draining"
@@ -307,9 +308,6 @@ def build_capacity_block(
     concurrency: int = 1,
     sampled_at: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
-    config_family: Optional[str] = None,
-    config_generation: Optional[str] = None,
-    budget_generation: Optional[str] = None,
     deployment_epoch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """构造容量块（纯函数，可直接断言）。
@@ -328,15 +326,11 @@ def build_capacity_block(
         "concurrency": max(1, _as_int(concurrency, 1)),
         "sampled_at": sampled_at or _now_iso(),
     }
-    # B2R31-01：代际随容量块一起上报（dispatch plan/容量看板可发现混跑）。
-    for key, value in (
-        ("config_family", config_family),
-        ("config_generation", config_generation),
-        ("budget_generation", budget_generation),
-        ("deployment_epoch", deployment_epoch),
-    ):
-        if value is not None:
-            block[key] = value
+    # plaita#328：B2R31-01 三哈希（config_family/config_generation/
+    # budget_generation）不再随容量块上报——版本维度收敛为 wire schema + IR；
+    # deployment_epoch 是部署纪元（另一维度），保留。
+    if deployment_epoch is not None:
+        block["deployment_epoch"] = deployment_epoch
     if extra:
         for key, value in extra.items():
             block.setdefault(key, value)
@@ -373,11 +367,12 @@ def parse_capacity_block(raw: Any) -> Optional[Dict[str, Any]]:
         "concurrency": max(1, _as_int(data.get("concurrency"), 1)),
         "sampled_at": stale_at if isinstance(stale_at, str) else None,
     }
-    # 代际字段是增量：旧容量块没有它们时保持缺失（消费侧按 legacy）。
-    for key in ("config_family", "config_generation", "budget_generation", "deployment_epoch"):
-        value = data.get(key)
-        if value is not None:
-            parsed[key] = value
+    # deployment_epoch 是增量：旧容量块没有它时保持缺失。plaita#328：
+    # config_family/config_generation/budget_generation 三哈希已随逐消息
+    # family 闸一起删除，解析侧不再透传。
+    value = data.get("deployment_epoch")
+    if value is not None:
+        parsed["deployment_epoch"] = value
     return parsed
 
 
@@ -592,19 +587,9 @@ class DispatchCandidate:
             return DEFAULT_DISPATCH_QUEUE, QUEUE_SOURCE_ASSUMED_DEFAULT
         return None, "unknown"
 
-    @property
-    def config_family(self) -> Optional[str]:
-        """候选的配置族（metadata 优先，其次容量块；缺失 = legacy/未知）。"""
-        value = self.metadata.get("config_family") if isinstance(self.metadata, dict) else None
-        if not isinstance(value, str) or not value:
-            block = self.capacity or {}
-            value = block.get("config_family")
-        return value if isinstance(value, str) and value else None
-
     def reject_reason(
         self,
         queue_name: Optional[str] = None,
-        config_family: Optional[str] = None,
         unknown_queue_policy: Optional[str] = None,
     ) -> Optional[str]:
         """不可派发原因（前缀稳定，见 ``REASON_*``）；可派发返回 ``None``。
@@ -629,19 +614,8 @@ class DispatchCandidate:
                 )
             if source == QUEUE_SOURCE_DECLARED and resolved != queue_name:
                 return f"{REASON_QUEUE_MISMATCH} (worker consumes {resolved})"
-        # B2R31-01：family 是硬兼容键。只拒绝两端都明确且不同的候选；
-        # 缺失/legacy（存量 worker）放行——升级期不能让广播派发全停。
-        if (
-            config_family is not None
-            and config_family != "legacy"
-            and self.config_family is not None
-            and self.config_family != "legacy"
-            and self.config_family != config_family
-        ):
-            return (
-                f"{REASON_CONFIG_FAMILY_MISMATCH} "
-                f"(worker family {self.config_family})"
-            )
+        # plaita#328：B2R31-01 的 family 硬兼容键已删除——拓扑一致性在 worker
+        # 启动校验（连错队列的 worker 起不来），逐消息 family 闸不复存在。
         if self.status != "running":
             return {
                 "starting": REASON_STARTING,
@@ -701,7 +675,6 @@ def filter_dispatchable(
     candidates: Iterable[Any],
     *,
     queue_name: Optional[str] = None,
-    config_family: Optional[str] = None,
     unknown_queue_policy: Optional[str] = None,
 ) -> Tuple[List[DispatchCandidate], List[DispatchRejection]]:
     """容量门：``(可派候选, 被拒候选)``。
@@ -719,7 +692,7 @@ def filter_dispatchable(
     rejected: List[DispatchRejection] = []
     for item in candidates:
         cand = item if isinstance(item, DispatchCandidate) else DispatchCandidate.from_service_info(item)
-        reason = cand.reject_reason(queue_name, config_family, unknown_queue_policy)
+        reason = cand.reject_reason(queue_name, unknown_queue_policy)
         if reason is None:
             allowed.append(cand)
         else:
@@ -738,7 +711,6 @@ def select_dispatch_target(
     candidates: Iterable[Any],
     *,
     queue_name: Optional[str] = None,
-    config_family: Optional[str] = None,
     unknown_queue_policy: Optional[str] = None,
 ) -> Optional[DispatchCandidate]:
     """在容量门之上做确定性选择：剩余盘最多 → 在跑最少 → id 字典序。
@@ -750,7 +722,6 @@ def select_dispatch_target(
     allowed, _ = filter_dispatchable(
         candidates,
         queue_name=queue_name,
-        config_family=config_family,
         unknown_queue_policy=unknown_queue_policy,
     )
     if not allowed:
@@ -787,7 +758,6 @@ def decide_route(
     candidates: Iterable[Any],
     *,
     queue_name: Optional[str] = None,
-    config_family: Optional[str] = None,
     unknown_queue_policy: Optional[str] = None,
 ) -> RouteDecision:
     """容量路由（**唯一**实现）：队列维度 + 容量门 + 确定性排序 + 稳定原因。
@@ -836,7 +806,6 @@ def decide_route(
     allowed, rejected = filter_dispatchable(
         candidate_list,
         queue_name=queue_name,
-        config_family=config_family,
         unknown_queue_policy=policy,
     )
     if not allowed:

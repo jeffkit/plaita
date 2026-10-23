@@ -104,12 +104,14 @@ def _seed_quarantine(
     tenant: str = TENANT,
     schema_version: int = 1,
     execution_id: str = "exec-q-1",
-    with_generations: bool = True,
+    with_snapshot: bool = True,
     with_tenant_generation: bool = True,
 ) -> str:
-    """A125 收容信封（与 task_queue._quarantine_rejected_dead_letter 同形）。"""
-    from plaita.runtime_config import envelope_for_stream
+    """A125 收容信封（与 task_queue._quarantine_rejected_dead_letter 同形）。
 
+    plaita#328：信封不再带 config_* 代际哈希；``with_snapshot`` 种
+    ``max_deliveries`` 预算快照（回灌须按源快照继承）。
+    """
     envelope = {
         "reason": "max_deliveries=5",
         "source_stream": TARGET,
@@ -117,7 +119,6 @@ def _seed_quarantine(
         "delivery_count": 5,
         "dead_lettered_at": time.time(),
         "schema_version": schema_version,
-        "config_family": envelope_for_stream(TARGET, role="console")["config_family"],
         "tenant_write_rejected": "tenant_disabled",
         "quarantined": True,
         "payload": {
@@ -129,12 +130,8 @@ def _seed_quarantine(
             "params": {"x": 1},
         },
     }
-    if with_generations:
-        envelope.update(
-            config_generation="cfg1-" + "a" * 12,
-            budget_generation="bg1-" + "b" * 12,
-            config_effective_at="2026-10-23T00:00:00+00:00",
-        )
+    if with_snapshot:
+        envelope["max_deliveries"] = 7
     if with_tenant_generation:
         envelope["tenant_generation"] = "gen-2"
     return str(redis.xadd(quarantine_key, {"payload": json.dumps(envelope)}))
@@ -142,8 +139,6 @@ def _seed_quarantine(
 
 def _seed_dlq(redis, *, execution_id="exec-dlq-1") -> str:
     """纯 :dlq 信封（test_r53 同形，守恒对照）。"""
-    from plaita.runtime_config import envelope_for_stream
-
     envelope = {
         "reason": "max_deliveries=5",
         "source_stream": TARGET,
@@ -151,7 +146,6 @@ def _seed_dlq(redis, *, execution_id="exec-dlq-1") -> str:
         "delivery_count": 5,
         "dead_lettered_at": 1700000000.0,
         "schema_version": 1,
-        "config_family": envelope_for_stream(TARGET, role="console")["config_family"],
         "payload": {
             "type": "start",
             "flow_id": "f1",
@@ -222,13 +216,14 @@ class TestQuarantineReplay:
         assert payload["schema_version"] == 1
         assert redis.xlen(QKEY) == 0, "回灌成功后隔离条目必须摘除"
         assert redis.xlen(TARGET) == 1
-        # 源世代按信封继承（replay 不猜来源）。
+        # 源快照/世代按信封继承（replay 不猜来源；plaita#328 信封只剩
+        # schema_version + tenant_generation + max_deliveries 快照）。
         _, fields = redis.xrange(TARGET)[0]
         assert fields["schema_version"] == "1"
-        assert fields["config_generation"] == "cfg1-" + "a" * 12
-        assert fields["budget_generation"] == "bg1-" + "b" * 12
+        assert fields["max_deliveries"] == "7"
         assert fields["tenant_generation"] == "gen-2"
-        assert fields["config_effective_at"] == "2026-10-23T00:00:00+00:00"
+        for gone in ("config_family", "config_generation", "budget_generation", "config_effective_at"):
+            assert gone not in fields
         # 摘条后再打同一 id：条目已不在 → 具名 404（非 already_replayed）。
         r = client.post(
             f"/api/queues/dlq/{qid}/replay", json={"dlq_key": QKEY}, headers=_admin()
@@ -245,7 +240,7 @@ class TestQuarantineReplay:
         assert redis.xlen(QKEY) == 0
         _, fields = redis.xrange(TARGET)[0]
         assert "tenant_generation" not in fields
-        assert fields["config_generation"] == "cfg1-" + "a" * 12
+        assert fields["max_deliveries"] == "7"
 
     def test_failed_replay_keeps_entry(self, env):
         client, redis, _store = env

@@ -257,7 +257,8 @@ class TestConsumeLoopEpistemicPending:
         queue.ensure_group()
 
         poison = _poison_hget_manual(fake, TENANT_STATUS_KEY)
-        queue.enqueue(_start_body(exec_id="e326"))
+        # plaita#328：legacy 载体（无快照）——预算由上面的 worker._max_deliveries 旋钮裁判
+        queue.enqueue(_start_body(exec_id="e326"), max_deliveries=None)
         worker._running = True
         loop = threading.Thread(
             target=worker._consume_loop, args=(queue,), daemon=True

@@ -1,0 +1,63 @@
+...................................                                      [100%]
+=============================== warnings summary ===============================
+plaita-console/backend/config.py:18
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_dryrun_api.py: 11 warnings
+plaita-console/backend/tests/console/test_issue190_dryrun_node_capability.py: 9 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 19 warnings
+plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py: 10 warnings
+plaita-console/backend/tests/console/test_issue32_dryrun_dry_flag.py: 1 warning
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py: 1 warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 13 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:823: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:1009: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py::test_editor_dry_run_false_forced_to_dry_run_with_warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_dispatch_dry_run_and_logout_are_audited
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:185: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py::test_viewer_write_forbidden_by_editor_gate[dry-run]
+plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py::test_editor_dry_run_false_forced_to_dry_run_with_warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_dispatch_dry_run_and_logout_are_audited
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_dispatch_dry_run_and_logout_are_audited
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_dispatch_dry_run_and_logout_are_audited
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/users_svc.py:283: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py::TestDispatchOneDefaultsAreSafe::test_dry_run_is_the_second_gate
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py::TestDispatchOneDefaultsAreSafe::test_dry_run_is_the_second_gate
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py::TestDispatchHttpSurface::test_one_endpoint_defaults_to_dry_run
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py::TestDispatchHttpSurface::test_one_endpoint_defaults_to_dry_run
+  /Users/kong/projects/infra4agent/plaita/plaita/server/registry.py:236: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+35 passed, 1556 deselected, 92 warnings in 5.74s

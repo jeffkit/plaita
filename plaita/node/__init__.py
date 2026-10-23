@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Type
 
 from .assignment import Assignment, AssignmentError
 from .basic import Node
+from .capabilities import validate_execution_contract
 from .child import InlineFlow, ReferenceFlow
 from .code import CodeNode
 from .concurrent import Parallel
@@ -101,7 +102,13 @@ class NodeRegistry:
         覆盖已注册的**不同**类时发 warning——历史上静默顶掉（包括劫持内置
         ``start``/``end`` 等类型），排查时完全无线索。同类型重复注册（如
         importlib 重复加载场景）不告警。
+
+        plaita#330 §4：注册期执行能力契约——词表封闭 + ``is_suspending=True``
+        ⇒ ``execution_requirements`` 含 suspend token；违规具名拒绝
+        （``PLAITA_SUSPEND_GUARD=warn`` 降 WARNING 放行，见
+        plaita.node.capabilities）。
         """
+        validate_execution_contract(node_cls)
         existing = self._nodes.get(node_cls.node_type)
         if existing is not None and existing is not node_cls:
             _logger.warning(
@@ -179,6 +186,8 @@ class NodeRegistry:
 
     def _register_builtins(self) -> None:
         for cls in _BUILTIN_NODES:
+            # plaita#330 §4：内置节点同样过能力契约（声明回归在 import 期即红）。
+            validate_execution_contract(cls, context="builtin")
             self._nodes[cls.node_type] = cls
 
     def _discover_entry_points(self) -> None:
@@ -211,6 +220,9 @@ class NodeRegistry:
         for ep in eps:
             try:
                 node_cls = ep.load()
+                # plaita#330 §4：插件路径同闸——违规记入失败现场（#98 形制），
+                # 该节点不可用但发现过程与其余插件不受牵连。
+                validate_execution_contract(node_cls, context=f"plugin:{ep.name}")
                 self._nodes[node_cls.node_type] = node_cls
                 self._load_errors.pop(ep.name, None)
             except Exception as exc:

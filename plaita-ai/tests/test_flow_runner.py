@@ -65,3 +65,44 @@ def test_compile_and_run_share_validated_ir():
     ran = run_flow(BAD_SRC, {"name": "x"})
     assert not ran.ok
     assert ran.error_type == "compile"
+
+
+# ---------------------------------------------------------------------------
+# plaita#330：挂起节点的 flow_run 结构化 fail-closed 呈现
+# ---------------------------------------------------------------------------
+
+EVENT_SRC = '''
+@flow("wait_flow", input_type="object")
+def wait_flow(INPUT):
+    EVENT(type="approve_me")
+    return "done"
+'''
+
+
+def test_run_flow_suspend_node_named_error():
+    """event 在 normal 根（flow_run 路径）：ok=false + 稳定 error_type 字符串 +
+    结构化 error_detail（fix 指向分布式运行时，不引导误删节点）。"""
+    ran = run_flow(EVENT_SRC)
+    assert not ran.ok
+    assert ran.error_type == "suspend_not_executable"
+    detail = ran.error_detail
+    assert detail["error_type"] == "suspend_not_executable"
+    assert detail["cause"] == "environment"
+    assert detail["fix"]["action"] == "run_distributed"
+    assert detail["message"].startswith("这不是源码缺陷，不要删除/替换该节点")
+    assert "不要删除" in ran.error
+
+
+ERROR_END_SRC = '''
+@flow("err_flow", input_type="object")
+def err_flow(INPUT):
+    end(output="boom", result_type="error", error={"code": -42, "message": "boom"})
+'''
+
+
+def test_run_flow_error_type_is_stable_enum_value_string():
+    """FlowErrorType 枚举错误类型序列化为稳定字符串值（历史上是
+    ``str(Enum)`` 产出 ``FlowErrorType.ERROR_RESULT`` 机器键）。"""
+    ran = run_flow(ERROR_END_SRC)
+    assert not ran.ok
+    assert ran.error_type == "error_result"

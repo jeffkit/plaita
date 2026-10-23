@@ -468,7 +468,8 @@ def fire_schedule(
                 if schedule.get("version"):
                     recovery_message["version"] = schedule["version"]
                 try:
-                    from plaita.runtime_config import envelope_for_stream
+                    # plaita#328：预算快照由 enqueue_task 缺省盖章
+                    # （PLAITA_MAX_DELIVERIES 随信封走），不再拆代际包。
                     from plaita.server.tenant_status import read_tenant_generation
 
                     recovery_msg_id = enqueue_task(
@@ -476,7 +477,6 @@ def fire_schedule(
                         tenant_generation=read_tenant_generation(
                             redis_client, recovery_message.get("tenant_id")
                         ),
-                        **envelope_for_stream(queue_name, role="schedule"),
                     )
                 except Exception as exc:  # noqa: BLE001 — reservation 保留待重试
                     logger.error(
@@ -635,8 +635,8 @@ def fire_schedule(
             return None
         try:
             # 统一走 enqueue_task：消息信封带 schema_version，老格式（无该字段）按 v1 处理
-            # B2R31-01：新生产消息写当前三维代际。
-            from plaita.runtime_config import envelope_for_stream
+            # plaita#328：预算快照由 enqueue_task 缺省盖章（PLAITA_MAX_DELIVERIES
+            # 随信封走），不再写三维代际。
             from plaita.server.tenant_status import read_tenant_generation
 
             msg_id = enqueue_task(
@@ -644,7 +644,6 @@ def fire_schedule(
                 tenant_generation=read_tenant_generation(
                     redis_client, message.get("tenant_id")
                 ),
-                **envelope_for_stream(queue_name, role="schedule"),
             )
         except Exception as e:
             logger.error("调度 %s 入队失败: %s", schedule_id, _scrub_exception_text(e))

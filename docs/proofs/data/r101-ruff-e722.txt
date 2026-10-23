@@ -1,0 +1,2 @@
+warning: Invalid `# noqa` directive on tests/unit/test_async_utils.py:88: expected a comma-separated list of codes (e.g., `# noqa: F401, F841`).
+All checks passed!

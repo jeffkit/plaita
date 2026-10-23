@@ -31,6 +31,8 @@ class EventNode(Node):
     node_name: ClassVar[str] = "事件节点"
     async_node: ClassVar[bool] = True
     is_suspending: ClassVar[bool] = True
+    # 挂起需要：根级挂起能力（分布式运行时）+ 事件总线（订阅注册与恢复事件）。
+    execution_requirements: ClassVar[tuple] = ("suspend:root", "event_bus")
     
     # 只保留配置属性
     # event_type 是 event 节点唯一真实的用户字段：与事件发布方的 type 精确匹配

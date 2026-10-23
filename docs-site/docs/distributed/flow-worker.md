@@ -26,17 +26,33 @@
 
 CLI：`--consumer-group`、`--consumer-name`、`--claim-min-idle-ms`（默认 60000）、`--lease-ttl-seconds`（默认 120）、`--max-deliveries`（默认 5）、`--dlq-key`。`--queue-name` 为 **Stream 键名**（与旧 List 不兼容）。
 
-## 配置代际与运行期配置（A2R31 / B2R31-01/02/03） {#配置代际}
+## 版本维度与运行期配置（A2R31 / B2R31-02/03，plaita#328 收敛） {#配置代际}
 
 worker 启动时经 `plaita.runtime_config.load_runtime_config("worker")` 一次性解析
-queue/redis/group/dlq/预算/安全开关，并计算三个**互不替代**的代际：
+queue/redis/group/dlq/预算/安全开关。消息/定义只保留**两个版本维度**
+（治理账本 `docs/governance/architecture.yaml` 的 `gov.version_dimensions`）：
 
-- `config_family`（`cf1-…`）：queue/group/dlq/schema/namespace 的硬兼容键；
-- `config_generation`（`cfg1-…`）：全部语义字段的可观测哈希（不含 log level/metrics port）；
-- `budget_generation`（`bg1-…`）：`max_deliveries`/lease TTL/载体年龄/DLQ 上限。
+- **wire schema**：任务信封 `schema_version`（`TASK_SCHEMA_VERSION`）。消费者
+  只拒收「比自己新」的信封 → `schema_too_new` 进 DLQ；这是**唯一**的版本类
+  死信路径；
+- **IR**：定义契约代际 `ir_contract_version`（能力清单，见下）。
 
-启动日志 `event=config.effective` 与 registry metadata / 容量块都带这三个值；
-`GET /api/cluster/config` 与 `GET /api/cluster/instances` 可核对混跑。
+B2R31-01 的三个配置代际哈希（`config_family` / `config_generation` /
+`budget_generation`，及 `config_effective_at`）已于 plaita#328 删除：
+
+- 拓扑一致性（queue/group/dlq/namespace）改由 **worker 启动校验**把守
+  （`_cli_startup_problems` + `load_runtime_config(strict=True)`）：
+  `--queue-name` / `--consumer-group` / `--dlq-key` 与 env 解析值不一致、
+  或 `PLAITA_TENANT_NAMESPACE_VERSION` 为空 ⇒ **拒绝启动**（连错队列的
+  worker 起不来，而不是把外族消息永久留 pending）；
+- 投递预算改为**消息上的快照**：生产者入队时把 `PLAITA_MAX_DELIVERIES`
+  写进信封 `max_deliveries`（一个整数），消费端按**源快照**死信；缺失/畸形
+  快照 = legacy 载体，按消费端本地 `max_deliveries` 判定——旧格式在途消息
+  滚动升级零分叉；
+- `tenant_generation` 保留为**身份字段**（#277/#283），不计入版本预算。
+
+信封最终只剩 `schema_version` + `tenant_generation` + `max_deliveries`。
+新增版本维度须立 ADR 并附删除计划（#328 边界）。
 
 **能力清单（capability manifest，#300）**：worker 注册时把
 `capability_manifest` 写进 registry metadata（`plaita:registry:flow_worker:<id>`
@@ -71,14 +87,15 @@ console 的 flow_versions 表，跨进程选池靠**调度行冗余 runtime**：
 **交集**之外的节点灰置禁用（不隐藏），池内无清单兜底全量 + 面板提示；
 python 池全量（console 注册表即 python 权威面）。
 
-**消费规则**：
+**消费规则（plaita#328 后）**：
 
-1. 首投与 reclaim 同判：两端都非 `legacy` 且 `config_family` 不同 → 不执行；
-   reclaim 用 `XRANGE` 预读，不 `XCLAIM`、不烧 delivery，消息留 pending +
-   `event=config.family_mismatch`。
-2. `budget_generation` 不同 → 不把新预算作用旧 PEL：留 pending +
-   `event=config.budget_stale`，要求 drain 或按源预算宽限。
-3. 重投/交接/克隆/DLQ replay 继承**源**信封代际；缺失按 `legacy`，绝不盖当前值。
+1. 除 `schema_too_new → DLQ` 外，**不再有任何永久 pending 路径**：外族
+   `config_family` / 旧 `budget_generation` 戳的存量消息照常被消费或按预算
+   死信（字段被忽略）。
+2. 预算判定：信封带 `max_deliveries` 快照 ⇒ 按源快照；缺失/畸形 ⇒ 按
+   消费端本地 `max_deliveries`。
+3. 重投/交接/克隆/DLQ replay 继承**源**信封的 `schema_version` /
+   `tenant_generation` / `max_deliveries` 快照；缺失按 legacy，绝不盖当前值。
 4. 历史消息（无字段）始终可执行；畸形字段 WARNING + legacy，不按当前值覆盖。
 
 **租户状态纪元**：console 写入状态时同时刷新
@@ -211,14 +228,12 @@ pending 等新 build。非版本拒收（如 `max_deliveries`）的恢复克隆�
   `dedup_key`：标记过期/force 重灌仍收敛到同一条执行；
 - 执行墓碑命中 → `execution_deleted`（不复活已删除执行）；缺 `tenant_id` 必须由
   平台显式指定，payload 租户与显式租户冲突 → `tenant_mismatch`；
-- **目标 family 校验（r58）**：replay 在写 marker/入队前解析目标 stream 的
-  生效 `config_family`（默认按目标 stream + 生效 group/DLQ，与目标 worker
-  同源；自定义 group/DLQ 部署由请求显式传 `target_config_family`）。源/目标
-  family 不一致（含源缺失=legacy）⇒ `target_family_mismatch`：不写 marker、
-  目标 XLEN 不变、源 DLQ 保留、审计记 rejection——绝不把注定被目标 worker
-  family gate 拒收的载体报成「replayed ok」。管理员确需跨 family 回灌时
-  显式传 `allow_family_mismatch=true`（WARNING + 审计仍记录本次操作）；显式
-  family 非法/无法解析 ⇒ `target_family_unknown`（fail-closed）；
+- **预算快照继承（plaita#328）**：replay 继承源 DLQ 信封的 `max_deliveries`
+  快照与 `tenant_generation`（缺失/畸形快照 = legacy 信封，不写该字段，
+  消费端按本地预算）。r58 的目标 family 校验（`target_config_family` /
+  `allow_family_mismatch` / `target_family_mismatch` / `target_family_unknown`）
+  已随逐消息 family 闸一起删除——目标 worker 不再按 family 拒收，回灌的
+  载体不会再「replayed ok 却永久 pending」；
 - DLQ 原条目**不删除**；每次尝试写 `plaita:dlq:replay:audit`（平台级审计流：
   上限 `PLAITA_REPLAY_AUDIT_MAX_LEN`，默认 1000，写入后 XTRIM 精确裁剪——
   **持久但有界**的有损 FIFO，键**无 TTL**：整键过期会一次性抹掉全部审计

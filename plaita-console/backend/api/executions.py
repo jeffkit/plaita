@@ -312,19 +312,18 @@ def _enqueue(message: Dict[str, Any], redis: Redis, *, queue_name: Optional[str]
     历史上这里误用 rpush（list 类型），与 Stream 同 key 类型冲突，
     消息永远到不了 worker。统一走 XADD。
 
-    B2R31-01：新生产消息写当前三维代际（增量信封字段；旧消费者忽略）。
+    plaita#328：预算快照由 enqueue_task 缺省盖章（PLAITA_MAX_DELIVERIES
+    随信封走）；信封只剩 schema_version + tenant_generation + max_deliveries。
 
     plaita#300：``queue_name`` 显式给出时按其派发（runtime pool 路由——
     flow_versions.runtime 决定池）；None 走默认队列解析（存量行为零变化）。
     """
     queue = queue_name or _task_queue_name()
-    from plaita.runtime_config import envelope_for_stream
     from plaita.server.tenant_status import read_tenant_generation
 
     return enqueue_task(
         redis, queue, message,
         tenant_generation=read_tenant_generation(redis, message.get("tenant_id")),
-        **envelope_for_stream(queue, role="console"),
     )
 
 

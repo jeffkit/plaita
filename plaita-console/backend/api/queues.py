@@ -138,20 +138,9 @@ class DlqReplayRequest(StrictRequestModel):
     tenant_id: Optional[str] = Field(
         default=None, description="为缺 tenant_id 的条目显式指定租户"
     )
-    target_config_family: Optional[str] = Field(
-        default=None,
-        description=(
-            "目标 queue 的 config_family；自定义 consumer group/DLQ 的部署"
-            "必须显式给（缺省按目标 stream + 生效 group/DLQ 解析）"
-        ),
-    )
-    allow_family_mismatch: bool = Field(
-        default=False,
-        description=(
-            "管理员显式跨 family 回灌（会 WARNING 并写审计；默认拒绝，"
-            "避免目标 worker 静默拒收后 replay 假报 ok）"
-        ),
-    )
+    # plaita#328：target_config_family/allow_family_mismatch 已删除——
+    # family 逐消息闸退役（worker 启动校验把守拓扑一致性），回灌只继承
+    # schema_version/tenant_generation/max_deliveries 快照。
 
 
 # ============ 工具函数 ============
@@ -792,8 +781,6 @@ async def replay_dlq(
         force=bool(body.force),
         execution_id=body.execution_id,
         tenant_id=body.tenant_id,
-        target_config_family=body.target_config_family,
-        allow_family_mismatch=bool(body.allow_family_mismatch),
     )
     # A135-01 清债面：隔离流条目在回灌成功后**摘除**（XDEL）——收容是待清的
     # 债，不是平台 DLQ 那样的证据流（原条目保留）。already_replayed（幂等

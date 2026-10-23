@@ -1,0 +1,90 @@
+........................................................................ [ 22%]
+.......................................ss............................... [ 45%]
+......................ssssssssssssss...ssssssF.......................... [ 67%]
+............................................................ [ 86%]
+...........................................                              [100%]
+=================================== FAILURES ===================================
+_____________ TestMcpStdioHandshake.test_initialize_and_tools_list _____________
+
+self = <tests.test_mcp_stdio_smoke.TestMcpStdioHandshake testMethod=test_initialize_and_tools_list>
+
+    def test_initialize_and_tools_list(self):
+        """子进程 stdio 握手：initialize → initialized → tools/list。"""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = _PLAITA_AI + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "from plaita_ai.mcp.server import main; main()"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            text=True,
+        )
+        try:
+            # initialize
+            init_req = {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "plaita-ai-smoke", "version": "0.0.1"},
+                },
+            }
+            proc.stdin.write(json.dumps(init_req) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+>           resp = json.loads(line)
+                   ^^^^^^^^^^^^^^^^
+
+plaita-ai/tests/test_mcp_stdio_smoke.py:55: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:345: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x1052ffb60>, s = '', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py:363: JSONDecodeError
+=============================== warnings summary ===============================
+tests/test_flow_runner.py: 5 warnings
+tests/test_mcp_integration.py: 9 warnings
+tests/test_supervisor_flow.py: 3 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-ai/plaita_ai/flow_runner.py:93: DeprecationWarning: input_type/output_type on @flow/@childflow is deprecated and ignored; $INPUT is always a dict from run(**kwargs) or run({...}).
+    ir = compile_source(source, flow_id=flow_id, **opts)
+
+tests/test_supervisor_flow.py::test_run_supervisor_flow_no_proposal_path
+  /Users/kong/projects/infra4agent/plaita/plaita-ai/plaita_ai/agent/fot/tools.py:879: UserWarning: ToolNode: 工具 'sup_context' 已注册（<function make_tools_module.<locals>.sup_context at 0x109aa0360>），将被新函数（<function make_tools_module.<locals>.sup_context at 0x109bf0540>）覆盖。 如果这不是预期行为，请检查是否有多个 Agent 实例注册了同名工具。 可调用 ToolNode.clear() 在测试或隔离场景中重置注册表。
+    ToolNode.register(tool_name, obj, schema=schema)
+
+tests/test_supervisor_flow.py::test_run_supervisor_flow_no_proposal_path
+  /Users/kong/projects/infra4agent/plaita/plaita-ai/plaita_ai/agent/fot/tools.py:879: UserWarning: ToolNode: 工具 'sup_evaluate' 已注册（<function make_tools_module.<locals>.sup_evaluate at 0x109ab8b80>），将被新函数（<function make_tools_module.<locals>.sup_evaluate at 0x109bf05e0>）覆盖。 如果这不是预期行为，请检查是否有多个 Agent 实例注册了同名工具。 可调用 ToolNode.clear() 在测试或隔离场景中重置注册表。
+    ToolNode.register(tool_name, obj, schema=schema)
+
+tests/test_supervisor_flow.py::test_run_supervisor_flow_no_proposal_path
+  /Users/kong/projects/infra4agent/plaita/plaita-ai/plaita_ai/agent/fot/tools.py:879: UserWarning: ToolNode: 工具 'sup_propose' 已注册（<function make_tools_module.<locals>.sup_propose at 0x109ad67a0>），将被新函数（<function make_tools_module.<locals>.sup_propose at 0x109bf04a0>）覆盖。 如果这不是预期行为，请检查是否有多个 Agent 实例注册了同名工具。 可调用 ToolNode.clear() 在测试或隔离场景中重置注册表。
+    ToolNode.register(tool_name, obj, schema=schema)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-ai/tests/test_mcp_stdio_smoke.py::TestMcpStdioHandshake::test_initialize_and_tools_list
+1 failed, 296 passed, 36 skipped, 20 warnings, 12 subtests passed in 3.30s

@@ -145,7 +145,10 @@ def flow_run(
         globals_json: Optional JSON object for flow.global_context ($GLOBAL.*).
 
     Returns:
-        JSON: {ok, result, error, error_type}
+        JSON: {ok, result, error, error_type}；error_type 是稳定字符串（如
+        suspend_not_executable / error_result / compile）。挂起节点失败时额外
+        多出 error_detail 键（结构化错误体含 fix，指向分布式运行时，见
+        plaita#330）——其余载荷不含该键，形状不变。
     """
     # inputs_json/globals_json 是调用方自控文本：~12k 层嵌套（~24KB）就能让
     # json.loads 抛 RecursionError（A2R51-02），与坏语法同口径降级为具名
