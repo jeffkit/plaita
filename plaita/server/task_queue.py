@@ -16,6 +16,14 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
 from plaita.tenant_context import TenantWriteRejected
 from plaita.server.tenant_status import is_epistemic_reject_reason, tenant_write_allowed
+# plaita#327：per-tenant DLQ 配额（写路径计数闸；满格拒新留 pending）。
+from plaita.server.tenant_dlq_quota import (
+    DLQ_QUOTA_FULL,
+    TenantDlqQuotaFull,
+    bump_tenant_dlq_count,
+    tenant_dlq_max_entries,
+    tenant_dlq_quota_allows,
+)
 from plaita.runtime_config import (
     LEGACY_GENERATION,
     normalize_generation,
@@ -596,6 +604,10 @@ class RedisStreamTaskQueue:
             self.dlq_max_len = max(1, int(dlq_max_len))
         else:
             self.dlq_max_len = _dlq_max_len_from_env()
+        # plaita#327：per-tenant DLQ 配额上限（None=不限；env=
+        # PLAITA_TENANT_DLQ_MAX_ENTRIES，缺省 200）。构造期解析一次，
+        # 与 dlq_max_len 同形制；闸在 purity 之后、写入之前。
+        self.tenant_dlq_max_entries = tenant_dlq_max_entries()
         # Track B 任务1（2026-10-02 评审）：死信守卫。长步处理中的消息会被
         # 同伴按 idle 阈值反复抢走，delivery_count 随之虚增到 max_deliveries；
         # 若此时无条件死信（内部 XACK 原消息），存活持有者一崩，执行永久
@@ -1271,6 +1283,28 @@ class RedisStreamTaskQueue:
             return self._quarantine_rejected_dead_letter(
                 task, rejected, reason=reason, overrides=overrides
             )
+        except TenantDlqQuotaFull as full:
+            # plaita#327：满格 = 另一种「无着陆点」——不 ack 不写，留
+            # pending 等水位回落（xtrim 挤旧/清理/扫描纠偏后重投重走闸）。
+            # 计数独立于认识论性留 pending（满格是确认态事实，reason 可辨）。
+            self._metrics["dlq_quota_full_pending"] = (
+                self._metrics.get("dlq_quota_full_pending", 0) + 1
+            )
+            # #151 卫生：异常字段先投影成标量再进 logger（不裸传）。
+            full_tenant = str(full.tenant_id)
+            full_current = int(full.current)
+            full_cap = int(full.cap)
+            logger.warning(
+                "死信写入被 per-tenant DLQ 配额拒（%s，tenant=%s "
+                "entries=%d/%d，message=%s）——不写不 ack，留 pending 等"
+                "水位回落（plaita#327，不挤旧）",
+                DLQ_QUOTA_FULL,
+                full_tenant,
+                full_current,
+                full_cap,
+                task.message_id,
+            )
+            return False
         return True
 
     def _quarantine_rejected_dead_letter(
@@ -1327,6 +1361,29 @@ class RedisStreamTaskQueue:
         tenant_id = str(rejected.tenant_id or "?")
         reject_reason = str(rejected.reason or "unknown")
         quarantine_key = f"{self.dlq_key}:quarantine:{tenant_id}"
+        # plaita#327：隔离流同受 per-tenant 配额——它按键隔离但 console
+        # 不可见（DLQ 读面只认 *:dlq），配额若只管平台 DLQ 它就是绕行暗面。
+        # 确认态撞满格留 pending 是**独立计数口径**（dlq_quota_full_pending），
+        # 绝不与认识论性留 pending（tenant_reject_epistemic_pending）混数。
+        if self.tenant_dlq_max_entries is not None:
+            quota_ok, quota_current = tenant_dlq_quota_allows(
+                self.redis, tenant_id, self.tenant_dlq_max_entries
+            )
+            if not quota_ok:
+                self._metrics["dlq_quota_full_pending"] = (
+                    self._metrics.get("dlq_quota_full_pending", 0) + 1
+                )
+                logger.warning(
+                    "确认态收容被 per-tenant DLQ 配额拒（%s，tenant=%s "
+                    "entries=%d/%d，message=%s）——不收容不 ack，留 pending "
+                    "等水位回落（满格拒绝，非认识论性，勿混入读失败口径）",
+                    DLQ_QUOTA_FULL,
+                    tenant_id,
+                    quota_current,
+                    self.tenant_dlq_max_entries,
+                    getattr(task, "message_id", "?"),
+                )
+                return False
         envelope = {
             "reason": reason,
             "source_stream": self.stream_key,
@@ -1357,6 +1414,14 @@ class RedisStreamTaskQueue:
             quarantined_id = self.redis.xadd(
                 quarantine_key,
                 {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
+            )
+            # plaita#327：收容条目已落盘，per-tenant 计数 +1（隔离流落点
+            # 分流名，过半程告警可辨）。
+            bump_tenant_dlq_count(
+                self.redis,
+                tenant_id,
+                self.tenant_dlq_max_entries,
+                surface="quarantine",
             )
             try:
                 trimmed = int(
@@ -1469,6 +1534,17 @@ class RedisStreamTaskQueue:
                 getattr(task, "message_id", "?"),
             )
             raise TenantWriteRejected(tenant_id, reject_reason or "unknown")
+        # plaita#327：闸序 purity → quota → write——配额闸在纯净性之后、
+        # 唯一写入口之前；满格拒新（TenantDlqQuotaFull 由
+        # dead_letter_if_allowed 接住留 pending），绝不挤旧腾位。
+        if self.tenant_dlq_max_entries is not None:
+            quota_ok, quota_current = tenant_dlq_quota_allows(
+                self.redis, tenant_id, self.tenant_dlq_max_entries
+            )
+            if not quota_ok:
+                raise TenantDlqQuotaFull(
+                    tenant_id, quota_current, self.tenant_dlq_max_entries
+                )
         envelope = {
             "reason": reason,
             "source_stream": self.stream_key,
@@ -1490,6 +1566,13 @@ class RedisStreamTaskQueue:
         dlq_id = self.redis.xadd(
             self.dlq_key,
             {PAYLOAD_FIELD: json.dumps(envelope, ensure_ascii=False)},
+        )
+        # plaita#327：条目已落盘，per-tenant 收容计数 +1（过半程告警一次）。
+        bump_tenant_dlq_count(
+            self.redis,
+            tenant_id,
+            self.tenant_dlq_max_entries,
+            surface="platform_dlq",
         )
         # C4-1：DLQ 无消费者，入队后裁剪只保留最近 N 条，防无限增长。
         # A53-04：XTRIM 的返回值此前被丢弃、异常只记 DEBUG——裁剪与失败都是

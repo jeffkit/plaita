@@ -1,0 +1,152 @@
+.FFFF..FF                                                                [100%]
+=================================== FAILURES ===================================
+_________________ TestEnvParsing.test_queue_reads_env_at_init __________________
+
+self = <tests.unit.test_issue327_dlq_quota.TestEnvParsing object at 0x107639810>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10767c8a0>
+
+    def test_queue_reads_env_at_init(self, monkeypatch):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        monkeypatch.setenv(q.TENANT_DLQ_MAX_ENTRIES_ENV, "7")
+        queue = _queue(fake, _worker(fake, MemoryExecutionStorage()))
+>       assert queue.tenant_dlq_max_entries == 7
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'RedisStreamTaskQueue' object has no attribute 'tenant_dlq_max_entries'
+
+tests/unit/test_issue327_dlq_quota.py:162: AttributeError
+______ TestPlatformDlqQuotaGate.test_full_quota_rejects_new_stays_pending ______
+
+self = <tests.unit.test_issue327_dlq_quota.TestPlatformDlqQuotaGate object at 0x107639950>
+
+    def test_full_quota_rejects_new_stays_pending(self):
+        """满格拒新：不写不 ack，留 pending 等水位回落（不挤旧）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-a327a", _terminal_state("exec-a327a"))
+        queue = _queue(fake, _worker(fake, storage))
+        fake.hset(TENANT_STATUS_KEY, "acme", "active")
+        _enqueue_with_group(fake, _body("exec-a327a", "acme"))
+    
+        assert queue.read(block_ms=1) is not None  # 首投 → PEL
+        _fill_quota(fake, "acme", 200)
+        assert queue.read(block_ms=1) is None  # reclaim → 死信尝试被配额拒
+>       assert fake.xlen(DLQ) == 0, "满格不得写入平台 DLQ"
+E       AssertionError: 满格不得写入平台 DLQ
+E       assert 1 == 0
+E        +  where 1 = xlen('test:a327:tasks:dlq')
+E        +    where xlen = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=73d1371a64e84d5c93c178b634cea9ce,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>.xlen
+
+tests/unit/test_issue327_dlq_quota.py:178: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.server.task_queue:task_queue.py:1530 Dead-lettered task 1792752292764-0 -> test:a327:tasks:dlq id=1792752292765-0 (max_deliveries=1)
+_______ TestPlatformDlqQuotaGate.test_under_quota_writes_and_bumps_count _______
+
+self = <tests.unit.test_issue327_dlq_quota.TestPlatformDlqQuotaGate object at 0x1076396d0>
+
+    def test_under_quota_writes_and_bumps_count(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-a327b", _terminal_state("exec-a327b"))
+        queue = _queue(fake, _worker(fake, storage))
+        fake.hset(TENANT_STATUS_KEY, "acme", "active")
+        _enqueue_with_group(fake, _body("exec-a327b", "acme"))
+    
+        assert queue.read(block_ms=1) is not None  # 首投 → PEL
+        _fill_quota(fake, "acme", 3)
+        assert queue.read(block_ms=1) is None  # reclaim → 死信落 DLQ
+        assert fake.xlen(DLQ) == 1
+        assert _pel_count(fake) == 0
+>       assert q.tenant_dlq_count(fake, "acme") == 4, "写路径计数 +1"
+E       AssertionError: 写路径计数 +1
+E       assert 3 == 4
+E        +  where 3 = <function tenant_dlq_count at 0x105019080>(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=50a4e060faf44a418915ccd7ae616252,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>, 'acme')
+E        +    where <function tenant_dlq_count at 0x105019080> = q.tenant_dlq_count
+
+tests/unit/test_issue327_dlq_quota.py:197: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.server.task_queue:task_queue.py:1530 Dead-lettered task 1792752292771-0 -> test:a327:tasks:dlq id=1792752292772-0 (max_deliveries=1)
+__________ TestPlatformDlqQuotaGate.test_halfway_crossing_warns_once ___________
+
+self = <tests.unit.test_issue327_dlq_quota.TestPlatformDlqQuotaGate object at 0x10767c770>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x1076aee40>
+
+    def test_halfway_crossing_warns_once(self, caplog):
+        """过半程告警：跨过 cap/2 的那次写具名告警（落点可辨）。"""
+        import logging
+    
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-a327c", _terminal_state("exec-a327c"))
+        queue = _queue(fake, _worker(fake, storage))
+        fake.hset(TENANT_STATUS_KEY, "acme", "active")
+        _enqueue_with_group(fake, _body("exec-a327c", "acme"))
+    
+        with caplog.at_level(logging.WARNING, logger="plaita.server.tenant_dlq_quota"):
+            assert queue.read(block_ms=1) is not None  # 首投 → PEL
+            _fill_quota(fake, "acme", 99)  # +1 == 200//2 → 跨越点
+            assert queue.read(block_ms=1) is None  # reclaim → 死信落 DLQ
+        assert fake.xlen(DLQ) == 1
+>       assert any(
+            "tenant_dlq.quota_half" in rec.message and "platform_dlq" in rec.message
+            for rec in caplog.records
+        ), "过半程必须具名告警（含落点名）"
+E       AssertionError: 过半程必须具名告警（含落点名）
+E       assert False
+E        +  where False = any(<generator object TestPlatformDlqQuotaGate.test_halfway_crossing_warns_once.<locals>.<genexpr> at 0x10766b920>)
+
+tests/unit/test_issue327_dlq_quota.py:215: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita.server.task_queue:task_queue.py:1530 Dead-lettered task 1792752292780-0 -> test:a327:tasks:dlq id=1792752292781-0 (max_deliveries=1)
+___ TestQuarantineQuotaGate.test_quarantine_full_blocks_confirmed_quarantine ___
+
+self = <tests.unit.test_issue327_dlq_quota.TestQuarantineQuotaGate object at 0x107639bd0>
+
+    def test_quarantine_full_blocks_confirmed_quarantine(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        queue = self._disabled_tenant_env(fake, "exec-a327e")
+        _enqueue_with_group(fake, _body("exec-a327e", "acme"))
+    
+        assert queue.read(block_ms=1) is not None  # 首投 → PEL
+        _fill_quota(fake, "acme", 200)
+        assert queue.read(block_ms=1) is None  # reclaim → 收容尝试被配额拒
+>       assert _quarantine_len(fake, "acme") == 0, "隔离流满格不得收容"
+E       AssertionError: 隔离流满格不得收容
+E       assert 1 == 0
+E        +  where 1 = _quarantine_len(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=a949c9be53b14bf1b5784a88772d1ee5,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>, 'acme')
+
+tests/unit/test_issue327_dlq_quota.py:282: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:1464 死信写入拒绝（tenant_disabled）：tenant=acme message=1792752292791-0——旧世代/已删租户，不写 DLQ、不 ack
+ERROR    plaita.server.task_queue:task_queue.py:1391 Dead-letter quarantined task 1792752292791-0 -> test:a327:tasks:dlq:quarantine:acme id=1792752292792-0 (tenant=acme rejected=tenant_disabled, max_deliveries=1)
+___ TestQuarantineQuotaGate.test_quarantine_under_cap_quarantines_and_counts ___
+
+self = <tests.unit.test_issue327_dlq_quota.TestQuarantineQuotaGate object at 0x107639d10>
+
+    def test_quarantine_under_cap_quarantines_and_counts(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        queue = self._disabled_tenant_env(fake, "exec-a327f")
+        _enqueue_with_group(fake, _body("exec-a327f", "acme"))
+    
+        assert queue.read(block_ms=1) is not None  # 首投 → PEL
+        _fill_quota(fake, "acme", 5)
+        assert queue.read(block_ms=1) is None  # reclaim → 收容终局
+        assert _quarantine_len(fake, "acme") == 1, "配额内收容照旧（A125 守恒）"
+        assert _pel_count(fake) == 0
+>       assert q.tenant_dlq_count(fake, "acme") == 6, "隔离流落点同计数"
+E       AssertionError: 隔离流落点同计数
+E       assert 5 == 6
+E        +  where 5 = <function tenant_dlq_count at 0x105019080>(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=b77c715cee35439dbca0429773fb5183,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>, 'acme')
+E        +    where <function tenant_dlq_count at 0x105019080> = q.tenant_dlq_count
+
+tests/unit/test_issue327_dlq_quota.py:301: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:1464 死信写入拒绝（tenant_disabled）：tenant=acme message=1792752292798-0——旧世代/已删租户，不写 DLQ、不 ack
+ERROR    plaita.server.task_queue:task_queue.py:1391 Dead-letter quarantined task 1792752292798-0 -> test:a327:tasks:dlq:quarantine:acme id=1792752292799-0 (tenant=acme rejected=tenant_disabled, max_deliveries=1)
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue327_dlq_quota.py::TestEnvParsing::test_queue_reads_env_at_init
+FAILED tests/unit/test_issue327_dlq_quota.py::TestPlatformDlqQuotaGate::test_full_quota_rejects_new_stays_pending
+FAILED tests/unit/test_issue327_dlq_quota.py::TestPlatformDlqQuotaGate::test_under_quota_writes_and_bumps_count
+FAILED tests/unit/test_issue327_dlq_quota.py::TestPlatformDlqQuotaGate::test_halfway_crossing_warns_once
+FAILED tests/unit/test_issue327_dlq_quota.py::TestQuarantineQuotaGate::test_quarantine_full_blocks_confirmed_quarantine
+FAILED tests/unit/test_issue327_dlq_quota.py::TestQuarantineQuotaGate::test_quarantine_under_cap_quarantines_and_counts
+6 failed, 3 passed in 0.57s

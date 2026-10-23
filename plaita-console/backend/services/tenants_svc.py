@@ -88,6 +88,7 @@ _SCHEDULE_FIRES_KEY = "plaita:schedule:fires:{schedule_id}"
 _SCHEDULE_LOCK_KEY = "plaita:schedule:lock:{schedule_id}"
 _TENANT_RUNNING_KEY = "plaita:tenant_running:{tenant_id}"  # 配额名额 ZSET
 _TENANT_QUOTA_KEY = "plaita:tenant_quota"               # HASH tenant_id -> 上限
+_TENANT_DLQ_COUNT_KEY = "plaita:tenant_dlq_count"       # HASH tenant_id -> DLQ 收容计数（#327）
 _TENANT_STATUS_KEY = "plaita:tenant_status"             # 与 tenant_status 同键
 _TENANT_STATUS_DISABLED = "disabled"                    # tenant_is_active 拒行值
 # A50-05：共享任务队列（console 派发与 worker 消费同名，env 可覆盖）。
@@ -890,6 +891,27 @@ def _purge_tenant_dlq(redis_client, tenant_id: str) -> int:
     return total
 
 
+def _clear_tenant_dlq_quota(redis_client, tenant_id: str) -> int:
+    """清 per-tenant DLQ 配额计数（plaita#327，与 DLQ purge 两键成对）。
+
+    计数只按 tenant_id 记账，delete 的 DLQ purge 不配对清零的话，同 slug
+    重建的新世代会继承幻影计数（A2R58-05 status+世代两键成对的配额版）。
+    失败不抛——计数是记账不是证据，最坏后果是新世代配额吃紧（保守方向），
+    不应阻断删除主流程（与 ``_purge_tenant_dlq`` 的 loud 口径刻意不同）。
+    """
+    if redis_client is None:
+        return 0
+    try:
+        from plaita.server.tenant_dlq_quota import clear_tenant_dlq_count
+    except ImportError:
+        logger.exception(
+            "删除租户 %s：无法加载 DLQ 配额计数清理器（同名重建可能继承幻影计数）",
+            tenant_id,
+        )
+        return 0
+    return 1 if clear_tenant_dlq_count(redis_client, tenant_id) else 0
+
+
 def _stream_entry_tenant(entry_data: Any) -> str:
     """日志条目归属租户，与读面 ``api.logs._entry_tenant`` 同一判据。
 
@@ -992,6 +1014,13 @@ def _purge_runtime_after_commit(
         ("queue", lambda: _purge_tenant_queue(redis_client, tenant_id)),
         # #264：DLQ 是删除清理盲区——前代死信在同名重建后重新可见/可回灌。
         ("dlq", lambda: _purge_tenant_dlq(redis_client, tenant_id)),
+        # plaita#327：配额计数与 DLQ 清理两键成对——计数不清，同 slug 重建
+        # 的新世代继承幻影计数，新租户开局即配额吃紧（保护反噬受害租户）。
+        # 隔离流条目刻意保留（A125 证据保全），但它们的计数随世代退役。
+        (
+            "dlq_quota_count",
+            lambda: _clear_tenant_dlq_quota(redis_client, tenant_id),
+        ),
     )
     for label, purge in steps:
         try:
@@ -1006,7 +1035,7 @@ def _purge_runtime_after_commit(
             if first_error is None:
                 first_error = exc
         else:
-            if label in ("queue", "dlq"):
+            if label in ("queue", "dlq", "dlq_quota_count"):
                 counts[label] = result
             else:
                 counts.update(result or {})

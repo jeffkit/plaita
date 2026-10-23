@@ -1,0 +1,45 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+___________________ test_purge_pairs_with_quota_count_clear ____________________
+
+    def test_purge_pairs_with_quota_count_clear():
+        """删除清理跑完，配额计数必须一并清零（两键成对）。"""
+        fake = FakeRedis(decode_responses=True)
+        fake.xadd(DLQ, {"payload": _dlq_envelope(TENANT)})
+        fake.hset(TENANT_DLQ_COUNT_KEY, TENANT, 42)
+    
+        counts, first_error = tenants_svc._purge_runtime_after_commit(fake, TENANT)
+        assert first_error is None
+>       assert counts.get("dlq_quota_count") in (0, 1), "计数清理步骤必须入账"
+E       AssertionError: 计数清理步骤必须入账
+E       assert None in (0, 1)
+E        +  where None = <built-in method get of dict object at 0x121c785c0>('dlq_quota_count')
+E        +    where <built-in method get of dict object at 0x121c785c0> = {'schedules': 0, 'namespace': 0, 'events': 0, 'subscriptions': 0, ...}.get
+
+tests/console/test_issue327_dlq_quota_purge_pairing.py:75: AssertionError
+________________ test_recreated_tenant_starts_with_clean_quota _________________
+
+    def test_recreated_tenant_starts_with_clean_quota():
+        """A2 r58 allowed=True 剧本：delete → 同 slug 重建 → 配额闸放行。"""
+        fake = FakeRedis(decode_responses=True)
+        # 前代：配额已打满（幻影计数源）。
+        fake.hset(TENANT_DLQ_COUNT_KEY, TENANT, 200)
+    
+        counts, first_error = tenants_svc._purge_runtime_after_commit(fake, TENANT)
+        assert first_error is None
+    
+        # 同名重建（新世代）：无状态记录/无世代 = 机制前租户，purity 放行；
+        # 配额闸必须从干净计数开局——不继承前代幻影。
+        queue = RedisStreamTaskQueue(
+            fake, QUEUE, group_name="plaita-workers", consumer_name="c1",
+            dlq_key=DLQ,
+        )
+>       assert queue.tenant_dlq_max_entries == tenant_dlq_quota.DEFAULT_TENANT_DLQ_MAX_ENTRIES
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'RedisStreamTaskQueue' object has no attribute 'tenant_dlq_max_entries'
+
+tests/console/test_issue327_dlq_quota_purge_pairing.py:95: AttributeError
+=========================== short test summary info ============================
+FAILED tests/console/test_issue327_dlq_quota_purge_pairing.py::test_purge_pairs_with_quota_count_clear
+FAILED tests/console/test_issue327_dlq_quota_purge_pairing.py::test_recreated_tenant_starts_with_clean_quota
+2 failed in 0.46s
