@@ -1,0 +1,4 @@
+[landing-gate] main 最近完成 run：2026-10-23T21:17:19Z b907230 conclusion=success  |  merge: 并入 fix/issue330-suspend-fail-closed（r89:#330 挂起节点 Nor
+[landing-gate] ✅ main CI 绿
+[landing-gate] ✅ Console E2E 绿（b907230）
+[landing-gate] ✅ 允许落地
