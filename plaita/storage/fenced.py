@@ -170,6 +170,12 @@ class FencedExecutionStorage(ExecutionStorage):
 
     def save_execution_state(self, execution_id: str, state: ExecutionState) -> bool:
         generation = current_fence_token()
+        if generation is not None:
+            # plaita#320：状态行 generation 字段盖章——复用 fence 世代，与本写
+            # 同一 CAS 落盘（先盖章后序列化，字段与状态原子同写）。老行 0→N 的
+            # 首次 fenced 写天然互斥（A1 评审 §四.3）；未持 fenced 租约的写
+            # （下方 None 分支）不盖章，保留盘上旧值/advisory 语义。
+            state.generation = int(generation)
         if generation is None:
             # 未持 fenced 租约（start 路径 / 回滚模式 / 内存存储 / 单测）：
             # 保持普通写，存量行为零变化（§3.5 兼容红线）。

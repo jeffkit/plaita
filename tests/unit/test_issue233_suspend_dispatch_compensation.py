@@ -12,11 +12,17 @@
 2. start 只回报现状（dedup 路径）/ 整条重放（非 dedup 路径，见 #234）；
 3. 全仓没有从 service_config 重建任务的补偿巡检。
 
-修复契约（本测试钉住）：
+修复契约（本测试钉住；plaita#320 起**凭据字段退役为 pending 引用**）：
 
-- 挂起落盘**同一次写**带上待派发凭据 ``dispatch_pending``；派发成功后清；
+- 挂起落盘**同一次写**带上待派发凭据——#320 后凭据写 ``pending``
+  （kind=service，payload 携 service_config）；``dispatch_pending`` **停写**
+  （双字段并存=服务派发意图双真相），派发成功后 pending 清空；
 - 重投载体（resume continue/retry、start 载体）见凭据 ⇒ **幂等补派一次**
-  （不重跑挂起节点、状态仍 ``suspended``），随后清凭据；
+  （不重跑挂起节点、状态仍 ``suspended``），随后清凭据（#320：pending 与
+  legacy ``dispatch_pending`` 同一次 CAS 双清——清新留旧会让读面推导把
+  已派发凭据复活）；
+- 存量行（升级前写的 ``dispatch_pending``）经 ``effective_pending`` 读面
+  惰性推导走同一条补偿路径，零人工干预；
 - 再投一次不产生第二条任务（幂等）；
 - 补派失败不吞：抛 ``ServiceDispatchError``，凭据保留，消息不 ack 继续重投；
 - 正常（派发成功）路径行为零变化。
@@ -136,12 +142,16 @@ class TestSuspendPersistsDispatchMarker:
         state = storage.load_execution_state(EXEC)
         assert state.status == "suspended"
         assert state.end_time is None and state.error is None
-        marker = state.dispatch_pending
-        assert isinstance(marker, dict) and marker.get("pending") is True, (
-            "派发失败时盘上必须留有派发凭据，否则重投载体无从补派（本单缺陷）"
+        # plaita#320：凭据在 pending（kind=service），dispatch_pending 停写恒 None
+        assert state.dispatch_pending is None, "退役字段不得再被写（双真相禁止）"
+        ref = state.pending
+        assert isinstance(ref, dict) and ref.get("kind") == "service", (
+            "派发失败时盘上必须留有挂起引用，否则重投载体无从补派（本单缺陷；"
+            "#320 起凭据在 pending.kind=service）"
         )
-        assert marker["service_config"] == SERVICE_CONFIG
-        assert marker["service_type"] == "delay"
+        payload = ref["payload"]
+        assert payload["service_config"] == SERVICE_CONFIG
+        assert payload["service_type"] == "delay"
 
     def test_successful_dispatch_clears_marker(self):
         """正常路径零变化：派发成功 → 恰 1 条任务、凭据清空、状态 suspended。"""
@@ -156,6 +166,7 @@ class TestSuspendPersistsDispatchMarker:
         state = storage.load_execution_state(EXEC)
         assert state.status == "suspended"
         assert state.dispatch_pending is None
+        assert state.pending is None, "派发成功后 pending 引用必须清空（幂等前提）"
         assert len(_queued(fake)) == 1
         assert _queued(fake)[0]["execution_id"] == EXEC
 
@@ -173,6 +184,7 @@ class TestSuspendPersistsDispatchMarker:
             worker.resume_flow("f1", EXEC, "continue")
 
         assert storage.load_execution_state(EXEC).dispatch_pending is None
+        assert storage.load_execution_state(EXEC).pending is None
         assert fake.llen(QUEUE) == 0
 
 
@@ -207,6 +219,7 @@ class TestResumeCarrierCompensation:
         assert state.status == "suspended"
         assert state.error is None and state.end_time is None
         assert state.dispatch_pending is None, "补派成功后必须清凭据（幂等前提）"
+        assert state.pending is None, "#320：pending 与 legacy 凭据同一次 CAS 双清"
         queued = _queued(fake)
         assert len(queued) == 1, "重投后必须恰有 1 条延迟任务"
         assert queued[0]["type"] == "delay"
@@ -264,7 +277,9 @@ class TestStartCarrierCompensation:
         assert result["deduplicated"] is True
         assert result["dispatch_compensated"] is True
         assert len(_queued(fake)) == 1
-        assert storage.load_execution_state(EXEC).dispatch_pending is None
+        cleared = storage.load_execution_state(EXEC)
+        assert cleared.dispatch_pending is None
+        assert cleared.pending is None, "#320：补派后双清（legacy 行推导路径同契约）"
 
 
 class TestCompensationLeaseGuard:

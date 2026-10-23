@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 import hashlib
 import inspect
@@ -39,6 +39,8 @@ from plaita.storage.base import (
     ExecutionStorage,
     FlowStorage,
     StateSerializationError,
+    pending_event_deadline_default_seconds,
+    validate_pending_ref,
 )
 from plaita.storage.fenced import (
     reset_current_fence_token,
@@ -2359,7 +2361,19 @@ class FlowWorker:
         全程持**每执行互斥锁**（``_state_write_lock``）：与本执行的看门狗心跳
         （``_publish_node_progress``）串行，否则心跳的「读-改-写」会把这里的
         终态/步进写整行回滚（2026-10-10 评审复现）。
+
+        写序不变量 1（plaita#320/A1 评审 §三.1）的**机械化执行点**：终态迁移与
+        pending 清除必须在同一次 CAS——在本咽喉点强制，而不是靠每个终态写点
+        自觉（#303 的教训：两步操作无同步点，每步各自「成功」事后无日志）。
+        终态行不得带 armed pending（否则对账器读到「终态执行带活载体」=
+        #316 违例类 orphan_terminal 的对偶生成面），也不得声明未完成的工作
+        （next_step 同清）；dispatch_pending 一并清（#320 退役字段的残余
+        兜底——顺带修掉 resume except 面终态化携带陈旧凭据的存量边角）。
         """
+        if getattr(state, "status", None) in TERMINAL_EXECUTION_STATUSES:
+            state.pending = None
+            state.dispatch_pending = None
+            state.next_step = None
         with self._state_write_lock(execution_id):
             self._collect_node_timings(execution_id, state)
             self._collect_execution_timeline(execution_id, state, attempt_end=attempt_end)
@@ -3460,6 +3474,16 @@ class FlowWorker:
                 context={},
                 status="running",
                 start_time=datetime.now().isoformat(),
+                # plaita#320：progress_at 行创建即置 now（A1 评审 §四.1——从未
+                # 步提交的行也要有停滞基线），此后仅 step_persist 刷新；
+                # next_step 首落声明即将执行的 start 节点（step_id/
+                # parent_step_id 键位留给 #322 step token）。
+                progress_at=datetime.now().isoformat(),
+                next_step=(
+                    {"node_id": flow.start_node.id, "step_id": None, "parent_step_id": None}
+                    if flow.start_node is not None
+                    else None
+                ),
                 # 调度触发归因（A2R44-02）：带 schedule_id 的 trigger ⇒
                 # invoker=schedule + trigger 原样随行；手动/旧消息保持 worker。
                 invoker=invoker_for_trigger(trigger),
@@ -4433,8 +4457,12 @@ class FlowWorker:
             # 挂起节点已被越过或决议，残留的「待派发」凭据必须就地清掉——
             # 否则执行早已续跑/终态化，之后任何一次 continue 重投还会拿旧
             # 凭据补派一条早已过期的外延任务。
+            # plaita#320 同点扩展到 pending：事件消费后 pending 清除与 running
+            # 迁移同一次 CAS（A1 评审 §一.③ resume 方向注意项）——本清在内存
+            # 对象上生效，随本迭代内的下一次落盘（step_persist/终态）原子落盘。
             if not is_suspend:
                 state.dispatch_pending = None
+                state.pending = None
 
             if is_end:
                 # 落盘前失租检查（波次② §4.1）：看门狗已判死则不写状态，
@@ -4453,9 +4481,8 @@ class FlowWorker:
                 # plaita#233：「落盘 → 派发」是两段非原子操作，中间死掉时
                 # 没有任何载体能补派（#33 对 suspended+continue 幂等短路、
                 # start 只回报现状、无巡检），执行永久 suspended 且无
-                # error/end_time。修法 = **落盘时带上待派发凭据**
-                # （dispatch_pending，与 suspended 同一次写），派发成功后
-                # 再清；重投载体（resume/start）据此补派一次。
+                # error/end_time。修法 = **落盘时带上待派发凭据**，派发成功
+                # 后再清；重投载体（resume/start）据此补派一次。
                 #
                 # 为什么是「先落盘 + 凭据」而不是「先派发再落盘」：
                 # ① 先派发后落盘时，「派发成功、落盘失败」是**常态窗口**
@@ -4467,10 +4494,21 @@ class FlowWorker:
                 #    ``_clear_suspend_dispatch_pending``）。
                 # 即：把「已发生的外部投递」放在「可重放的落盘」之后，让
                 # 不确定窗口只覆盖可补偿的一侧。
-                has_dispatch = self._mark_suspend_dispatch_pending(state, result, context)
+                #
+                # plaita#320 write-ahead state：凭据从 dispatch_pending 推广为
+                # pending（{kind: event|service, ...} 引用对象）——事件等待与
+                # 服务派发**同一次 CAS** 落盘（窗③「挂起提交窗」的合一收口）；
+                # dispatch_pending 同一变更内**停写**（双字段并存=服务派发意图
+                # 双真相），存量行经 ``effective_pending`` 读面惰性推导。
+                # next_step 同一次写置 None：挂起行的工作声明由 pending 承载，
+                # 不得同时声明「下一步」。
+                state.next_step = None
+                pending_ref = self._build_pending_ref(state, result, context)
+                state.pending = pending_ref
+                state.dispatch_pending = None
                 self._persist_state_or_raise(execution_id, state, "suspended")
-                self._dispatch_service_task(result, context, execution_id)
-                if has_dispatch:
+                if pending_ref is not None and pending_ref.get("kind") == "service":
+                    self._dispatch_service_task(result, context, execution_id)
                     self._clear_suspend_dispatch_pending(
                         execution_id, state, source="suspend"
                     )
@@ -4558,6 +4596,13 @@ class FlowWorker:
                             break
                         state.context = context
                         state.last_update_time = datetime.now().isoformat()
+                        # plaita#320：步提交是 progress_at 的**唯一**刷新点
+                        # （与看门狗刷的 last_update_time 正交——租约=活性、
+                        # 本字段=前进，mode 5 双信号检测面）；next_step 随步
+                        # 提交预声明（#321 reconciler「running 无租约 →
+                        # continue」的重建读源，step token 键位留给 #322）。
+                        state.progress_at = datetime.now().isoformat()
+                        state.next_step = self._next_step_from_context(flow, context)
                         self._persist_state_or_raise(execution_id, state, "step_persist")
                         steps_since_persist = 0
                         logger.info("流程步骤执行完成，继续下一步: %s", execution_id)
@@ -4704,53 +4749,177 @@ class FlowWorker:
 
     @staticmethod
     def _pending_suspend_dispatch(state: Any) -> Optional[Dict[str, Any]]:
-        """读取未清的挂起派发凭据（plaita#233）；None = 无可补偿对象。
+        """读取未清的挂起派发凭据；None = 无可补偿对象（plaita#233 + #320）。
 
-        老状态没有该字段（pydantic 默认 None）⇒ 一律按「无可补偿」处理：
-        升级前已卡住的 suspended 执行维持原状，零回归（无法凭空知道它是否
-        派发过——猜错会造重复任务）。
+        #320 起读面走 ``state.effective_pending()``：显式 pending（kind=service）
+        优先；存量 ``dispatch_pending`` 凭据（升级前写入的行）经惰性推导进
+        同一形状（``migrated: True``）——**读面推导、不回写**。返回值归一为
+        #233 老 marker 形状，下游补偿流程（``_dispatch_suspend_pending``）零改动。
         """
-        marker = getattr(state, "dispatch_pending", None)
-        if isinstance(marker, dict) and marker.get("pending"):
-            return marker
-        return None
-
-    def _mark_suspend_dispatch_pending(
-        self, state: ExecutionState, result: Dict[str, Any], context: Dict[str, Any]
-    ) -> bool:
-        """把「待派发」凭据写进状态对象（plaita#233），由调用方与 suspended
-        **同一次落盘**写下——凭据与状态原子同写，才不会出现「状态已挂起、
-        凭据没记」的不可补偿窗口。
-
-        返回 True = 本次有需要派发的任务（凭据已记）；False = 非服务节点挂起，
-        不需要派发，也不留凭据（避免每挂起一次都多一次无意义的二写）。
-        """
-        service_config, subtype = self._resolve_service_task(result, context)
-        if service_config is None:
-            state.dispatch_pending = None
-            return False
-        state.dispatch_pending = {
+        ref = state.effective_pending() if hasattr(state, "effective_pending") else None
+        if not isinstance(ref, dict) or ref.get("kind") != "service":
+            return None
+        payload = ref.get("payload") if isinstance(ref.get("payload"), dict) else {}
+        return {
             "pending": True,
-            "service_type": subtype,
-            "service_config": service_config,
-            "node_id": (context or {}).get("$LAST_NODE"),
-            "recorded_at": datetime.now().isoformat(),
+            "service_type": payload.get("service_type") or ref.get("service_type"),
+            "service_config": payload.get("service_config") or ref.get("service_config"),
+            "node_id": ref.get("node_id"),
+            "recorded_at": ref.get("recorded_at"),
         }
-        return True
+
+    @staticmethod
+    def _suspend_node_state(context: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Dict[str, Any]]:
+        """定位挂起节点的 ``(node_id, node_state)``（plaita#320 NS 帧栈对齐）。
+
+        pending.node_id 语义 = **最内层挂起节点**（A1 评审 §二.4）：嵌套挂起
+        （checkpoint 带 ``$SUSPEND_FRAMES``，最内帧在前）取首帧的 node_id，
+        且其 node_state（subscription_id/event_type/subscription_timeout）
+        活在该帧的 context 快照里，不在根 $NODE——逐帧查；根流程挂起取
+        $LAST_NODE + 根 $NODE。查不到返回 ``(None, {})``，调用方按无引用
+        容忍（与 #221「缺字段放行」同款）。
+        """
+        ctx = context if isinstance(context, dict) else {}
+        frames = ctx.get("$SUSPEND_FRAMES")
+        if isinstance(frames, list) and frames:
+            innermost = frames[0]
+            if isinstance(innermost, dict):
+                node_id = innermost.get("node_id")
+                frame_context = innermost.get("context")
+                nodes = (
+                    frame_context.get("$NODE")
+                    if isinstance(frame_context, dict)
+                    else None
+                ) or {}
+                return node_id, nodes.get(node_id) or {}
+        node_id = ctx.get("$LAST_NODE")
+        nodes = ctx.get("$NODE") or {}
+        return node_id, (nodes.get(node_id) if node_id else None) or {}
+
+    def _build_pending_ref(
+        self,
+        state: ExecutionState,
+        result: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """挂起落盘前构造 pending 引用（plaita#320；write-ahead state 的核心写点）。
+
+        kind 判定（互斥，服务优先——与 #233 以来「有 service_config 即派发」
+        同一判据）：``_resolve_service_task`` 解析出配置 → ``kind=service``
+        （payload 携 service_type/service_config，补偿派发凭据）；否则按挂起
+        节点的订阅引用构造 ``kind=event``（deadline 必填：节点
+        subscription_timeout 优先，未配置回落
+        ``PLAITA_PENDING_EVENT_DEADLINE_SECONDS``/缺省 30 天——④窗「事件先于
+        订阅」补强的选型，见 ``docs/WORKER_PROTOCOL.md``）；两者引用都拿不到
+        （简化 bus 替身、无订阅无服务）→ None，行形同 #320 前的老行（读面
+        推导亦为 None），零回归。构造即过 :func:`validate_pending_ref`
+        fail-closed：挂起行带非法 pending 宁可现在炸（订阅已注册、消息未 ack、
+        重投重挂）也不落一行「看起来 armed 实则不可重建」的坏引用。
+        """
+        node_id, node_state = self._suspend_node_state(context)
+        now_iso = datetime.now().isoformat()
+        service_config, subtype = self._resolve_service_task(result, context)
+        if service_config is not None:
+            return validate_pending_ref(
+                {
+                    "kind": "service",
+                    "ref_id": None,
+                    "node_id": node_id,
+                    "payload": {"service_type": subtype, "service_config": service_config},
+                    "recorded_at": now_iso,
+                }
+            )
+        subscription_id = node_state.get("subscription_id")
+        event_type = node_state.get("event_type")
+        if subscription_id is None and not event_type:
+            return None
+        timeout = node_state.get("subscription_timeout")
+        try:
+            timeout_seconds = float(timeout) if timeout is not None else None
+        except (TypeError, ValueError):
+            timeout_seconds = None
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            timeout_seconds = None
+        deadline_seconds = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else pending_event_deadline_default_seconds()
+        )
+        try:
+            deadline_iso = (
+                datetime.now() + timedelta(seconds=deadline_seconds)
+            ).isoformat()
+        except OverflowError:
+            deadline_iso = datetime.max.isoformat()
+        return validate_pending_ref(
+            {
+                "kind": "event",
+                "ref_id": str(subscription_id) if subscription_id else None,
+                "event_type": event_type,
+                "node_id": node_id,
+                "deadline": deadline_iso,
+                "recorded_at": now_iso,
+            }
+        )
+
+    def _next_step_from_context(
+        self, flow: Any, context: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """从 checkpoint 现算下一步引用（plaita#320 next_step 预声明）。
+
+        解析逻辑与引擎 advance 同源（``$LAST_NODE`` → ``flow.next_node``），
+        但**失败不阻断落盘**：next_step 是 aid 字段，权威解析仍由引擎在
+        advance 时现算（#322 step token 落地前它不承载正确性）——分支未命中/
+        缺 next/图遍历异常一律置 None 并 WARNING（「行不声明」永远好过
+        「行声明错」）。
+        """
+        try:
+            ctx = context if isinstance(context, dict) else {}
+            last_node_id = ctx.get("$LAST_NODE")
+            if not last_node_id:
+                return None
+            current_node = flow.find_node_by_id(last_node_id)
+            if current_node is None:
+                return None
+            branch = ctx.get("$BRANCH") or ""
+            next_node = flow.next_node(current_node, branch)
+            if next_node is None:
+                return None
+            return {
+                "node_id": next_node.id,
+                "step_id": None,
+                "parent_step_id": None,
+            }
+        except Exception as e:  # noqa: BLE001 — aid 字段解析失败不阻断落盘
+            logger.warning(
+                "next_step 预声明失败（置 None，不影响落盘/推进）: %s",
+                _scrub_url_text(e),
+            )
+            return None
 
     def _clear_suspend_dispatch_pending(
         self, execution_id: str, state: ExecutionState, *, source: str
     ) -> None:
-        """派发成功后清凭据（plaita#233）：投递完成与「已派发」标记同一收口。
+        """派发成功后清凭据（plaita#233）；#320 起为 **pending+legacy 双清**。
 
         清不清得掉决定**幂等性**：清掉后同一载体的再次重投不会再补派第二条；
         清失败（Redis 瞬断）必须上抛不 ack——吞掉会让标记永久留在盘上，
         下一次任何 resume/start 都会再补派一次。残留窗口（rpush 已成功、
         这次清标记的落盘失败）里重投**可能补派重复任务**，由服务侧
         幂等/租约语义吸收，代价远小于「永久 suspended」。
+
+        #320：新行凭据在 ``pending``（kind=service）、升级前行在
+        ``dispatch_pending``——清除必须**两个字段同一次 CAS** 置 None，
+        否则「清了新留了旧」会让读面推导（effective_pending 的 legacy 分支）
+        把已派发的凭据复活成可补偿对象。本清是带 generation CAS 的状态行写
+        （经 ``_persist_state_or_raise``），符合写序不变量 1 的「pending 清除
+        只发生在 CAS 状态行写内」。
         """
-        if getattr(state, "dispatch_pending", None) is None:
+        if getattr(state, "pending", None) is None and getattr(
+            state, "dispatch_pending", None
+        ) is None:
             return
+        state.pending = None
         state.dispatch_pending = None
         try:
             self._persist_state_or_raise(
@@ -4758,7 +4927,7 @@ class FlowWorker:
             )
         except StatePersistError:
             logger.error(
-                "执行 %s 挂起派发已成功但清除派发凭据失败（%s）——消息将不 ack 重投，"
+                "执行 %s 挂起派发已成功但清除挂起引用失败（%s）——消息将不 ack 重投，"
                 "重投可能**重复派发一次**该外延任务（服务侧需幂等）",
                 execution_id, source,
             )

@@ -1291,6 +1291,13 @@ async def _subscribe_event(node, flow, node_state, context, correlation_id=None)
             subscription_id = event_bus.register_subscription(**subscription_params)
 
         node_state["subscription_id"] = subscription_id
+        # plaita#320：把**解析后**的事件类型与订阅超时随 checkpoint 落进
+        # node_state——worker 挂起落盘构造 pending（kind=event）时只能读
+        # context（拿不到节点对象），动态 event_type（$expr）解析结果与
+        # subscription_timeout 不落这里，pending 就得空手编造或缺 deadline。
+        # 均为加键（存量读者全部 .get 取用），checkpoint 形状向后兼容。
+        node_state["event_type"] = resolved_event_type
+        node_state["subscription_timeout"] = node_subscription_timeout
         context.update_node_result(node, node_state)
         return True
     except Exception as e:
