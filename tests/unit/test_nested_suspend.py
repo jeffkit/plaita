@@ -768,3 +768,98 @@ class TestObservability:
         node_ends = [(e[1], e[2]) for e in events if e[0] == "node_end"]
         assert ("A", "callb") in node_ends
         assert ("R", "calla") in node_ends
+
+
+class TestResumeContinuationIntoChild:
+    """恢复续跑途中进入 child 节点（NS-M4 对拍 case 09 的回归钉）。
+
+    缺陷形态：_advance_frame_to_end 构造 NodeRunner 未接 node_execution
+    facade——内层续跑进入 child 时 ``execution.get_child_execution()``
+    拿到裸 ExecutionContext 直接 AttributeError。修复=恢复会话帧推进
+    复用 facade（与 executor.py 正典构造同形）。
+    """
+
+    def test_resume_continuation_enters_child_and_completes(self):
+        bus = RecordingBus()
+        flow_doc = {
+            "flow_id": "root",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "evA"},
+                {"type": "event", "id": "evA", "event_type": "first", "next": "c2"},
+                {"type": "child", "id": "c2", "next": "o", "childFlow": {"nodes": [
+                    {"type": "start", "id": "b", "next": "bend"},
+                    {"type": "end", "id": "bend", "output": "deep-ok", "resultType": "success"},
+                ]}},
+                {"type": "end", "id": "o", "output": "$NODE.c2", "resultType": "success"},
+            ],
+        }
+        flow = Flow.model_validate(flow_doc)
+        execution = _distributed(bus)
+        # step1：根级 evA 挂起（root 路径：resume 只做决策，不续跑）。
+        out = execution.run_distributed(flow, {"x": 1})
+        assert out["is_suspend"] is True and out["id"] == "evA"
+        sid = next(iter(bus.subscriptions))
+        # step2：决策步（is_suspend=False，无续跑——plaita 分布式逐步契约）。
+        out2 = execution.run_distributed(
+            flow, saved_context=out["context"], resume_type="event",
+            resume_data={"subscription_id": sid, "event_type": "first", "signal": "go"},
+        )
+        assert out2["id"] == "evA" and out2["result"]["status"] == "completed"
+        # step3：continue 步进入 child c2 并完成内层 → 回填 $NODE[c2] → 续到根 end。
+        out3 = execution.run_distributed(
+            flow, saved_context=out2["context"], resume_type="continue")
+        assert out3["result"] == "deep-ok"
+
+    def test_resume_continuation_re_suspends_in_nested_child(self):
+        """恢复续跑途中进入 child，child 内 evB 再挂起（NS-M4 对拍 case 09 的
+        回归钉：_advance_frame_to_end 必须接 node_execution facade——漏接时
+        内层 child 的 get_child_execution 直接 AttributeError）。"""
+        bus = RecordingBus()
+        flow_doc = {
+            "flow_id": "root",
+            "nodes": [
+                {"type": "start", "id": "s", "next": "evA"},
+                {"type": "event", "id": "evA", "event_type": "first", "next": "c2"},
+                {"type": "child", "id": "c2", "next": "o", "childFlow": {"nodes": [
+                    {"type": "start", "id": "b", "next": "evB"},
+                    {"type": "event", "id": "evB", "event_type": "second", "next": "bend"},
+                    {"type": "end", "id": "bend", "output": "$NODE.evB", "resultType": "success"},
+                ]}},
+                {"type": "end", "id": "o", "output": "$NODE.c2", "resultType": "success"},
+            ],
+        }
+        flow = Flow.model_validate(flow_doc)
+        execution = _distributed(bus)
+        # step1：根级 evA 挂起。
+        out = execution.run_distributed(flow, {"x": 1})
+        assert out["is_suspend"] is True and out["id"] == "evA"
+        sid1 = next(iter(bus.subscriptions))
+        # step2：evA 决策步（根路径，无续跑）。
+        out2 = execution.run_distributed(
+            flow, saved_context=out["context"], resume_type="event",
+            resume_data={"subscription_id": sid1, "event_type": "first", "signal": "1"},
+        )
+        assert out2["id"] == "evA" and out2["result"]["status"] == "completed"
+        # step3：continue 进入 child c2 → evB 再挂起（帧路径 [现场帧, 根帧]）。
+        out3 = execution.run_distributed(
+            flow, saved_context=out2["context"], resume_type="continue")
+        # 逐步输出身份 = 本步执行的节点 c2；内层真位置（evB）由帧路径钉。
+        assert out3["is_suspend"] is True and out3["id"] == "c2"
+        frames = out3["context"][f"${SUSPEND_FRAMES_KEY}"]
+        # 帧 path 语义：现场帧（evB 所在内层 flow）在前、根帧在后。flow_id 为
+        # None 是 plaita 方言（内联 childFlow 不合成 id；rs 合成 "c2.childFlow"
+        # ——已知方言差异，NS-M4 对拍集 README 记录）。
+        assert [(f["node_id"]) for f in frames] == ["evB", "c2"]
+        assert frames[-1]["flow_id"] == "root" and frames[-1]["context"] is None
+        sid2 = next(iter(k for k in bus.subscriptions if k != sid1))
+        # step4：嵌套恢复 evB（沿帧路径：决策步 → 返回步回填 $NODE[c2] → 本步收尾）。
+        out4 = execution.run_distributed(
+            flow, saved_context=out3["context"], resume_type="event",
+            resume_data={"subscription_id": sid2, "event_type": "second", "signal": "2"},
+        )
+        assert out4["id"] == "c2" and out4["result"]["event_type"] == "second"
+        # step5：continue 到根 end，输出 $NODE.c2 = evB 恢复态。
+        out5 = execution.run_distributed(
+            flow, saved_context=out4["context"], resume_type="continue")
+        assert out5["result"]["status"] == "completed"
+        assert out5["result"]["event_type"] == "second"

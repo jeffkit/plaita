@@ -794,7 +794,8 @@ async def _handle_nested_resume(strategy, flow, context, runner, callback_manage
         try:
             value = await _advance_frame_to_end(
                 current_flow, current_ctx, callback_manager, next_node,
-                max_timeout_ms=max_timeout_ms)
+                max_timeout_ms=max_timeout_ms,
+                node_execution=runner.node_execution)
         except FlowSuspendedCarrier as carrier:
             # 再挂起：新现场（更深）的调用栈在前，本会话剩余栈在后拼接，
             # 然后走同一边界转换（作用域闸 → 订阅注册 → 逐帧 checkpoint，
@@ -975,7 +976,79 @@ def flow_contains_suspending_node(flow) -> bool:
     return False
 
 
-async def _advance_frame_to_end(flow, context, callback_manager, start_node, max_timeout_ms=None):
+class _FrameExecutionView:
+    """恢复会话帧的节点执行视图（NS-M4 case 09 缺陷的修正面）。
+
+    恢复续跑的帧推进需要**双身份**：state/evaluate 必须落在**帧 ctx**（内层
+    `$NODE` 可见），`get_child_execution`/`run_compatible` 必须走**宿主
+    facade**（child/reference 的子执行机制长在 facade 上）。二者分属不同
+    对象——`NodeRunner(context, node_execution=facade)` 的正典接线（executor
+    的同帧执行）会让节点经 facade 读到**根** `$NODE`（case 09 实测：内层 end
+    的 `$NODE.evB` 求值 None）。本视图按成员归属显式分派，未列成员
+    `__getattr__` 回落 facade（子执行 bus/取消/租户身份等继承面）。
+    """
+
+    def __init__(self, frame_ctx, facade):
+        self._frame_ctx = frame_ctx
+        self._facade = facade
+
+    # -- 帧 ctx 侧（状态与求值语义）--
+    @property
+    def express_prefix(self):
+        return self._frame_ctx.express_prefix
+
+    @property
+    def execution_id(self):
+        return self._frame_ctx.execution_id
+
+    @property
+    def context(self):
+        return self._frame_ctx.context
+
+    def evaluate(self, value):
+        return self._frame_ctx.evaluate(value)
+
+    def get_state(self, key, default=None):
+        return self._frame_ctx.get_state(key, default)
+
+    def set_state(self, key, value):
+        self._frame_ctx.set_state(key, value)
+
+    def set_scratch(self, key, value):
+        self._frame_ctx.set_scratch(key, value)
+
+    def update_node_result(self, node, result):
+        self._frame_ctx.update_node_result(node, result)
+
+    def get_node_state(self, node_id, default=None):
+        # EventNode._get_node_state 的 hasattr 探测面（frame ctx 若实现则用之）。
+        getter = getattr(self._frame_ctx, "get_node_state", None)
+        return getter(node_id, default) if getter else default
+
+    def get_global_variable(self, key, default=None):
+        # 全局变量随帧继承（child() 七项继承），帧 ctx 为准。
+        getter = getattr(self._frame_ctx, "get_global_variable", None)
+        return getter(key, default) if getter else self._facade.get_global_variable(key, default)
+
+    # -- facade 侧（子执行机制与宿主身份）--
+    def get_child_execution(self):
+        return self._facade.get_child_execution()
+
+    def run_compatible(self, flow, lazy, *args, **params):
+        return self._facade.run_compatible(flow, lazy, *args, **params)
+
+    def arun_compatible(self, flow, lazy, *args, **params):
+        return self._facade.arun_compatible(flow, lazy, *args, **params)
+
+    def get_or_create_event_bus(self):
+        return self._facade.get_or_create_event_bus()
+
+    def __getattr__(self, name):
+        # 未列成员回落 facade（cancel/set_global_variable 等宿主继承面）。
+        return getattr(self._facade, name)
+
+
+async def _advance_frame_to_end(flow, context, callback_manager, start_node, max_timeout_ms=None, node_execution=None):
     """恢复会话的单帧推进体（rs ``advance_and_finalize`` / go ``runNodes`` 的
     恢复侧对应面）：从给定节点推进到 End 并返回其输出。
 
@@ -989,7 +1062,17 @@ async def _advance_frame_to_end(flow, context, callback_manager, start_node, max
     一口径落到嵌套恢复的每一帧。
     """
     max_timeout_ms = execution_deadline_ms(max_timeout_ms)
-    runner = NodeRunner(context)
+    # 节点执行视图（NS-M4 case 09 修正面）：evaluate/state 走帧 ctx（内层
+    # $NODE 可见），get_child_execution/run_compatible 走宿主 facade——单传
+    # facade 会让内层 end 的 `$NODE.evB` 读到根状态（None）；单传帧 ctx 会让
+    # child 的 get_child_execution 炸 AttributeError。两个都是实测。
+    runner = NodeRunner(
+        context,
+        node_execution=(
+            node_execution if node_execution is None
+            else _FrameExecutionView(context, node_execution)
+        ),
+    )
     node = start_node
     start_time = time.time()
     while node is not None:
