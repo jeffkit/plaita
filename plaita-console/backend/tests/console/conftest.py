@@ -65,6 +65,23 @@ _FORM_PARSER_SKIP_REASON = (
     "uv pip install --python <venv>/bin/python 'python-multipart>=0.0.12'"
 )
 
+# ---- 2) 插件节点依赖：plaita-nodes 子仓经 ``plaita.nodes`` entry-point 注册 ----
+# sql_query 等节点不在 plaita core、不在 console 依赖面（CI 主 suite 只装
+# ``.[dev,lint,all]`` + backend requirements）。环境缺该包时 ``_save`` 在 Python
+# schema 层就对未注册节点 422（test_flows_api::test_save_invalid_definition_422
+# 钉的存量行为），根本到不了能力门——同一根因已三次把 main 推红（r80 / r93 /
+# B4 r12 run 39895070459，各 8h 级）。与 needs_form_parser 同款：具名 skip、
+# 带装法；ci.yml 的 console-backend-plugins job 装插件后以
+# ``-m requires_plaita_nodes`` 挑出来真跑，这些用例不是永久 skip。
+_HAS_PLAITA_NODES = importlib.util.find_spec("plaita_nodes") is not None
+
+_PLAITA_NODES_SKIP_REASON = (
+    "环境缺 plaita-nodes（sql_query 等插件节点经 plaita.nodes entry-point 注册）："
+    "save 在 Python schema 层即 422 unrecognized，到不了能力门。装上即真跑："
+    "uv pip install --python <venv>/bin/python 'plaita-nodes==0.8.0'（或 -e ../plaita-nodes）；"
+    "CI 由 ci.yml console-backend-plugins job 覆盖"
+)
+
 
 @pytest.fixture(autouse=True)
 def _explicit_default_tenant():
@@ -111,13 +128,24 @@ def pytest_configure(config: pytest.Config) -> None:
         "needs_form_parser: 该用例经由 flowVersion 表单端点，需要已声明依赖 "
         "python-multipart（plaita-console/backend/requirements.txt:16）",
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_plaita_nodes: 该用例的 flow 定义含 plaita-nodes 插件节点（sql_query 等），"
+        "环境缺该子仓时具名 skip；ci.yml console-backend-plugins job 以 -m 挑选真跑。"
+        "按最小粒度贴：整类都依赖贴类，个别用例依赖贴方法",
+    )
 
 
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """依赖缺失时把 needs_form_parser 用例转成**具名 skip**（带装法），
-    而不是留一堆 starlette 断言红掩盖真回归信号（#172 影响面）。"""
+    """依赖缺失时把 needs_form_parser / requires_plaita_nodes 用例转成**具名
+    skip**（带装法），而不是留一堆断言红掩盖真回归信号（#172 影响面）。"""
+    if not _HAS_PLAITA_NODES:
+        skip_nodes = pytest.mark.skip(reason=_PLAITA_NODES_SKIP_REASON)
+        for item in items:
+            if "requires_plaita_nodes" in item.keywords:
+                item.add_marker(skip_nodes)
     if _HAS_FORM_PARSER:
         return
     skip = pytest.mark.skip(reason=_FORM_PARSER_SKIP_REASON)

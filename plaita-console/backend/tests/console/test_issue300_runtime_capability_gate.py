@@ -14,7 +14,6 @@
 配套面：flow_versions.runtime 列（go/python，默认 python）、按 runtime 选
 队列、services 读面透出 capability_manifest。
 """
-import importlib.util
 import json
 import logging
 import sys
@@ -499,18 +498,22 @@ def _register_real_go_worker(redis):
 
 
 # sql_query 节点由 **plaita-nodes** 子仓经 ``plaita.nodes`` entry-point 注册
-# （不在 plaita core、不在 console 的 pip 依赖面——CI 只装
+# （不在 plaita core、不在 console 的 pip 依赖面——CI 主 suite 只装
 # ``.[dev,lint,all]`` + backend requirements，无 plaita-nodes）。环境缺该包
 # 时 `_save` 对未注册节点 422（test_flows_api::test_save_invalid_definition_422
 # 钉的存量行为）、随后 `_publish` 404 version_not_found——r80 首推 CI 红
 # 的根因（本组用例在装了 plaita-nodes 的环境全绿，已复现核实）。按环境
 # 依赖 skip，不伪装通过。
+#
+# 凡 flow 定义含 sql_query（或任何插件节点）的用例一律贴
+# ``@pytest.mark.requires_plaita_nodes``（skip 规则与装法集中在 conftest，
+# ci.yml console-backend-plugins job 装插件后以 -m 挑出真跑），按最小粒度：
+# 整类都依赖就贴类，只有个别用例依赖就贴方法（别连坐同类里不含插件节点
+# 的用例）。TestRustPoolGate.test_sql_query_publish_422_structured 漏贴是
+# 同一根因第三次发作（main 红 8h，run 39895070459）。
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("plaita_nodes") is None,
-    reason="sql_query 节点由 plaita-nodes entry-point 注册（CI 环境不装该子仓）",
-)
+@pytest.mark.requires_plaita_nodes
 class TestRealGoWorkerRegistration:
     def _only_real_go_worker(self, redis):
         redis.delete("plaita:registry:flow_worker:go-1")
@@ -589,6 +592,12 @@ class TestRustPoolGate:
 
     负控矩阵承 go 池三景（严格交集 / 结构化 422 / 缺清单 fail-open），
     第三引擎逐景守恒。
+
+    跨 runtime 能力测试依赖插件环境：含 sql_query 的用例
+    （test_sql_query_publish_422_structured）贴 ``requires_plaita_nodes``——
+    save 必先过 Python schema 层，节点未注册即 422、根本到不了能力门
+    （门只裁 Python 认识的节点，校验顺序本身没错）。CI 装上 plaita-nodes
+    后可解禁；其余三景不含插件节点，CI 照跑。
     """
 
     @pytest.fixture()
@@ -615,6 +624,7 @@ class TestRustPoolGate:
         assert redis_rs.xlen(GO_QUEUE) == 0
         assert redis_rs.xlen(DEFAULT_QUEUE) == 0
 
+    @pytest.mark.requires_plaita_nodes
     def test_sql_query_publish_422_structured(self, redis_rs):
         client = _client(redis_rs)
         flow_store.get_flow_store().create_flow("rsq", tenant_id="default")
