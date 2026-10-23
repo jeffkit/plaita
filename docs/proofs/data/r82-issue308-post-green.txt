@@ -40,3 +40,8 @@ b70c8fa462a4ed4ed7f7c79a06e19c45d0e084a99798e650754e05e72cd34432  migrations/env
  plaita-console/backend/services/users_svc.py       | 16 +++++-
  .../console/test_issue304_version_delete_guard.py  | 10 +++-
  5 files changed, 123 insertions(+), 8 deletions(-)
+
+----
+# rebase 后整合树复验（B3 r85 c13bde3 并入后）
+# 2026-10-23 01:58:53 +0800  HEAD=fbb357b（origin/main c13bde3 之上）
+# console 全量：1407 passed, 18 skipped（=1376 本轮 + 31 B3 r85 新用例，零失败）
