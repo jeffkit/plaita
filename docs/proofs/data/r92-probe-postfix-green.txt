@@ -1,0 +1,9 @@
+# r92 修后负控：同一探针、同一注入缝（_outbox_purge 停 1.2s）复跑（修后树）
+# 命令：plaita/.venv/bin/python ~/.issue-keeper/duty/b2-r92-scripts/a136_probe3_survivor_toctou_wt2.py
+setup: flow f1@acme + v1(v1, draft) 就绪
+delete_flow -> committed
+import      -> VersionConflictError: 流程 f1 在版本保存期间被并发删除，版本未落库，请刷新后重试
+终态: flows 行存在=False；flow_versions 行=[]
+孤儿版本（flows 已删但 flow_versions 残留）: False
+删除 API 契约『零删除或全删除』被破坏: False
+rc=0

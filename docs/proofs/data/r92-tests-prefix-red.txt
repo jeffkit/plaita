@@ -1,0 +1,13 @@
+# r92 新增回归测试修前基线树（git stash flow_store.py 修复后）全量失败集
+# 命令：git stash push -- plaita-console/backend/services/flow_store.py &&
+#       pytest tests/console/test_issue314_save_delete_residual_window.py -q
+FAILED tests/console/test_issue314_save_delete_residual_window.py::test_race_fk_engine_import_named_409_no_orphan
+FAILED tests/console/test_issue314_save_delete_residual_window.py::test_race_fk_off_engine_anchor_rejects_no_orphan
+FAILED tests/console/test_issue314_save_delete_residual_window.py::test_fk_violation_translated_not_misleading_dup
+FAILED tests/console/test_issue314_save_delete_residual_window.py::test_anchor_gate_rolls_back_version_row_with_parent_gone
+FAILED tests/console/test_issue314_save_delete_residual_window.py::test_anchor_gate_pass_clean_and_zero_mutation
+5 failed, 23 warnings in 3.54s
+# 修后（stash pop）同文件：5 passed in 3.28s
+# 失败面注记（r90 配方）：本组测试只 import models/services（sys.path[0]=本席
+# worktree backend），不经 plaita_ai editable finder，无混装两棵包体问题；
+# stash 仅含 flow_store.py，修前树失败集全部可信。
