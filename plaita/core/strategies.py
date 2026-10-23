@@ -5,9 +5,10 @@
 - 三个具体策略 ``NormalStrategy`` / ``GeneratorStrategy`` / ``DistributedStrategy``;
 - 策略共用的模块级 helper: ``_advance_one`` / ``_create_lazy_output`` /
   ``_create_end_output`` / ``_subscribe_event``;
-- 嵌套挂起（plaita#311 NS-M3）的边界转换 helper:
-  ``_park_nested_suspension``（DistributedStrategy 薄方法委托）/ ``_scope_gate_blocker``
-  / ``_carrier_frame_dicts`` / ``_load_suspend_frames`` / ``flow_contains_suspending_node``。
+- 嵌套挂起（plaita#311 NS-M3）的边界转换与沿路径恢复 helper:
+  ``_park_nested_suspension``（DistributedStrategy 方法）/ ``_handle_nested_resume``
+  / ``_advance_frame_to_end`` / ``_scope_gate_blocker`` / ``_carrier_frame_dicts`` /
+  ``_load_suspend_frames`` / ``flow_contains_suspending_node``。
 
 Driver (``FlowExecution``) 留在 ``plaita.core.executor``, 通过本模块组合策略。
 ``executor`` 重新导出本模块的公开符号, 保持 ``from plaita.core.executor import
@@ -267,7 +268,8 @@ class DistributedStrategy:
         # 从 last_node_id 后继步进即恰好重跑失败节点、已完成节点不重放。
         # _handle_resume 是 EventNode 挂起专用路径，retry 不进。
         if saved_context and resume_type not in (ResumeType.CONTINUE, ResumeType.RETRY):
-            return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data)
+            return await self._handle_resume(flow, context, runner, callback_manager, resume_type, resume_data,
+                                             max_timeout_ms=timeout_ms)
 
         if not saved_context and resume_type is not ResumeType.CONTINUE:
             # checkpoint 丢失/未传时，resume_type='cancel' 等会被静默丢弃、
@@ -302,6 +304,19 @@ class DistributedStrategy:
                             "Use resume_type='event'/'cancel'/'timeout' to resolve the event first.",
                             node=suspended_node,
                         )
+            # plaita#311 NS-M3：嵌套挂起的 checkpoint 带帧路径（$SUSPEND_FRAMES，
+            # 最内帧的 pending 挂起点不在根 $LAST_NODE 上）——continue/retry
+            # 同样不得绕过（#33 守卫的嵌套半边；帧存在即执行仍处于挂起态）。
+            frame_dicts = _load_suspend_frames(context)
+            if frame_dicts:
+                raise ResumeGuardError(
+                    "Execution is suspended inside a nested child/reference call chain "
+                    f"({_describe_frame_path(frame_dicts)}); resume_type='continue'/'retry' "
+                    "would silently skip the pending suspension. "
+                    "Use resume_type='event'/'cancel'/'timeout' to resolve the innermost "
+                    "suspended node first.",
+                )
+
         try:
             current_node, result, branch = await self._determine_current_node(
                 flow, context, runner, callback_manager, max_timeout_ms=timeout_ms)
@@ -424,11 +439,21 @@ class DistributedStrategy:
         """委托模块级实现（SC-003 类体预算：实现放模块层，见文件头说明）。"""
         return await _park_nested_suspension(carrier, flow, context, callback_manager)
 
-    async def _handle_resume(self, flow, context, runner, callback_manager, resume_type, resume_data):
+    async def _handle_resume(self, flow, context, runner, callback_manager, resume_type, resume_data,
+                             max_timeout_ms=None):
         # 统一在此 coerce, 覆盖 execute (已 coerce, 幂等) 与 _handle_resume_operation
         # (历史直传字符串) 两条入口, 避免裸字符串漏到下面的 enum 比较。
         resume_type = ResumeType.coerce(resume_type)
         pfx = context.express_prefix
+
+        # plaita#311 NS-M3：嵌套挂起的 checkpoint 带帧路径——决策步与续跑沿帧
+        # 路径进行（最内帧先恢复 → 帧回退逐层返回）。无帧路径保持既有根流程
+        # 行为逐字不变（向后兼容钉）。
+        frame_dicts = _load_suspend_frames(context)
+        if frame_dicts:
+            return await self._handle_nested_resume(
+                flow, context, runner, callback_manager, resume_type, resume_data,
+                frame_dicts, max_timeout_ms=max_timeout_ms)
 
         last_node_id = context.last_node_id
         if not last_node_id:
@@ -441,42 +466,10 @@ class DistributedStrategy:
             raise ResumeGuardError(f"Node {current_node.id} is not an EventNode", node=current_node)
         node_results = context.get_state(f"{pfx}{context.express_node_name}", {})
         prev_state = node_results.get(last_node_id, {})
-        if prev_state.get("status", "") != "pending":
-            raise ResumeGuardError(
-                f"EventNode {current_node.id} is not in pending status: {prev_state.get('status', '')}",
-                node=current_node,
-            )
-        if resume_type not in (ResumeType.CANCEL, ResumeType.TIMEOUT, ResumeType.EVENT):
-            raise ResumeError(
-                f"Unsupported resume type for EventNode: {resume_type.value}, only support cancel, timeout, event",
-                node=current_node,
-            )
 
-        # plaita#221：resume 必须绑定挂起期登记的那条订阅。准入判据此前只有
-        # 「is_suspending + status=pending」——同一挂起点的 event 与 timeout 用
-        # 两把**不同**去重键（event_filter.py:222 vs :333），先到的一条解决本
-        # 节点、流程推进并在下游重新挂起后，后到的陈旧 resume 会通过准入把
-        # **下游**节点标成 completed/timeout 并写入上一事件的载荷。此刻执行是
-        # suspended（非终态），终态短路挡不住。
-        violation = _resume_binding_violation(prev_state, resume_type, resume_data)
-        if violation:
-            logger.warning(
-                "丢弃陈旧 resume（%s）：%s；执行保持挂起，等待当前订阅的决议",
-                resume_type.value, violation,
-            )
-            raise ResumeGuardError(
-                f"Stale {resume_type.value} resume for EventNode {current_node.id}: "
-                f"{violation}; execution stays suspended",
-                node=current_node,
-            )
-
-        # 私有绑定键只用于准入校验，不进节点载荷（event_data / 流程输出保持
-        # 调用方给的原样；event_filter 的公开 subscription_id 键不动）。
-        if isinstance(resume_data, dict) and RESUME_BINDING_KEY in resume_data:
-            resume_data = {
-                key: value for key, value in resume_data.items()
-                if key != RESUME_BINDING_KEY
-            }
+        # 准入三闸（pending 状态 / resume_type 白名单 / #221 订阅绑定）与嵌套
+        # 路径共用同一 helper——语义逐字一致（plaita#33/#221）。
+        resume_data = _gate_resume_carrier(current_node, prev_state, resume_type, resume_data)
 
         exec_ctx = runner.node_execution or context
         callback_manager.on_flow_resume(flow)
@@ -497,6 +490,14 @@ class DistributedStrategy:
         context.update_node_result(current_node, result)
         await self._unregister_suspended_subscription(current_node, context, prev_state)
         return _create_lazy_output(current_node, result, None, context.to_dict(), is_suspend=False, execution_id=context.execution_id)
+    async def _handle_nested_resume(self, flow, context, runner, callback_manager,
+                                    resume_type, resume_data, frame_dicts,
+                                    max_timeout_ms=None):
+        """委托模块级实现（SC-003 类体预算：实现放模块层，见文件头说明）。"""
+        return await _handle_nested_resume(
+            self, flow, context, runner, callback_manager, resume_type, resume_data,
+            frame_dicts, max_timeout_ms=max_timeout_ms)
+
     async def _unregister_suspended_subscription(self, node, context, prev_state):
         """resume 完成后注销挂起期注册的事件订阅。
 
@@ -600,8 +601,8 @@ def _resume_binding_violation(prev_state, resume_type, resume_data) -> Optional[
 
 
 # ---------------------------------------------------------------------------
-# 嵌套挂起（plaita#311 NS-M3）：边界转换（传播 + 逐帧 checkpoint + 作用域闸）
-# 的实现体（模块级——SC-003 类体预算；DistributedStrategy 以同名薄方法委托）
+# 嵌套挂起（plaita#311 NS-M3）：边界转换与沿路径恢复的实现体
+# （模块级——SC-003 类体预算；DistributedStrategy 以同名薄方法委托）
 # ---------------------------------------------------------------------------
 
 async def _park_nested_suspension(carrier, flow, context, callback_manager):
@@ -669,6 +670,221 @@ async def _park_nested_suspension(carrier, flow, context, callback_manager):
         outermost, pending_state, None, context.to_dict(),
         is_suspend=True, execution_id=context.execution_id,
     )
+
+
+async def _handle_nested_resume(strategy, flow, context, runner, callback_manager,
+                                resume_type, resume_data, frame_dicts,
+                                max_timeout_ms=None):
+    """嵌套挂起的沿帧路径恢复（plaita#311 NS-M3）。
+
+    与 rs ``SuspendedExecution::resume`` 续跑循环 / go ``ResumeSuspension``
+    语义逐点对齐：**决策步**（最内帧挂起节点，``node.resume`` 多态分发不变，
+    订阅注销按最内帧执行）→ 最内流程续跑 → 每层 flow 完成时作为「调用返回」
+    把值回填父帧（``$NODE[child]``=返回值 + ``$LAST_NODE``=child + 续跑
+    ``child.next``）→ 根帧回填后本步收尾——根流程的后续步进由后续 continue
+    步驱动（plaita 分布式逐步契约；worker 对非挂起非终态结果自动续步）。
+    续跑途中再次挂起则合并调用栈重新入挂起态（新现场更深在前 + 会话剩余栈
+    在后，rs ``inner.call_stack.extend(stack)`` 对应面）。
+
+    帧的 flow 定义不从 checkpoint 反序列化，而是沿根 flow 的 child/reference
+    节点（``node.child_flow``）逐层下行解析——flow_id 不匹配即具名拒绝
+    （定义漂移防线，与 worker 的 flow_hash 指纹同族语义）。
+    """
+    if resume_type not in (ResumeType.CANCEL, ResumeType.TIMEOUT, ResumeType.EVENT):
+        raise ResumeError(
+            f"Unsupported resume type for EventNode: {resume_type.value}, "
+            "only support cancel, timeout, event",
+        )
+
+    # -- 帧解析与 flow 链下行（最外→最内；帧 schema 见 _carrier_frame_dicts）--
+    if not isinstance(frame_dicts, list) or len(frame_dicts) < 2:
+        raise ResumeError(
+            "Malformed nested suspension frames: expected at least an innermost "
+            f"frame and the root frame, got {frame_dicts!r}"
+        )
+    if frame_dicts[-1].get("context") is not None:
+        raise ResumeError(
+            "Malformed nested suspension frames: the outermost (root) frame must "
+            "not carry a context snapshot (the root state is the checkpoint body)"
+        )
+
+    resolved = []  # [(node, frame_flow, frame_ctx)] 最外→最内
+    frame_flow = flow      # 根帧 flow = 本次恢复调用的根 flow
+    frame_ctx = context    # 根帧 ctx = 主上下文（checkpoint 本体已在 execute 恢复）
+    for depth, entry in enumerate(reversed(frame_dicts)):
+        saved_ctx = entry.get("context")
+        if saved_ctx is None and entry is not frame_dicts[-1]:
+            raise ResumeError(
+                f"Malformed nested suspension frame at innermost depth "
+                f"{len(frame_dicts) - 1 - depth}: intermediate frames must carry "
+                "a context snapshot (only the root frame may omit it)"
+            )
+        if depth > 0:
+            # 更内一帧：ctx 从帧快照重建；flow 已由上一层迭代下行。
+            # parent=根 ctx——event bus / cancel_requested / 租户身份经父子
+            # 链继承（ExecutionContext.child() 同款七项继承）。
+            frame_ctx = context.child()
+            frame_ctx.context = saved_ctx
+        node_id = entry.get("node_id")
+        flow_id = getattr(frame_flow, "flow_id", None)
+        try:
+            node = frame_flow.find_node_by_id(node_id)
+        except Exception as e:
+            raise ResumeError(
+                f"Nested suspension frame node {node_id!r} not found in flow "
+                f"{flow_id!r}: the frame path drifted from the flow definition "
+                "(was the flow modified after suspension?)"
+            ) from e
+        entry_flow_id = entry.get("flow_id")
+        if entry_flow_id and flow_id != entry_flow_id:
+            raise ResumeError(
+                f"Nested suspension frame flow mismatch at node {node_id!r}: "
+                f"checkpoint recorded flow {entry_flow_id!r}, resume flow is "
+                f"{flow_id!r}"
+            )
+        resolved.append((node, frame_flow, frame_ctx))
+        if entry is not frame_dicts[0]:
+            child_flow = getattr(node, "child_flow", None)
+            if child_flow is None:
+                raise ResumeError(
+                    f"Nested suspension frame node {node_id!r} in flow {flow_id!r} "
+                    "has no child_flow: cannot descend the suspension frame path"
+                )
+            frame_flow = child_flow
+
+    # -- 决策步：最内帧挂起节点（准入三闸与根路径逐字同语义）--
+    node, inner_flow, inner_ctx = resolved[-1]
+    if getattr(node, "is_suspending", False) is not True:
+        # 保留 "is not an EventNode" 文案以兼容历史测试断言（根路径同款）。
+        raise ResumeGuardError(f"Node {node.id} is not an EventNode", node=node)
+    pfx_inner = inner_ctx.express_prefix
+    node_results = inner_ctx.get_state(f"{pfx_inner}{inner_ctx.express_node_name}", {})
+    prev_state = node_results.get(node.id) if isinstance(node_results, dict) else None
+    resume_data = _gate_resume_carrier(node, prev_state, resume_type, resume_data)
+
+    # node.resume 直接收**帧上下文**：EventNode.on_event 读 $NODE 帧状态，
+    # 传根 facade 会读错帧（嵌套语义面）。
+    callback_manager.on_flow_resume(flow)
+    callback_manager.on_node_resume(inner_flow, node)
+    try:
+        result = node.resume(inner_ctx, resume_type, resume_data)
+        callback_manager.on_node_end(inner_flow, node, result)
+    except Exception as e:
+        error = {"code": -500, "message": str(e)}
+        callback_manager.on_node_end(inner_flow, node, None, error, exception=e)
+        logger.error("Error during resume: %s", _scrub_url_text(e))
+        resume_err = ResumeError(str(e), node=node)
+        resume_err.source_line = getattr(node, "source_line", None)
+        raise resume_err from e
+
+    inner_ctx.update_node_result(node, result)
+    await strategy._unregister_suspended_subscription(node, inner_ctx, prev_state)
+
+    # -- 续跑循环：栈 = 待返回父帧（index 0 = 最内父帧，末项 = 根帧）--
+    stack = [
+        (resolved[k][1], resolved[k][2], resolved[k][0])
+        for k in range(len(resolved) - 2, -1, -1)
+    ]
+    current_flow, current_ctx = inner_flow, inner_ctx
+    next_node = inner_flow.next_node(node, None)
+    if next_node is None and not inner_flow.is_end_node(node):
+        _handle_missing_next(node)
+
+    while True:
+        try:
+            value = await _advance_frame_to_end(
+                current_flow, current_ctx, callback_manager, next_node,
+                max_timeout_ms=max_timeout_ms)
+        except FlowSuspendedCarrier as carrier:
+            # 再挂起：新现场（更深）的调用栈在前，本会话剩余栈在后拼接，
+            # 然后走同一边界转换（作用域闸 → 订阅注册 → 逐帧 checkpoint，
+            # 旧帧路径被 $SUSPEND_FRAMES 覆写）。旧订阅已在上方注销——
+            # 「旧注销先于新注册」次序成立（程式 ③.6）。
+            for frame_flow, frame_ctx, frame_node in stack:
+                carrier.push_frame(frame_flow, frame_ctx, frame_node)
+            return await _park_nested_suspension(carrier, flow, context, callback_manager)
+
+        # 本帧完成：每完成帧发 FlowEnd(result=返回值)，最内→根（恢复方向
+        # 无 FlowStart，验证报告 Q2 口径；根帧的 FlowEnd 仍由既有机制负责）。
+        callback_manager.on_flow_end(current_flow, result=value)
+
+        if not stack:
+            raise ResumeError(
+                "nested suspension resume: call stack exhausted before the root "
+                "frame return step"
+            )
+        frame_flow, frame_ctx, child_node = stack.pop(0)
+        # 返回步 output 校验（rs validate_child_return_output 对应面）：
+        # 校验失败 = ResumeError（终态失败，不静默回填）。
+        validate = getattr(child_node, "_validate_output", None)
+        if validate is not None:
+            try:
+                validate(value)
+            except Exception as e:
+                raise ResumeError(
+                    f"call frame node {child_node.id!r}: {e}", node=child_node,
+                ) from e
+        # 回填细则（程式 ③.2）：$NODE[child]=v、$LAST_NODE=child、不写 $ERROR。
+        frame_ctx.update_node_result(child_node, value)
+        frame_ctx.last_node_id = child_node.id
+        callback_manager.on_node_end(frame_flow, child_node, value)
+        if not stack:
+            # 根帧回填完成 → 本步收尾：帧路径已消费（置空 $SUSPEND_FRAMES），
+            # 根流程从 child.next 的推进交给后续 continue 步（plaita 分布式
+            # 逐步契约；输出 id=根帧子节点、is_suspend=False——worker据此
+            # 置 running 并自动续步）。
+            context.set_state(f"{context.express_prefix}{SUSPEND_FRAMES_KEY}", None)
+            return _create_lazy_output(
+                child_node, value, None, context.to_dict(),
+                is_suspend=False, execution_id=context.execution_id,
+            )
+        current_flow, current_ctx = frame_flow, frame_ctx
+        next_node = frame_flow.next_node(child_node, None)
+        if next_node is None and not frame_flow.is_end_node(child_node):
+            _handle_missing_next(child_node)
+
+
+def _gate_resume_carrier(node, prev_state, resume_type, resume_data):
+    """决策步准入三闸（plaita#311 NS-M3 抽取）：根路径与嵌套路径共用。
+
+    语义与抽取前逐字一致（plaita#33 / #221）：
+
+    1. ``status=pending``——非 pending 的挂起节点不可再决议；
+    2. resume_type 白名单（cancel/timeout/event）；
+    3. #221 订阅绑定——event/timeout 载体必须绑定挂起期登记的那条订阅
+       （``_resume_binding_violation``），陈旧载体具名拒绝、执行保持挂起。
+
+    通过后剥掉私有绑定键（不进节点载荷）并返回清洗后的 resume_data。
+    """
+    if not isinstance(prev_state, dict):
+        prev_state = {}
+    if prev_state.get("status", "") != "pending":
+        raise ResumeGuardError(
+            f"EventNode {node.id} is not in pending status: {prev_state.get('status', '')}",
+            node=node,
+        )
+    if resume_type not in (ResumeType.CANCEL, ResumeType.TIMEOUT, ResumeType.EVENT):
+        raise ResumeError(
+            f"Unsupported resume type for EventNode: {resume_type.value}, only support cancel, timeout, event",
+            node=node,
+        )
+    violation = _resume_binding_violation(prev_state, resume_type, resume_data)
+    if violation:
+        logger.warning(
+            "丢弃陈旧 resume（%s）：%s；执行保持挂起，等待当前订阅的决议",
+            resume_type.value, violation,
+        )
+        raise ResumeGuardError(
+            f"Stale {resume_type.value} resume for EventNode {node.id}: "
+            f"{violation}; execution stays suspended",
+            node=node,
+        )
+    if isinstance(resume_data, dict) and RESUME_BINDING_KEY in resume_data:
+        return {
+            key: value for key, value in resume_data.items()
+            if key != RESUME_BINDING_KEY
+        }
+    return resume_data
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +973,42 @@ def flow_contains_suspending_node(flow) -> bool:
         if child is not None and flow_contains_suspending_node(child):
             return True
     return False
+
+
+async def _advance_frame_to_end(flow, context, callback_manager, start_node, max_timeout_ms=None):
+    """恢复会话的单帧推进体（rs ``advance_and_finalize`` / go ``runNodes`` 的
+    恢复侧对应面）：从给定节点推进到 End 并返回其输出。
+
+    途中挂起经 :func:`_advance_one` 的 carrier 机制上抛（调用方捕获后走再挂起
+    栈拼接）；节点错误照常走既有 retry/errorHandler 链——恢复会话不绕过首跑
+    的本帧策略链（验证报告 Q8.1 的 fail-open 反面）。
+
+    预算（程式一④）：每帧新鲜发放——``execution_deadline_ms``（flow 自有
+    timeout 由上游合并传入，缺省执行级 1800s），节点之间检查墙钟，与
+    ``NormalStrategy`` 同形；分布式逐步本就 per-step 新鲜发放，本 helper 把同
+    一口径落到嵌套恢复的每一帧。
+    """
+    max_timeout_ms = execution_deadline_ms(max_timeout_ms)
+    runner = NodeRunner(context)
+    node = start_node
+    start_time = time.time()
+    while node is not None:
+        result, branch, next_node, is_end = await _advance_one(
+            flow, runner, callback_manager, node, max_timeout_ms=max_timeout_ms)
+        if is_end:
+            return result
+        if next_node is None:
+            # _handle_missing_next 的 errorHandler continue 逃生口：与
+            # NormalStrategy 同口径——以 $NODE 状态表收尾。
+            break
+        if max_timeout_ms is not None and (time.time() - start_time) > max_timeout_ms / 1000:
+            raise ExecutionDeadlineError(
+                f"Flow execution Timeout: execution deadline of {max_timeout_ms}ms "
+                f"exceeded before running node {next_node.id}"
+            )
+        node = next_node
+    pfx = context.express_prefix
+    return context.get_state(f"{pfx}{context.express_node_name}", {})
 
 
 def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None, is_end=False):
