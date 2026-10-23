@@ -416,6 +416,12 @@ class FlowStore:
         VersionConflictError（409 语义），事务整体回滚、零删除、outbox 不
         purge。守卫判据与删行由此等价于同一快照：窗内翻转使删除具名失败，
         而非静默删掉刚发布版本。``None`` 保留无条件级联（存量直调方）。
+
+        #314：幸存者复核在 ``_outbox_purge`` 之后、commit 之前再跑一次
+        （二次闸），封「首轮复核 → commit」残窗在 MVCC 后端落进已提交新
+        版本的面；SQLite 单写锁窗内写由保存侧父行锚点兜（见
+        ``_assert_flow_row_alive``），两侧收敛为「删除具名 409 或 import
+        具名失败」，不存在孤儿版本终态。
         """
         with self._session_local() as session:
             record = session.scalars(
@@ -448,6 +454,14 @@ class FlowStore:
             # #299：级联删版本的同时清掉发布 outbox，防对账重投已删流程。
             # 租户以行内为准（全量视角删除时入参 tenant_id 可能为 None）。
             _outbox_purge(session, tenant_id=row_tenant, flow_id=flow_id)
+            if expected_versions is not None:
+                # #314：幸存者复核的 commit 前二次闸——首轮复核（删行后立即）
+                # 与 commit 之间的残窗，MVCC 后端可落进「已提交的新版本」；
+                # SQLite 单写锁下窗内写只能排队（由保存侧父行锚点兜住），此处
+                # 重跑一次复核封住 MVCC 缝，近零成本（一条索引 SELECT）。
+                self._assert_no_version_survivors(
+                    session, flow_id=flow_id, tenant_id=row_tenant
+                )
             session.flush()
             assert_tenant_generation(session, tenant_id)
             session.commit()
@@ -483,6 +497,22 @@ class FlowStore:
                 + ("；如确需删除已发布版本请显式传 force=true"
                    if current == "published" else "")
             )
+        self._assert_no_version_survivors(
+            session, flow_id=flow_id, tenant_id=tenant_id
+        )
+
+    @staticmethod
+    def _assert_no_version_survivors(
+        session: Session, *, flow_id: str, tenant_id: str
+    ) -> None:
+        """#314（自 A134-02 内联抽出）：幸存者复核——库内存在删除快照之外
+        的版本行即 409（整体零删除由调用方事务回滚保证）。
+
+        调用点两处：``_delete_versions_pinned`` 逐行钉删后首轮；``delete_flow``
+        ``_outbox_purge`` 之后、flush/commit 之前的二次闸（purge 里可挂
+        Redis 往返/守卫恢复等副作用，把「复核 → commit」拉宽，MVCC 后端
+        该缝可落进已提交的新版本）。
+        """
         survivors = session.scalars(
             select(FlowVersion.version).where(
                 FlowVersion.tenant_id == tenant_id,
@@ -541,6 +571,10 @@ class FlowStore:
           现有最大 semver 原子分配 patch+1（同一 session 内读+插，
           IntegrityError 重试兜底），消除前端本地列表算 next 的撞号；
           实际版本号经返回值 ``version`` 通告。
+
+        #314：新建本版本与并发 ``delete_flow`` 交叠时，最终态二者其一——
+        本保存具名 409（父行锚点写 / FK 强制引擎的 IntegrityError 翻译）或
+        删除具名 409（幸存者复核）；不存在「flows 已删而版本行残留」。
         """
         self.ensure_flow(flow_id, tenant_id=tenant_id)
         if runtime is not None:
@@ -651,7 +685,33 @@ class FlowStore:
                 runtime=runtime or "python",
             )
             session.add(row)
-            session.flush()
+            try:
+                session.flush()
+            except IntegrityError as e:
+                # #314：FK 强制引擎上（console 引擎每次 checkout 拨 PRAGMA，
+                # PG/MySQL 原生强制），父行已被并发删除提交时 INSERT 具名失败
+                # 为 IntegrityError——直穿 save_flow_definition 的重试环会被
+                # 误报成「版本已存在」。先回滚再跨会话复核父行：已消失则翻译
+                # 成 409 具名冲突；仍在则是真约束冲突，原样上抛。
+                session.rollback()
+                if self.get_flow_record(flow_id, tenant_id=tenant_id) is None:
+                    raise VersionConflictError(
+                        f"流程 {flow_id} 在版本保存期间被并发删除，"
+                        "版本未落库，请刷新后重试"
+                    ) from e
+                raise
+            # #314：父行锚点写——版本行的 INSERT 与「父行存在」绑死同一
+            # commit。FK 关闭的引擎（裸 engine/存量 SQLite）上，并发
+            # delete_flow 持写锁会让上面的 INSERT 排队到删除提交**之后**才
+            # 落地，而保存侧一切更早的存在性检查都发生在排队之前，看不见这个
+            # 删除（A134-02 幸存者复核同理，只兜「复核时点已提交」）。这条
+            # 零变异 UPDATE（author=author，不动 updated_at）在 INSERT 已
+            # 取得的写锁内复核父行：rowcount=0（父行已随删除提交消失）→ 抛
+            # VersionConflictError，事务整体回滚、版本行随之消失，孤儿不可能
+            # 落库；rowcount=1 则写锁持有到 commit，并发删除必排队到本事务
+            # 之后、撞删除侧幸存者复核 409（零删除）。两侧收敛为「import 具名
+            # 失败或删除具名 409」，任何时序都不存在孤儿终态。
+            self._assert_flow_row_alive(session, flow_id=flow_id, tenant_id=tenant_id)
             self._touch_updated_at(session, flow_id, version, tenant_id)
             assert_tenant_generation(session, tenant_id)
             session.commit()
@@ -762,6 +822,30 @@ class FlowStore:
             ),
             {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
         )
+
+    def _assert_flow_row_alive(
+        self, session: Session, *, flow_id: str, tenant_id: str
+    ) -> None:
+        """#314：父行锚点写——零变异 ``UPDATE flows SET author = author``。
+
+        用途见 ``_save_flow_once`` INSERT 分支注释。选自赋值而非
+        ``updated_at`` 前进：flows.updated_at 是列表排序键，版本保存不应
+        挪它（守恒）；rowcount 口径 SQLAlchemy 各方言一致按匹配行计（MySQL
+        经 CLIENT_FOUND_ROWS），``author=author`` 恒命中即 1。调用点必须在
+        同事务内已有写（INSERT flush），否则锚点拿不到串行化点。
+        """
+        result = session.execute(
+            text(
+                "UPDATE flows SET author = author "
+                "WHERE tenant_id = :tid AND flow_id = :fid"
+            ),
+            {"tid": tenant_id, "fid": flow_id},
+        )
+        if result.rowcount != 1:
+            raise VersionConflictError(
+                f"流程 {flow_id} 在版本保存期间被并发删除，"
+                "版本未落库，请刷新后重试"
+            )
 
     def _stored_updated_at(
         self, session: Session, flow_id: str, version: str, tenant_id: Optional[str]

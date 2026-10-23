@@ -1,0 +1,9 @@
+# r92 修前负控：A1 r136 探针换根复跑（REPO→plaita-wt2，修前树 9072b9a）
+# 命令：plaita/.venv/bin/python ~/.issue-keeper/duty/b2-r92-scripts/a136_probe3_survivor_toctou_wt2.py
+setup: flow f1@acme + v1(v1, draft) 就绪
+delete_flow -> committed
+import      -> saved v2 -> v2 (draft)
+终态: flows 行存在=False；flow_versions 行=['v2:draft']
+孤儿版本（flows 已删但 flow_versions 残留）: True
+删除 API 契约『零删除或全删除』被破坏: True
+rc=0
