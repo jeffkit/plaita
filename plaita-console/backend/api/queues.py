@@ -18,9 +18,9 @@ except ImportError:  # 顶层 ``api`` 包（测试/脚本模式）
 from redis import Redis
 
 try:
-    from .redis_scan import scan_keys
+    from .redis_scan import KNOWN_DLQ_KEYS, KNOWN_QUEUES, scan_keys
 except ImportError:  # 平铺布局（cwd=backend）运行时
-    from api.redis_scan import scan_keys  # type: ignore
+    from api.redis_scan import KNOWN_DLQ_KEYS, KNOWN_QUEUES, scan_keys  # type: ignore
 
 try:
     from ..auth import ensure_platform_admin, require_auth, tenant_scope
@@ -171,17 +171,9 @@ def get_redis(request: Request) -> Redis:
 
 # ============ 已知队列列表 ============
 
-# 注意：DLQ（死信）键此前不在本表——队列页永远看不到死信堆积（#26），
-# 只能靠 redis-cli 才能发现。`<queue>:dlq` 由 task_queue.dlq_stream_key 生成。
-KNOWN_QUEUES = [
-    "plaita:flow:queue",           # 流程任务队列
-    "plaita:flow:queue:v2",        # 流程任务队列 v2（FlowWorker 实消费流）
-    "plaita:flow:queue:dlq",       # 上述队列的死信 Stream
-    "plaita:flow:queue:v2:dlq",    # v2 队列的死信 Stream
-    "plaita:delay:queue",          # 延迟任务队列
-    "plaita:redis_queue:*",        # Redis 队列服务
-    "plaita:kafka_queue:*",        # Kafka 队列服务
-]
+# ``KNOWN_QUEUES`` / ``KNOWN_DLQ_KEYS`` 的定义自 C1（plaita#323）起住在
+# ``redis_scan``（无域键登记），这里再导出以保持 ``queues_api.KNOWN_QUEUES``
+# 调用面；本模块只保留队列读面专有的后缀/收容段/单键放行逻辑。
 
 DLQ_SUFFIX = ":dlq"
 
@@ -189,13 +181,6 @@ DLQ_SUFFIX = ":dlq"
 # ``:dlq`` 结尾、也不是登记队列键——A135-01 之前 DLQ 列表/replay 的后缀执法
 # 点对它一律拒绝（404 不可达），收容债无从清偿。
 QUARANTINE_SEGMENT = ":quarantine:"
-
-# 显式登记的死信键：DLQ 是纯记录流，只在有死信时才被创建——空 DLQ 也保留
-# 零值行，页面才不缺行（否则「看不到」与「没有死信」无从区分）。
-KNOWN_DLQ_KEYS = [
-    "plaita:flow:queue:dlq",
-    "plaita:flow:queue:v2:dlq",
-]
 
 # 单键读取的资源范围：只放行 KNOWN_QUEUES 登记的字面键，或登记通配项的
 # 前缀（`plaita:redis_queue:*` → `plaita:redis_queue:`）。否则任意键名都可

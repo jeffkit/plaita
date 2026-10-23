@@ -46,6 +46,33 @@ DEFAULT_MAX_ROUNDS = 250
 DEFAULT_TIME_BUDGET_S = 1.0
 
 
+# ============ 已知队列键登记 ============
+#
+# C1 控制面边界（plaita#323）：本表此前定义在 ``api/queues.py``（gateway 域），
+# 而 ``api/metrics.py``（observability 域）为渲染队列/死信指标反向 import 它。
+# 键登记是无域的 Redis 键空间事实，与本模块「键枚举单源」同一归属；``queues``
+# 再导出同名符号，调用面不变。
+#
+# 注意：DLQ（死信）键此前不在本表——队列页永远看不到死信堆积（#26），
+# 只能靠 redis-cli 才能发现。`<queue>:dlq` 由 task_queue.dlq_stream_key 生成。
+KNOWN_QUEUES = [
+    "plaita:flow:queue",           # 流程任务队列
+    "plaita:flow:queue:v2",        # 流程任务队列 v2（FlowWorker 实消费流）
+    "plaita:flow:queue:dlq",       # 上述队列的死信 Stream
+    "plaita:flow:queue:v2:dlq",    # v2 队列的死信 Stream
+    "plaita:delay:queue",          # 延迟任务队列
+    "plaita:redis_queue:*",        # Redis 队列服务
+    "plaita:kafka_queue:*",        # Kafka 队列服务
+]
+
+# 显式登记的死信键：DLQ 是纯记录流，只在有死信时才被创建——空 DLQ 也保留
+# 零值行，页面才不缺行（否则「看不到」与「没有死信」无从区分）。
+KNOWN_DLQ_KEYS = [
+    "plaita:flow:queue:dlq",
+    "plaita:flow:queue:v2:dlq",
+]
+
+
 @dataclass(frozen=True)
 class ScanResult:
     """一次有界扫描的结果。

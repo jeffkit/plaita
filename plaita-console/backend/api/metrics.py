@@ -24,11 +24,10 @@ from plaita.server.metrics import Metric, collect_queue_metrics, render_promethe
 from plaita.server.task_queue import DEFAULT_CONSUMER_GROUP
 
 try:
-    from .queues import KNOWN_DLQ_KEYS, KNOWN_QUEUES
-    from .redis_scan import scan_keys
+    # C1（plaita#323）：键登记住 redis_scan（无域）；不再反向 import api.queues。
+    from .redis_scan import KNOWN_DLQ_KEYS, KNOWN_QUEUES, scan_keys
 except ImportError:  # 平铺布局（cwd=backend）运行时
-    from queues import KNOWN_DLQ_KEYS, KNOWN_QUEUES  # type: ignore
-    from redis_scan import scan_keys  # type: ignore
+    from redis_scan import KNOWN_DLQ_KEYS, KNOWN_QUEUES, scan_keys  # type: ignore
 
 logger = logging.getLogger("api.metrics")
 
