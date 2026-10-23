@@ -242,3 +242,55 @@
 - 教训：多类插入测试脚本用锚点类名定位时，插入点必须选类边界（本轮首插把新类插进既有类中间吞并 2 方法——git diff 结构核对抓出回滚重做）；worktree 无 .venv，pytest 走系统 python3+sys.path 注入 worktree 根即绿。
 
 **一行摘要**：第十二轮 manifest 位次双仓落地——rs 侧键名对齐 Go json tags（contract_version→ir_contract_version，旧键名会被 console 形状闸 fail-open 判无清单的真缺口，负控双向咬合）；console 侧 ENGINES 注册 plaita-rs→rust 池（门/路由/文案三处），Rust 实产 manifest 喂五键闸 ACCEPT+rust 池三景守恒；**registry 路径核实=Rust 池不经 registry（worker 未落地），收窄为 manifest 产物+console 识别，写入接线记 r13 后**；cargo 177P/diffcheck 23-23/console 1523P+2 基线红（main 同红）；feat/manifest-slot `8fbce14`+manifest-console `d78a31a` 已推待验收。
+
+## 第十三轮·NS-M2 收官（2026-10-23，plaita-go 嵌套挂起合并 main dea859f，CI 绿）
+
+- 实现席 D 交付 fix/nested-suspend（4 提交，rs#16 十用例对拍镜像测试集 490 行）。**实现中实弹修掉两个关键缺口**：①FrameKind seed 标注被子流程 prepareExecutionRuntimeContext 的新建上下文抹掉（闸失明）→ NewExecutionRuntimeContext 单点从 seed 传播；②Event.Resume 裸 rebuild 丢挂起态（event_id/subscription_id）→ 补全量保留（对齐 rs resume_node_body 契约）。
+- 主控验收：gofmt/vet/build 净、嵌套十用例全绿（注册/注销计数断言、栈路径断言与 rs 逐点对齐）；TestWorkflow_Execute 两子测试系存量失败（基线实跑核实，与本分支无关，建议另开单）。
+- **共享主仓竞态实录（纪律三防的活教材）**：在共享主仓做合并期间，B3 席 r94 正在同一 checkout 活跃提交推送——我的合并提交 4b3abc3 被其 reset/推进序列孤立（rev-parse 与 git log 相隔数秒给出矛盾视图）。改走干净打法：分支 rebase 到 r94 最新 main（冲突零）→ 临时 detach worktree 合并 → push HEAD:main（dea859f）→ 临时 worktree 即拆。**规约固化：共享主仓永不直接合并；一律「分支 rebase 最新 + 临时 detach worktree 合并推送」。**
+- 验收清单十项全勾（child 链/孙代双帧/reference 隔离/loop 直连注册前拒/loop→reference 无孤儿/errorHandler 不吞/parallel join+background 静态拒/再挂起栈合并/深位绑定+timeout 载体/cancel 期恢复——go 无进程内 cancel 面故该例留 worker 接线单）。
+- 遗留：①恢复会话执行级缺省预算（withFrameBudget 现以 flow.Timeout 为准，无 timeout 则帧无预算——缺省 1800s 留 worker 层 TODO）；②Workflow.Resume 旧入口无实例重入守卫（ResumeSuspension 已持有）；③事件账目无专项断言测试（NS-M4 对拍集覆盖）；④r94 的 cmd/plaita-worker CI 红系并行批次业务，我合并后的运行已绿（疑似 flaky）。
+
+**一行摘要**：NS-M2 收官——plaita-go 嵌套挂起 v1 合并 main dea859f CI 绿（活帧调用栈/FrameKind seed 传播修标注抹除缺口/转换点主闸+无孤儿/静态分支闸/ResumeSuspension 沿栈恢复/十用例对拍镜像）；共享主仓竞态实录并固化「分支 rebase+临时 detach worktree 合并推送」规约；NS-M4 三引擎对拍集与 NS-M3 plaita 实现为后续轮。
+
+## 第十三轮·读穿透（2026-10-23，全量入位第三步：outbox 读穿透——plaita-rs feat/outbox-readthrough `cca9ea3`[feat]+`f606ac2`[docs] 已推 origin 待主控验收合并）
+
+- **基线对账**：origin/main `327ca3a`（r11 hash 门 f0cd802+r12 manifest 8fbce14+NS-M1 ce8df7b 均已在册；NS 线/他席与读穿透面零交集核实）。Go 参照=`fix/issue299-readthrough` ef13204 **已并 main**（工作树零 diff 直读）：console_flowsource.go+flowsource.go+测试八件。
+- **落点收窄（r12 同款核实）**：Rust 池无 worker crate/无消费循环→读穿透落**定义装载入口层**（引擎新模块 `flowsource.rs`，嵌入式宿主经引擎装载定义的场景）；Redis 存储腿（`LocalFlowStore` trait+内置 MemoryFlowStore 预置面）与消费循环集成等 worker crate 落地接线（worker 规格 flowsource.rs 位，与 registry 同批次）。
+- **回源链**：本地 miss→配置 PLAITA_CONSOLE_FLOW_SOURCE_URL 才回源（未配置=特性关闭、miss 即确定性 NotFound 与现状逐字节同）→GET /api/flows/{fid}/versions/{ver}（X-Admin-API-Key+X-Tenant-ID，空/缺省租户按具名缺省拼写）→`ir::engine_flow_payload` 注入 flow_id/version（flow_hash.rs 新公开函数：字面量保持扫描器保真注入后按 #60 canonical 渲染，serde f64 重渲染翻指纹故不走 serde）→ir::load——**r11 hash 门同路径天然执法**（mismatch=flow_hash_mismatch 具名拒+负缓存）。
+- **错误语义（安全核心）**：404/无 published/未发布→NotFound+负缓存 30s；网络/超时/5xx/其余 4xx→Transient **绝不伪造 404** 且不进负缓存（outbox 投递窗语义，不可达终态化在途执行=反模式）；unparsable/装载拒→NotFound+负缓存（不烧重试预算）；瞬态重试 attempts=2/250ms 固定退避；响应帽 64MB；回写默认关（WRITEBACK=1 显式开，默认保持 #303 清除语义只读）；latest 哨兵 console 侧解析最新 published（published_at 缺则 created_at，version 串决胜，draft 跳过）。
+- **负控先红后绿**：红=编译级 E0432（基线无接受面，r8 单②同款取证）+**变异红**（Unavailable 误映射 NotFound 伪造 404，格3 负控当场抓住后还原）；绿=负控 15 件 tests/flowsource_console.rs（任务书五格：miss→回源→hash 门→装载成功〔回写后二次零 console〕/404→具名负缓存〔窗过期回源实证〕/不可达→瞬态不伪造 404/本地命中零 console 调用/未配置=特性关闭 + 另钉九件：瞬态重试后成功/attempts 耗尽仍瞬态/latest 解析/draft 拒载/hash 门 mismatch 执法/unparsable 确定性拒/租户头透传与缺省映射/engine_payload 大整数字面量保真/回写默认关/本地 not-loadable 确定性）。每测试自带 TCP stub（r8 教训①先读全请求再应答）。
+- **门禁**：cargo test **197P/0F**（基线 177+20：负控 15+模块单测 5）/diffcheck **23/23** exit 0/fmt/clippy -D 全净（退出码文件 /tmp/b4r13_*.log|*.out）；`--no-default-features` 构建绿（配置 URL 却无 http 特性=具名构造错误，fail-closed 不留静默失效臂）。
+- **教训两记**：①Go `strings.TrimPrefix(a,"v")` 是「有则去无则留」——Rust `strip_prefix('v')` 必须 `unwrap_or(a)` 配对，漏配则无 v 前缀的常见版本号（9/10）全落字典序（模块单测当场抓住）；②测试夹具指纹必须按**实际注入身份**计（latest 解析出 2.0 而夹具按 3 计→门具名拒当场打回——反证 hash 门在回源路径执法，修正后留注释钉语义）。
+
+**一行摘要**：第十三轮读穿透收官——引擎侧 flowsource.rs 落定义装载入口层（本地 miss→console 回源→engine_flow_payload 注入→r11 hash 门执法→装载；六 env 键对齐 plaita-go、未配置=特性关闭、不可达绝不伪造 404、负缓存 30s、回写默认关）；负控 15 件五格全落（编译红+变异红双证）、cargo 197P/diffcheck 23-23 全绿；全量入位三步（hash 门/manifest 位次/读穿透）至此收官，registry+消费循环集成等 worker crate（feat/worker-m1 合并后另立项）。
+
+## 第十三轮·WK-M1 收官（2026-10-23，plaita-rs worker M1 合并 main 89527bf，CI 绿）
+
+- 实现席 C 交付 feat/worker-m1（5 提交，基线 r12）：①引擎 E1-E3（RuntimeCtx::from_snapshot_json 九根重建缺键具名拒/SuspendedExecution::from_parts/往返性质测试）；②crate plaita-worker（blocking redis-rs 0.27 无 tokio；Redis 后端 trait+四段 Lua 具名脚本位+TxOp 事务管道；内存 fake 钉协议语义）；③协议存储（queue 信封/reclaim-before-read/Ack+残留清扫/DLQ 全信封字段、lease holder 16-hex、state fenced CAS 双闸 #54、checkpoint §7.2 四元组+context_flavor fail-closed、flowsource canonical JSON 逐字节对齐 Python+指纹 golden 62 例）；④恢复投递（订阅存储/HandleEvent 租户受信顶层/#87 去重失败释放/超时检查器 #50 一次性 due/PubSub 桥/Worker 主循环 start 闸序+resume 处置总表+真唤醒走 from_snapshot_json+from_parts 复用 resume 全链+ResumeGuard-ack #68+§9.4 派发凭据+§9.6 降级具名+drain D1→D2）；⑤M1 行为测试（fake e2e 9 例+真 Redis 4 例 #[ignore]+指纹 golden 3 例）。
+- 主控验收：分支门禁 fmt/clippy -D/全仓绿；真 Redis 腿 4/4（本机 6379 实跑 3 连稳定）；bin 实弹冒烟（投递→挂起落库→桥唤醒→completed→checkpoint 清→SIGTERM 干净退出）。**实现席抓到真缺陷**：redis-rs 0.27 PubSub::psubscribe 内部消费确认帧——桥的确认循环会把业务消息当确认吞掉（真 Redis 腿+bin 冒烟暴露，已修+钉死测试）。
+- **rebase 到 NS-M1 后的语义调和**（主控亲手）：from_parts 补 call_stack（checkpoint 重建现场无嵌套路径=根流程挂起，嵌套路径 M2 持久化层回填）+ worker 错误归一补 SuspendRejected 专型。合并期并行会话再并 outbox-readthrough（r14，cargo 197P）——merge 落其上（89527bf），合并点全量 28 测试二进制绿，CI 绿（39900941691）。
+- 遗留（按规格 M2/M3）：registry 心跳/LookupStatus、retry 预算/退避、watchdog/deadline、quota、年龄闸、亲和、DLQ replay、FlowSource TTL 缓存、桥「订阅确认前丢事件」窗口回扫器（M3 立项）、终态行 context 采集（引擎 E 面扩展）、嵌套挂起的 checkpoint 调用栈序列化（M2，依赖 NS 侧持久化设计）。
+
+**一行摘要**：WK-M1 收官——plaita-worker M1 骨架合并 main 89527bf CI 绿（队列/租约/fenced CAS/checkpoint 边界/订阅存储+超时检查器+PubSub 桥/真唤醒复用 resume 全链；193P+真 Redis 4/4+bin 实弹；redis-rs PubSub 确认帧缺陷抓修）。至此第十三轮三席全收官：NS-M1（rs）+NS-M2（go）+WK-M1（worker）全合并；余 NS-M3（plaita）/#M4 对拍集/WK-M2-M3 后续轮。
+
+## 第十五轮·入位接线收官（2026-10-23，feat/worker-integration 待主控验收合并）
+
+- 范围=两块搁置面接完（r12「registry 接线记 worker 落地后」+ r13「消费循环集成等 worker crate」），完成后 rs 全量入位：worker 消费+registry+读穿透+hash 门+manifest 全链。
+- **① registry 写 manifest（对齐 plaita-go #82 f13819a）**：新模块 registry.rs——`{prefix}:registry:flow_worker:{instance_id}` SETEX TTL 30s/心跳 10s（新 config 键 PLAITA_HEARTBEAT_INTERVAL_SECONDS/PLAITA_REGISTRY_TTL_SECONDS），整份重写即续期；ServiceInfo 与 go 同形；metadata 挂 engine="plaita-rs"（取自清单自身同源）+ capability_manifest 整 dict 嵌套（ir::capability_manifest 五键，ir_contract_version=2026-10-23.2）；生命周期 starting→running→draining(3 次短重试立即落盘)→stopped 墓碑 SETEX 5s→DEL；降级=序列化失败省略两键+PLAITA_CAPABILITY_MANIFEST_UNAVAILABLE 具名告警，不写「在但为空」，不拒启（go 同款口径）。
+- **② 消费循环接读穿透**：worker RedisFlowStore 实现引擎 LocalFlowStore（引擎存储形状）；Worker 持 FlowSource，handle_start+load_continuation_definition 两处定义门改走 get_flow_definition(&flows,…)：本地 miss→console 回源（六 env 键，未配置=特性关闭逐字节同 WK-M1）→r11 hash 门→ir::load；NotFound→FlowNotFound 终态族/Transient→FlowLoad 留 pending。**引擎 trait 加错误面**（本轮接口变更）：get_raw/list_versions→Result——Redis 腿读失败必须落瞬态，不得当 miss 引去回源/终态化（MemoryFlowStore Ok 包装语义不变）；flowsource_console.rs 两处 get_raw 断言改 matches! 形。配置 URL 无 http 特性→引擎具名构造错误→worker 降级本地语义+PLAITA_FLOW_SOURCE_DISABLED 告警不拒启。Config 加 flow_source 字段=FlowSourceConfig::from_getenv(同闭包)（引擎新增该装配，from_env 委托之；positive_int_env_with 注入化）。
+- **负控（先红后绿）**：变异红×2 实证——负缓存写入失效→404 格红/manifest 键省略→registry 五键格红。绿=fake 读穿透 e2e 5 格（miss→回源→执行成功〔latest+detail 恰 2 调用+回写默认关〕/404→具名终态+负缓存零调用/未配置=本地语义〔消息不谎称查过 console〕/瞬态 503→不终态化留 PEL+负缓存未污染〔换 200 重投即成〕/console 同版本换定义→resume flow_hash_mismatch 具名拒+checkpoint 清）+registry 单测 5+**真 Redis 9/9**（旧 4+新 5：回源全链挂起→事件→恢复完成/404 负缓存/未配置/hash 拒+allow 放行吃 CHANGED/registry 全生命周期 run() 真心跳 1s→running→五键→supported 与引擎清单全等→drain→墓碑 DEL）。
+- 门禁：cargo test 247P（**main 89527bf 基线实测 237P**——任务书面 197P 系 WK-M1 合并前读数，守恒按真基线对账+新案 10 另计；flowsource resolve_version 测试重指新链路消息形保计数）/diffcheck 23/23/fmt/clippy -D/node-parity 全绿（rc 文件 /tmp/b4r15-gates/）。worker Config 新增 heartbeat_interval_secs/registry_ttl_secs/flow_source；lib.rs 导出 registry 模块+RedisFlowStore。
+- **事故一记（自伤自愈）**：变异 A 回滚误用 `git checkout <file>` 把引擎 flowsource.rs 六处未提交修改一起洗掉——发现后单脚本一次重写六处（单补丁单写盘），clippy/test 复绿。**教训：变异回滚禁用 git checkout 带未提交改动的文件，一律精准 Edit 逆向或提前 commit 基线。**
+- worker.rs 遗留更新：模块文档「no registry heartbeats (M2/M3)」已撤；余 M2/M3 面（retry 预算/watchdog/quota/亲和/DLQ replay/FlowSource TTL 缓存/桥回扫器/终态 context 采集/嵌套 checkpoint 调用栈）照旧。
+
+**一行摘要**：第十五轮入位接线——registry manifest 五键+消费循环读穿透落 worker 主循环（引擎 LocalFlowStore 加错误面+RedisFlowStore+两定义门换路；真 Redis 9/9+fake 5 格+registry 单测 5；247P=237 守恒+10 新案；diffcheck 23/23；变异红×2），feat/worker-integration 待主控验收合并→rs 全量入位收官。
+
+## 第十三轮·NS-M3 收官（2026-10-23，plaita 嵌套挂起合并 main 9072b9a，三 CI 工作流全绿——三平台闭环）
+
+- 实现席 E 交付 fix/nested-suspend（4 提交，8 文件 +1433/−60）：①缺陷修复半边（_advance_one 对 is_suspending is True 抛 FlowSuspendedCarrier+runner 逃逸分支；normal/generator/distributed 三模式 fail-closed 化——根流程 normal 的 fail-open 同修=修正清单 #7）；②传播半边（分布式步边界子执行 carrier 转合法挂起、闸先于订阅注册【结构上无孤儿面，强于 rs】、checkpoint 逐帧化 $SUSPEND_FRAMES〔含 $PARENT 构造期快照逐帧显式另存=存疑 #14 的解〕、作用域闸+parallel 静态闸、get_or_create_event_bus 递归查链修孙子执行丢 bus 的既有缺陷）；③沿路径恢复（_handle_nested_resume 决策步/帧回退返回步/再挂起栈拼接/每帧新鲜预算/#33/#221 准入共用）。SC-003 硬预算合规（DistributedStrategy 293<400）。
+- 主控验收：分支真实改动面核实（三点 diff 恰 8 文件——两点 diff 的 console-e2e/conftest 反向项系基线落后 r91 的显示效应）；rebase r91 后 27 项嵌套测试绿；**全量自有复跑 8999P/0F**（PYTHONPATH 钉 worktree 核实被测代码）；探针行为翻转核实（NORMAL 假完成→具名失败/DISTRIBUTED 真挂起+绑定守卫生效）。合并经临时 detach worktree 避让共享主仓（9072b9a），plaita 三 CI 工作流全绿。
+- 存量零改写确认：fail-open 时代零测试覆盖（正是静默缺陷本身）；仅 CheckpointSchema 精确键清单三处随 $SUSPEND_FRAMES 登记扩展。
+- **嵌套挂起程式（三平台）就此闭环**：rs#16+go#88+plaita#311 全落地。余：NS-M4 三引擎对拍集；ir_validate 装载期拦截前移/resume generation 代数（章程修订候选）。
+
+**一行摘要**：NS-M3 收官——plaita 嵌套挂起 v1 合并 main 9072b9a 三 CI 绿（缺陷修复+传播+checkpoint 逐帧化+沿路径恢复；闸先于订阅强于 rs；27 语义测试+全量 8999P 主控复跑+探针翻转核实）——**嵌套挂起三平台闭环**（rs ce8df7b/go dea859f/plaita 9072b9a）；余 NS-M4 对拍集。
