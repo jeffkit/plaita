@@ -46,6 +46,8 @@ plaita 把流程定义与执行逻辑分离，支持 Normal / Generator / Distri
 
 **文档同步：** 改代码后查 [`docs/DOC_CODE_MAP.md`](docs/DOC_CODE_MAP.md)，按映射同步相关文档。
 
+**CI 卫生（2026-10-23）：** ①console 测试的 flow 定义若含 plaita-nodes 插件节点（sql_query/agentrun 等），**必须**贴 `@pytest.mark.requires_plaita_nodes`（按最小粒度：类或方法）——主 suite 环境无插件，save 在 Python schema 层即 422、到不了能力门，漏贴=main 红（r80/r93/B4 r12 三次）；skip 规则在 `plaita-console/backend/tests/console/conftest.py`，CI 由 `console-backend-plugins` job 装插件以 `-m` 真跑。②`[CI]`/`[CI slow lane]` 对纯 docs/台账 push 不触发（`paths` 负模式）；**新增「读 `docs/` 文件」的测试须把该文件登记进 `ci.yml` + `ci-slow.yml` 的再纳入清单**，否则改它不跑门。
+
 ## 常用命令
 
 ```bash

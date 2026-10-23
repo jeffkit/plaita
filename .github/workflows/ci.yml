@@ -143,6 +143,51 @@ jobs:
             plaita-console/backend/tests/console/test_issue263_dispatch_ledger_tenant_scope.py \
             -x -q
 
+  # 插件门控子集（2026-10-23 CI 卫生轮）：flow 定义含 plaita-nodes 节点
+  # （sql_query 等）的用例在 console-backend 环境里一律 skip（节点未注册 →
+  # save 过 Python schema 层即 422，到不了能力门；同一根因三次推红 main：
+  # r80 / r93 / B4 r12）。这里**单开环境**装插件把它们真跑起来——不装进
+  # console-backend 三分块：主 suite 的 registry/可用节点清单保持原样，
+  # 既有快照断言不受扰。
+  console-backend-plugins:
+    name: Console backend + plaita-nodes (requires_plaita_nodes 子集)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      # plaita-nodes 钉 PyPI 发布件（公开仓亦可 git+ 装，发布件更稳、免 clone）。
+      # 其 `plaita>=0.5.0` 由前一步 editable 的本 checkout 满足，resolver 不会
+      # 把 plaita 换成 PyPI 版；agentproc/requests 随其约束浮动（本地核过的
+      # 组合：plaita-nodes 0.8.0 × agentproc 0.20.0 × plaita 0.63）。升 pin 前
+      # 本地 venv 复跑 -m requires_plaita_nodes 子集。
+      - name: Install plaita + console backend deps + plaita-nodes (pinned)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,lint,all]" \
+            -r plaita-console/backend/requirements.txt pytest-timeout
+          python -m pip install "plaita-nodes==0.8.0"
+      # 守卫：装失败 / 入口点缺失 / 导入链断（如 agentproc 漂移）时，下一步
+      # 会把子集整体 skip 成「空心绿」或 422 假象——这里显式带 traceback 红。
+      - name: Assert sql_query entry point present and loadable
+        run: |
+          python - <<'EOF'
+          from importlib.metadata import entry_points
+          eps = {ep.name: ep for ep in entry_points(group="plaita.nodes")}
+          assert "sql_query" in eps, f"sql_query entry point missing; have {sorted(eps)}"
+          cls = eps["sql_query"].load()
+          print(f"sql_query -> {cls.__module__}.{cls.__name__}; {len(eps)} plaita.nodes entry points")
+          EOF
+      # 子集 = 全部贴了 requires_plaita_nodes 的用例（新用例贴 marker 即自动
+      # 纳入，无同步清单）。pytest 对「挑选为空」退出码 5 ⇒ 子集清零时本 job
+      # 红，提示撤 job 而非默默空转。
+      - name: pytest -m requires_plaita_nodes
+        run: |
+          python -m pytest plaita-console/backend/tests/console \
+            -m requires_plaita_nodes --timeout=150 --timeout-method=thread -q -rs
+
   gate:
     name: Regression gate (py${{ matrix.python-version }})
     timeout-minutes: 60
