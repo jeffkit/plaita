@@ -9,6 +9,18 @@ name: CI slow lane
 on:
   push:
     branches: [main]
+    # 路径过滤与 ci.yml 同款（理由与「docs/ 契约文件再纳入」清单见
+    # ci.yml 头注释；改动须两处同步）。workflow_dispatch / schedule 不受
+    # 路径过滤影响，每日兜底照跑。
+    paths:
+      - "**"
+      - "!docs/**"
+      - "docs/DOC_CODE_MAP.md"
+      - "docs/event-USER_GUIDE.md"
+      - "docs/event-ARCHITECTURE.md"
+      - "docs/mutation-testing.md"
+      - "docs/issue69-mutation-matrix.md"
+      - "!duo-*-ledger.md"
   workflow_dispatch:
   schedule:
     # 每日 03:00 UTC 兜底一跑（push 已覆盖常态）

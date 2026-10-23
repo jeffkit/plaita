@@ -1,10 +1,46 @@
 name: CI
 
+# 路径过滤（2026-10-23 CI 卫生轮）：纯文档 push 不触发门禁。
+#
+# 背景：10-21 起 main 的 108 个 first-parent 提交里 98 个只动台账/docs，
+# 每个都占一台 runner、且因 concurrency.cancel-in-progress 把 1 分钟前
+# 刚起跑的**代码** CI 取消掉（03:25 B4 r12 合并的 CI 就是被紧随的台账
+# push 掐死的）——门禁判决被噪音淹没。
+#
+# 用 paths 带 `!` 负模式而非 paths-ignore：paths-ignore 不支持再纳入，
+# 而 docs/ 下有 5 份文件是单测的输入（文档↔代码契约），改它们必须跑门：
+#   docs/DOC_CODE_MAP.md            ← test_issue132_doc_code_map / test_docs_extras_sync
+#   docs/event-USER_GUIDE.md        ← test_docs_event_public_names
+#   docs/event-ARCHITECTURE.md      ← test_docs_event_public_names
+#   docs/mutation-testing.md        ← test_issue125_mutation_config
+#   docs/issue69-mutation-matrix.md ← test_issue69_r11_instance_state_generalisation
+# 新增「读 docs/ 文件」的测试时同步登记到这里（push 与 pull_request 两处
+# + ci-slow.yml 同款）。docs-site/** 与 MIGRATION.md 也被测试消费，不排除。
+# 模式顺序有语义：后面的负模式排除前面的正匹配，再后面的正模式重新纳入。
+
 on:
   push:
     branches: [main]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "docs/DOC_CODE_MAP.md"
+      - "docs/event-USER_GUIDE.md"
+      - "docs/event-ARCHITECTURE.md"
+      - "docs/mutation-testing.md"
+      - "docs/issue69-mutation-matrix.md"
+      - "!duo-*-ledger.md"
   pull_request:
     branches: [main]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "docs/DOC_CODE_MAP.md"
+      - "docs/event-USER_GUIDE.md"
+      - "docs/event-ARCHITECTURE.md"
+      - "docs/mutation-testing.md"
+      - "docs/issue69-mutation-matrix.md"
+      - "!duo-*-ledger.md"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
