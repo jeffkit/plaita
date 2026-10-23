@@ -17,8 +17,9 @@ from plaita.core.parallel_executor import (
 )
 from plaita.node import Node
 from plaita.node.decide import Branch
+from plaita.core.errors import FlowSuspendRejectedError
 from plaita.core.state import _snapshot_value
-from plaita.core.strategies import ExecutionMode
+from plaita.core.strategies import ExecutionMode, flow_contains_suspending_node
 from plaita.tenant_context import mark_tenant_derived
 
 # re-export
@@ -213,6 +214,26 @@ class Parallel(Node):
                 return None
         return make_executor(mode)
 
+    def _reject_suspending_branches(self, branches) -> None:
+        """并行分支派发前的静态作用域闸（plaita#311 NS-M3，rs
+        ``reject_suspending_branches`` 对应面，验证报告修正清单 #4）。
+
+        分支图内含挂起型节点 = v1 不支持，**派发前同步具名拒绝**——后台分支的
+        动态拒绝是异步的、无法同步上抛，静态闸保证 parallel 节点绝不会带着
+        未消费的挂起"成功"（fail-open → fail-closed）。覆盖三条派发路径：
+        sync ``pool_execute``（thread/process/池上串行降级）与 async ``arun``
+        （coroutine gather 及 to_thread 委托）。
+        """
+        for pb in branches:
+            if pb.flow is not None and flow_contains_suspending_node(pb.flow):
+                raise FlowSuspendRejectedError(
+                    f"parallel node {self.id!r} branch {pb.name!r} contains a suspending "
+                    "node: suspension v1 does not support parallel frames "
+                    "(iteration-state snapshotting is a future milestone; see "
+                    "plaita-rs docs/PROGRAM.md 程式一)",
+                    node=self,
+                )
+
     def pool_execute(self, pool_type: Optional[str] = None, execution=None) -> Dict[str, Any]:
         """使用 ``ParallelExecutor`` 执行并行节点。
 
@@ -223,6 +244,7 @@ class Parallel(Node):
         协议。cancel/timeout 跨进程限制见 ``ParallelExecutor.supports_cancel_propagation``。
         """
         branches_to_execute = self.match_condition_branches(execution)
+        self._reject_suspending_branches(branches_to_execute)
         join_branches, background_branches = self._split_branches(branches_to_execute)
 
         mode = pool_type or self.mode
@@ -472,6 +494,7 @@ class Parallel(Node):
           通过 ``asyncio.to_thread`` 避免阻塞事件循环。
         """
         branches_to_execute = self.match_condition_branches(execution)
+        self._reject_suspending_branches(branches_to_execute)
         join_branches, background_branches = self._split_branches(branches_to_execute)
 
         if self.mode == COROUTINE:

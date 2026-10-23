@@ -4,7 +4,10 @@
 - ``ExecutionMode`` / ``ExecutionStrategy`` Protocol / ``RunOptions`` / ``_StateView``;
 - 三个具体策略 ``NormalStrategy`` / ``GeneratorStrategy`` / ``DistributedStrategy``;
 - 策略共用的模块级 helper: ``_advance_one`` / ``_create_lazy_output`` /
-  ``_create_end_output`` / ``_subscribe_event``。
+  ``_create_end_output`` / ``_subscribe_event``;
+- 嵌套挂起（plaita#311 NS-M3）的边界转换 helper:
+  ``_park_nested_suspension``（DistributedStrategy 薄方法委托）/ ``_scope_gate_blocker``
+  / ``_carrier_frame_dicts`` / ``_load_suspend_frames`` / ``flow_contains_suspending_node``。
 
 Driver (``FlowExecution``) 留在 ``plaita.core.executor``, 通过本模块组合策略。
 ``executor`` 重新导出本模块的公开符号, 保持 ``from plaita.core.executor import
@@ -27,6 +30,7 @@ from plaita.core.errors import (
     ExecutionDeadlineError,
     FlowExecutionException,
     FlowStartMissingError,
+    FlowSuspendRejectedError,
     FlowSuspendedCarrier,
     FlowTimeoutError,
     ResumeError,
@@ -298,9 +302,13 @@ class DistributedStrategy:
                             "Use resume_type='event'/'cancel'/'timeout' to resolve the event first.",
                             node=suspended_node,
                         )
-
-        current_node, result, branch = await self._determine_current_node(
-            flow, context, runner, callback_manager, max_timeout_ms=timeout_ms)
+        try:
+            current_node, result, branch = await self._determine_current_node(
+                flow, context, runner, callback_manager, max_timeout_ms=timeout_ms)
+        except FlowSuspendedCarrier as carrier:
+            # plaita#311 NS-M3：start 节点即子流程且内层挂起（或 start 节点本身
+            # 是挂起型节点——_start_new_flow 已压入根帧）——转换为合法挂起。
+            return await self._park_nested_suspension(carrier, flow, context, callback_manager)
 
         if not current_node:
             result = context.get_state(f"{pfx}{context.express_node_name}", {})
@@ -347,6 +355,23 @@ class DistributedStrategy:
         result, branch = await runner.run_node(
             flow, start_node, callback_manager=callback_manager, max_timeout_ms=max_timeout_ms)
 
+        # plaita#311 NS-M3：start 节点本身是挂起型节点时同样不得把 pending 载荷
+        # 当数据越过——与 _execute_current_node 的挂起分支同构，经 carrier 走
+        # _park_nested_suspension 统一收口（根帧在此压入，转换点在 execute 的
+        # except）。常规 flow 的入口被构造期约束为 type=start（Flow.start_node），
+        # 本检查是自定义 registry / 程序化构造下的纵深防御。
+        if getattr(start_node, "is_suspending", False) is True:
+            carrier = FlowSuspendedCarrier(
+                (
+                    f"Node {start_node.id!r} ({getattr(start_node, 'node_type', '?')}) suspended "
+                    f"in flow {getattr(flow, 'flow_id', '?')!r} at the start node: the pending "
+                    "payload is refused as data (plaita#311 fail-closed)."
+                ),
+                node=start_node, flow=flow, context=context, node_result=result,
+            )
+            carrier.push_frame(flow, context, start_node)
+            raise carrier
+
         # flow.next_node already handles both branching and non-branching nodes;
         # no need to replicate the "if start_node.next" guard here.
         current_node = flow.next_node(start_node, branch)
@@ -360,8 +385,16 @@ class DistributedStrategy:
         return current_node, result, branch
 
     async def _execute_current_node(self, flow, context, runner, callback_manager, current_node, max_timeout_ms=None):
-        result, branch = await runner.run_node(
-            flow, current_node, callback_manager=callback_manager, max_timeout_ms=max_timeout_ms)
+        try:
+            result, branch = await runner.run_node(
+                flow, current_node, callback_manager=callback_manager, max_timeout_ms=max_timeout_ms)
+        except FlowSuspendedCarrier as carrier:
+            # plaita#311 NS-M3 传播转换点（rs execute_child → advance_from 拦截
+            # 的对应面）：子执行内部的挂起沿调用链穿出到本分布式步边界——把
+            # 本帧（根）压入调用栈后转换为**本执行的合法挂起**。挂起不是本层
+            # 节点的失败：不进重试/errorHandler（runner 逃逸分支已保证）。
+            carrier.push_frame(flow, context, current_node)
+            return await self._park_nested_suspension(carrier, flow, context, callback_manager)
 
         if flow.is_end_node(current_node):
             return _create_end_output(current_node, result, context.to_dict(), execution_id=context.execution_id)
@@ -385,6 +418,11 @@ class DistributedStrategy:
             )
 
         return _create_lazy_output(current_node, result, branch, context.to_dict(), execution_id=context.execution_id)
+
+    # -- 嵌套挂起：边界转换与沿路径恢复（plaita#311 NS-M3）--------------------
+    async def _park_nested_suspension(self, carrier, flow, context, callback_manager):
+        """委托模块级实现（SC-003 类体预算：实现放模块层，见文件头说明）。"""
+        return await _park_nested_suspension(carrier, flow, context, callback_manager)
 
     async def _handle_resume(self, flow, context, runner, callback_manager, resume_type, resume_data):
         # 统一在此 coerce, 覆盖 execute (已 coerce, 幂等) 与 _handle_resume_operation
@@ -459,7 +497,6 @@ class DistributedStrategy:
         context.update_node_result(current_node, result)
         await self._unregister_suspended_subscription(current_node, context, prev_state)
         return _create_lazy_output(current_node, result, None, context.to_dict(), is_suspend=False, execution_id=context.execution_id)
-
     async def _unregister_suspended_subscription(self, node, context, prev_state):
         """resume 完成后注销挂起期注册的事件订阅。
 
@@ -560,6 +597,166 @@ def _resume_binding_violation(prev_state, resume_type, resume_data) -> Optional[
             f"event_type 不匹配（消息 {got_type!r} ≠ 挂起 event_type {expected_type!r}）"
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# 嵌套挂起（plaita#311 NS-M3）：边界转换（传播 + 逐帧 checkpoint + 作用域闸）
+# 的实现体（模块级——SC-003 类体预算；DistributedStrategy 以同名薄方法委托）
+# ---------------------------------------------------------------------------
+
+async def _park_nested_suspension(carrier, flow, context, callback_manager):
+    """把穿出到分布式步边界的内层挂起载体转换成本执行的合法挂起。
+
+    rs ``suspend_flow``（订阅注册 + 挂起态落 $NODE + SuspendedExecution）与
+    传播转换点闸（验证报告修正清单 #1）的合并对应面。次序对齐 rs 的
+    fail-closed 承诺：**作用域闸先于订阅注册**——被拒的挂起绝不留下孤儿
+    订阅（plaita 的注册只发生在本边界，结构上优于 rs 的注册后注销）。
+
+    调用契约：carrier 的调用栈最后一帧已是根帧（调用方压入）；本方法：
+
+    1. 作用域闸：调用栈每一帧的子节点必须是 child/reference——迭代帧
+       （loop/map/filter/find/reduce/while）与 parallel 分支帧具名拒绝；
+    2. 订阅注册：**最内帧**挂起节点的订阅（correlation_id=根执行 id，
+       恢复消息据此路由回载帧路径的根 checkpoint）；
+    3. 逐帧 checkpoint：帧路径写进根上下文 ``$SUSPEND_FRAMES``（最内帧在
+       前；reference 帧的 $PARENT 构造期快照随帧上下文显式另存——验证
+       报告存疑 #14 的逐帧快照要求）；
+    4. 可观测：最内帧 ``on_node_suspend`` + 逐帧 ``on_flow_suspend``
+       （最内→根；穿越型子节点的 NodeEnd(error) 已由 runner 补发——rs
+       Q2 的两种 NodeEnd 形状口径）。
+    """
+    # -- 1. 作用域闸（fail-closed；child/reference 放行）--
+    blocked = _scope_gate_blocker(carrier)
+    if blocked is not None:
+        raise FlowSuspendRejectedError(
+            f"Suspension carrier crossed a {getattr(blocked.node, 'node_type', '?')!r} "
+            f"frame boundary at node {blocked.node.id!r}: suspension v1 supports only "
+            "child/reference call chains (loop/map/filter/find/reduce/while "
+            "iterations and parallel branches need iteration-state snapshotting, "
+            "a future milestone; see plaita-rs docs/PROGRAM.md 程式一)",
+            node=blocked.node,
+        )
+
+    # -- 2. 最内帧订阅注册（correlation_id=根执行 execution_id）--
+    pending_state = dict(carrier.node_result) if isinstance(carrier.node_result, dict) else carrier.node_result
+    subscribed = await _subscribe_event(
+        carrier.node, carrier.flow, pending_state, carrier.context,
+        correlation_id=context.execution_id,
+    )
+    if not subscribed:
+        raise FlowExecutionException(
+            message=(
+                f"Event subscription failed for node {carrier.node.id} in nested "
+                f"flow {getattr(carrier.flow, 'flow_id', '?')!r}; refusing to suspend "
+                "without an active subscription"
+            ),
+            node=carrier.node,
+        )
+
+    # -- 3. 逐帧 checkpoint（$SUSPEND_FRAMES 写进根上下文状态）--
+    context.set_state(
+        f"{context.express_prefix}{SUSPEND_FRAMES_KEY}",
+        _carrier_frame_dicts(carrier, context),
+    )
+
+    # -- 4. 可观测（最内帧先于外层帧，验证报告 Q2 顺序细则）--
+    callback_manager.on_node_suspend(carrier.flow, carrier.node)
+    for frame in [carrier] + list(carrier.frames):
+        callback_manager.on_flow_suspend(frame.flow)
+
+    outermost = carrier.frames[-1].node if carrier.frames else carrier.node
+    return _create_lazy_output(
+        outermost, pending_state, None, context.to_dict(),
+        is_suspend=True, execution_id=context.execution_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 嵌套挂起（plaita#311 NS-M3）共享 helper
+# ---------------------------------------------------------------------------
+
+#: 嵌套挂起帧路径的 checkpoint 键。已登记进 ``CheckpointSchema.SYSTEM_KEY_NAMES``
+#: （state.py），``validate_checkpoint`` 不再告警。值为帧列表：最内帧在前、
+#: 末项=根帧（schema 见 :func:`_carrier_frame_dicts`）；``None``/缺失 = 无帧
+#: （根流程直挂或旧 checkpoint——向后兼容路径）。
+SUSPEND_FRAMES_KEY = "SUSPEND_FRAMES"
+
+#: 作用域闸放行的帧节点类型（程式一 v1：仅 child/reference 调用链可承载
+#: 挂起穿透）。
+_SUSPEND_ALLOWED_FRAME_NODE_TYPES = frozenset({"child", "reference"})
+
+
+def _load_suspend_frames(context):
+    """从（已恢复的根）上下文读嵌套挂起帧路径；无帧/畸形一律归一为 ``[]``。"""
+    frames = context.get_state(f"{context.express_prefix}{SUSPEND_FRAMES_KEY}", None)
+    return frames if isinstance(frames, list) and frames else []
+
+
+def _describe_frame_path(frame_dicts):
+    """帧路径的可读投影（守卫消息用）：``flow:node -> flow:node -> …``（最内在前）。"""
+    return " -> ".join(
+        f"{d.get('flow_id', '?')!r}:{d.get('node_id', '?')!r}" for d in frame_dicts
+    )
+
+
+def _carrier_frame_dicts(carrier, root_context):
+    """carrier 现场 + 调用栈 → checkpoint 帧列表（最内帧在前，rs call_stack 同序）。
+
+    schema（每帧）：``{"node_id", "flow_id", "context"}``——
+
+    - 现场帧（首项）：node_id = 挂起节点 id；
+    - 父帧：node_id = 该帧 flow 中接收更内层返回值的子节点 id（rs CallFrame
+      同构：值回填目标）；
+    - 根帧（末项）：``context=None``——根状态即主 checkpoint 本体，不重复存。
+
+    每帧 context 经 ``to_dict()`` 显式快照：reference 帧的 ``$PARENT`` 是构造期
+    快照、父状态不在子帧的活引用里（验证报告存疑 #14），逐帧显式另存是嵌套
+    checkpoint 的正确性前提。
+    """
+    dicts = [{
+        "node_id": carrier.node.id,
+        "flow_id": getattr(carrier.flow, "flow_id", None),
+        "context": carrier.context.to_dict(),
+    }]
+    for frame in carrier.frames:
+        dicts.append({
+            "node_id": frame.node.id,
+            "flow_id": getattr(frame.flow, "flow_id", None),
+            # 根帧的上下文即主 checkpoint 本体（identity 判定），不重复存。
+            "context": None if frame.context is root_context else frame.context.to_dict(),
+        })
+    return dicts
+
+
+def _scope_gate_blocker(carrier):
+    """传播转换点作用域闸（验证报告修正清单 #1）：返回第一个阻断帧，无则 None。
+
+    child/reference 调用链放行；迭代帧（loop/map/filter/find/reduce/while）、
+    parallel 分支帧及其余复合节点（fail-closed 缺省）具名阻断。plaita 的 parent
+    链是真实执行链（无 rs/go reference ambient 断链问题），但为三仓规格一致仍
+    采用转换点检查：帧节点对象由传播层压栈时捕获，永远是真实帧、无眼镜面。
+    """
+    for frame in carrier.frames:
+        if getattr(frame.node, "node_type", None) not in _SUSPEND_ALLOWED_FRAME_NODE_TYPES:
+            return frame
+    return None
+
+
+def flow_contains_suspending_node(flow) -> bool:
+    """静态扫描：flow 图（含嵌套 child/reference）里是否存在挂起型节点。
+
+    parallel 分支派发前的确定性闸（plaita#311 NS-M3，rs
+    ``reject_suspending_branches`` 对应面）：后台分支的动态拒绝是异步的、无法
+    同步上抛——v1 语义 = 分支图内不允许挂起型节点。getattr 鸭子判定，core 不
+    反向依赖 node 插件层。
+    """
+    for node in getattr(flow, "nodes", None) or []:
+        if getattr(node, "is_suspending", False) is True:
+            return True
+        child = getattr(node, "child_flow", None)
+        if child is not None and flow_contains_suspending_node(child):
+            return True
+    return False
 
 
 def _create_lazy_output(node, result, branch, context, is_suspend=False, execution_id=None, is_end=False):
@@ -705,12 +902,17 @@ def _create_end_output(node, result, context, execution_id=None):
     }
 
 
-async def _subscribe_event(node, flow, node_state, context):
+async def _subscribe_event(node, flow, node_state, context, correlation_id=None):
     """Subscribe an EventNode to its event bus.
 
     This is an async function: when ``event_bus.register_subscription`` is a
     coroutine function it is awaited directly inside the caller's event loop,
     rather than being bridged through a worker thread + fresh loop.
+
+    ``correlation_id``（plaita#311 NS-M3）：显式覆盖订阅的关联 id。嵌套挂起在
+    分布式步边界注册**最内帧**节点的订阅，但恢复消息必须路由到**根分布式
+    执行**（checkpoint 载帧路径的那个 execution）——缺省仍用
+    ``context.execution_id``（根流程直挂的既有行为不变）。
     """
     event_bus = context.get_or_create_event_bus()
     if not event_bus:
@@ -723,7 +925,7 @@ async def _subscribe_event(node, flow, node_state, context):
         subscription_params = {
             "event_type": resolved_event_type,
             "filter_condition": node.event_filter,
-            "correlation_id": context.execution_id,
+            "correlation_id": correlation_id or context.execution_id,
             "flow_id": flow.flow_id,
             "node_id": node.id,
         }
