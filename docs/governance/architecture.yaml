@@ -1,0 +1,29 @@
+# plaita 治理账本（governance ledger）
+#
+# 本文件是 plaita 仓的架构治理账本：跨平台引擎的合法 runtime 集与治理字段
+# 以此为机器可读事实源。大仓根 `monarbor doctor` 经 docs/DOC_ASSERTIONS.yml
+# 的 gov/* 断言（check: yaml_path_equals）逐条校验本文件。
+#
+# 维护约定：
+#   * 增删引擎（改 runtime_valid_set）时，须同步 DOC_ASSERTIONS.yml 的
+#     gov/runtime-valid-set 条目，并附对应平台仓的入位证据（commit 号）；
+#   * owner / review_by 变更时，同步 gov/owner-not-tbd 与
+#     gov/review-by-not-expired 两条断言的 expected；
+#   * review_by 到期前须完成治理复审并顺延日期（断言按字面量比对，
+#     只改本文件不改断言 expected 会红）。
+#
+# 来源：plaita#318（owner 亲提）；runtime_valid_set 与
+# plaita/server/runtime_queues.py 的 VALID_RUNTIMES（r12 后实况）保持一致。
+
+version: 1
+
+gov:
+  # 合法 runtime 集（多平台引擎）：python=本仓，go=plaita-go，rust=plaita-rs。
+  runtime_valid_set: [go, python, rust]
+
+  # 治理 owner（不得为 TBD/占位符）。
+  owner: jeffkit
+
+  # 下次治理复审期限（ISO 日期字符串，须加引号避免被 YAML 解析为 date 类型，
+  # 与 doctor 断言的字符串字面量比对口径一致）。
+  review_by: '2027-01-31'
