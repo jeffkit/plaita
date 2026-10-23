@@ -1,11 +1,16 @@
 name: Deploy docs
 
+# 触发面 = 构建消费面：mkdocs（docs-site/**）+ mkdocstrings 内省 plaita 包
+# （plaita/**，经 `pip install .` 装入 → pyproject.toml / setup.py 也算；
+# 2026-10-23 核口径补入）。
 on:
   push:
     branches: [main]
     paths:
       - "docs-site/**"
       - "plaita/**"
+      - "pyproject.toml"
+      - "setup.py"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

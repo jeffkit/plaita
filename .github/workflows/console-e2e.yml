@@ -3,6 +3,9 @@ name: Console E2E
 # plaita-console 全系统 E2E（argusai）+ Redis 瞬断混沌回归。
 # 独立于 ci.yml：E2E 含 Docker 构建（冷缓存约 5-10 分钟），且只需在
 # console/引擎代码变更时跑，故单独成 workflow 做路径过滤。
+# 触发面 = 镜像消费面：Dockerfile.{e2e,worker-e2e,services-e2e} 以根目录为
+# context 并 COPY pyproject.toml / setup.py 装引擎，依赖声明变更同样要跑
+# （2026-10-23 核口径补入，此前只列了 plaita-console/** 与 plaita/**）。
 
 on:
   push:
@@ -10,12 +13,16 @@ on:
     paths:
       - "plaita-console/**"
       - "plaita/**"
+      - "pyproject.toml"
+      - "setup.py"
       - ".github/workflows/console-e2e.yml"
   pull_request:
     branches: [main]
     paths:
       - "plaita-console/**"
       - "plaita/**"
+      - "pyproject.toml"
+      - "setup.py"
       - ".github/workflows/console-e2e.yml"
 
 concurrency:
