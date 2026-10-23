@@ -81,6 +81,13 @@ class Node(BaseModel):
     # 内核 DistributedStrategy 据此走 suspend 分支并调 resume(), 不再 isinstance
     # 具体节点类型, 从而切断 core -> plaita.node.event_node 的反向依赖。
     is_suspending: ClassVar[bool] = False
+    # 执行能力声明（plaita#330 §4 / #331 前半）：节点需要哪些**宿主基础设施**
+    # 才能完成其功能面。空元组 = 纯计算/控制流（任何宿主可跑）。挂起族必须
+    # 至少声明一个 suspend token + 所需宿主（如 ("suspend:root", "event_bus")）；
+    # 词表与注册期不变量见 plaita.node.capabilities（is_suspending=True 且本值
+    # 为空的节点注册即红）。与 dry_run_safe（试跑安全三态）是同一问题的两个
+    # 投影，关系裁决见 docs/governance/execution-capabilities.md。
+    execution_requirements: ClassVar[tuple] = ()
     # dry-run 能力声明（plaita#190）：console 试跑只放行「显式声明安全」的
     # 内置节点。三态语义：
     #   True  —— 纯计算/控制流，试跑执行无副作用；

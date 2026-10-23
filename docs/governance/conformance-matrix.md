@@ -3,7 +3,7 @@
 - **状态**：首次落盘（2026-10-24，#317 实施；go 列证据=plaita-go `fix/issue317-samples` 28/28 实跑）
 - **落点**：`docs/governance/conformance-matrix.md`（与治理账本 `architecture.yaml`、ADR-001 同址）
 - **证据基线**：plaita `a56125ab` · plaita-go `fix/issue317-samples`（基于 main `c6c323b`）· plaita-rs `6c01ffc`（A1 r137 静态引证，未实跑）
-- **关联**：#317（本篇来源）；ADR-001（#325，Runtime 组合裁定，本篇的治理框架）；#300（结构面清单，关系见 §4）；#316（运行期对账器，关系见 §5）；#315（Stage 0 不新增阻断门禁，门消费姿态见 §6）；plaita-go#43（确定性错误四类白名单裁决，E1-E6 的口径源）
+- **关联**：#317（本篇来源）；ADR-001（#325，Runtime 组合裁定，本篇的治理框架）；#300（结构面清单，关系见 §4）；#316（运行期对账器，关系见 §5）；#315（Stage 0 不新增阻断门禁，门消费姿态见 §6）；#330/#311（行 29 语义出处——normal+挂起双向 fail-closed 闭合「py silent-skip vs go 报错」历史分叉）；plaita-go#43（确定性错误四类白名单裁决，E1-E6 的口径源）
 
 ## 1. 定位
 
@@ -104,12 +104,13 @@ r131 装载面 14 分歧的 a/b/c/d 四类归裁口径不变（引用 #317 评�
 | 25_shape_s3_end_output_missing_var | end | green | green (实跑) | pending | end output 引用缺失变量：模板方言经典分叉点（静默空串 vs 具名/None），实测两侧一致 |
 | 26_shape_s4_code_null_penetration | code/end | green | green (实跑) | pending | None 穿透求值（`$NODE.c.a.b`）：静默 nil 族的求值层版本（#63 修的是文法层），实测两侧一致 |
 
-### 挂起恢复（27-28，driver=event-resume / continue-after-error）
+### 挂起恢复（27-29，driver=event-resume / continue-after-error / normal-meets-suspend）
 
 | case_id | 节点类型 | python | go | rust | 注 |
 |---|---|---|---|---|---|
 | 27_suspendresume_r1_event_resume | event/assignment/end | green | green (实跑) | pending（WK-M1 worker resume 链待测——正是矩阵该回答的格） | 比较口径=恢复后节点状态的确定性公共核（status 翻转 completed + event_data 保真）；event_id 时间戳/subscription_id 运行时指派/挂起态形状 extras 两侧结构性不同，不进比对面。驱动不对称已文档化：py 分布式 resume 只处理被恢复节点本身+逐拍步进；go ResumeSuspension 一步到位 |
 | 28_suspendresume_r2_continue_replay | assignment/code/end | green | **red-declared** `replay-from-start:go` (实跑) | pending（A1：待测） | §3 类 e 首例：go 重放已完成前序（原始轨迹 A 双现 6 事件留证），py 不重放（A 单现）；副作用重复执行风险；收敛=Stage 1 中途入口单。实测补充：py 分布式首拍止于失败边界（start+a 返回），continue 载体自 checkpoint 步进恰好重跑失败节点 |
+| 29_suspend_normal_named_reject | event | green (#330 后构造性) | green (引证 `pkg/workflow/workflow.go:411-416` "cannot park" Step{Error}、`:323-352` runNodes suspend) | pending（A1 引证待实跑） | normal/debug + 挂起节点的**决策分类**锚：两引擎均具名拒绝、绝不"成功"（#330 之前 py 列事实态=**silent-skip**，历史分叉已闭合——本轮 `SuspendNotExecutableError` 落地后 py 构造性 green）。锚决策分类不锚文案：py `error_type="suspend_not_executable"` ↔ go `Step{Error}`；py Generator 不 yield 挂起步（A2 评审 §2 采 Throw，放弃 yield 提案）；子流程迭代帧挂起两引擎均具名拒（py 作用域闸 `FlowSuspendRejectedError`/根出口 fix=restructure）。语义出处 docs/governance/execution-capabilities.md §6 |
 
 ## 8. 负控记录（#317 验收条款）
 

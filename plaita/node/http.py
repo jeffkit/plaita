@@ -1394,6 +1394,9 @@ class HTTP(Node):
     """HTTP节点实现"""
     node_type: ClassVar[str] = "http"
     dry_run_safe: ClassVar[bool] = False
+    # 功能面 = 出网请求（plaita#331 词表：network = 宿主出网能力；目标服务可达
+    # 性是运行期事实，不进词表）。
+    execution_requirements: ClassVar[tuple] = ("network",)
     node_name: ClassVar[str] = "HTTP请求"
     
     # Literal 生成 schema enum（console 表单渲染下拉）；大小写归一由 setup_http

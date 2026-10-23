@@ -3,12 +3,19 @@
 ``run_compatible`` / ``arun_compatible`` 是 sync/async 兼容层：驱动策略层并
 管理 ``_running`` 重入守卫与 lazy generator 的生命周期回调。依赖宿主的
 ``_begin_run/_prepare_strategy/_running/callback_manager``（mixin 契约）。
+
+plaita#330：模式根出口（``parent is None``）承担挂起载体的呈现转换——eager 走
+``finish_normal(root=...)``，lazy 给策略 async-gen 套 ``surface_root_suspension_
+agen``（在 ``_drive_lazy_*`` 之前转换，``on_flow_end`` 收到的即具名终态身份）。
+子执行（parent 非空）不做转换：``FlowSuspendedCarrier`` 原样上抛，分布式父执行
+靠它把挂起送到步边界（NS-M3 传播半边守恒）。
 """
 from __future__ import annotations
 
 from plaita.core._error_normalization import (
     emit_flow_end_on_close as _emit_flow_end_on_close,
     finish_normal as _finish_normal,
+    surface_root_suspension_agen as _surface_root_suspension_agen,
 )
 from plaita.core.async_utils import drive_strategy as _drive_strategy
 
@@ -27,10 +34,14 @@ class CompatRunMixin:
         self._begin_run()
         try:
             try:
+                target = self._prepare_strategy(flow, lazy, args, kwargs)
+                if lazy and self.parent is None:
+                    target = _surface_root_suspension_agen(target)
                 return _drive_strategy(
-                    self._prepare_strategy(flow, lazy, args, kwargs),
+                    target,
                     lazy=lazy, sync=True,
-                    finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+                    finish_coro=lambda coro: _finish_normal(
+                        coro, flow, self.callback_manager, root=self.parent is None),
                     on_lazy_finally=lambda exc: (
                         _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
                     ),
@@ -52,17 +63,20 @@ class CompatRunMixin:
         self._begin_run()
         try:
             try:
+                target = self._prepare_strategy(flow, lazy, args, kwargs)
+                if lazy and self.parent is None:
+                    target = _surface_root_suspension_agen(target)
                 driven = _drive_strategy(
-                    self._prepare_strategy(flow, lazy, args, kwargs),
+                    target,
                     lazy=lazy, sync=False,
-                    finish_coro=lambda coro: _finish_normal(coro, flow, self.callback_manager),
+                    finish_coro=lambda coro: _finish_normal(
+                        coro, flow, self.callback_manager, root=self.parent is None),
                     on_lazy_finally=lambda exc: (
                         _emit_flow_end_on_close(flow, exc, self.callback_manager), setattr(self, "_running", False),
                     ),
                 )
             except BaseException:
-                # review-fix B3: 同 run_compatible——lazy 交出 generator 前
-                # 抛错必须复位 _running，否则实例永久毒化。
+                # review-fix B3: 同 run_compatible——lazy 交出 generator 前抛错必须复位 _running，否则实例永久毒化。
                 if lazy:
                     self._running = False
                 raise
@@ -72,4 +86,3 @@ class CompatRunMixin:
         finally:
             if not lazy:
                 self._running = False
-

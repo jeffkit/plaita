@@ -5,9 +5,13 @@ Migrated from plaita/errors.py (which is now a compatibility shim).
 """
 
 from enum import Enum
+import logging
+import os
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from plaita.core.url_redaction import _redact_env_value
 
 
 class FlowResultError(RuntimeError):
@@ -82,6 +86,9 @@ class FlowErrorType(Enum):
     INVALID_NODE_TYPE = "invalid_node_type"
     EXECUTION_TIMEOUT = "execution_timeout"
     CALLBACK_TIMEOUT = "callback_timeout"
+    # plaita#330：挂起节点在 normal/generator 根出口的具名终态（对外稳定字符串
+    # ``suspend_not_executable``，flow_run / SDK 按 `ok=false` + 该类型判终态不重试）。
+    SUSPEND_NOT_EXECUTABLE = "suspend_not_executable"
 
 
 class ResumeType(Enum):
@@ -329,6 +336,93 @@ class FlowSuspendRejectedError(FlowExecutionException):
 
     def __init__(self, message: str, node=None):
         super().__init__(self.code, message, self.error_type, node)
+
+
+#: 回滚旋钮（plaita#330 §7，A2 评审 §5 收窄形态）：
+#: ``PLAITA_SUSPEND_GUARD=warn`` 只作用于 **#330 新增两半边**——①normal/generator
+#: 根出口的呈现转换（保 NS-M3 原样裸 carrier + WARNING）；②注册期能力契约不变量
+#: （拒绝降 WARNING 放行）。**关不掉 NS-M3 的运行期 carrier 闸**。到期删除：
+#: 2026-11-30（docs/governance/execution-capabilities.md 记档防孤儿旋钮）。
+SUSPEND_GUARD_ENV = "PLAITA_SUSPEND_GUARD"
+
+
+def suspend_guard_mode() -> str:
+    """读回滚旋钮，返回 ``"error"``（默认/严格）或 ``"warn"``；非法值 WARNING 回落严格。
+
+    非法值经 :func:`_redact_env_value` 掩形（#151 C 类「env 投影」：告警只给
+    长度/形态，不回显值本体——一份被误置成凭据的 env 不得原文进日志）。
+    """
+    raw = (os.environ.get(SUSPEND_GUARD_ENV) or "").strip().lower()
+    if not raw:
+        return "error"
+    if raw == "warn":
+        return "warn"
+    logger = logging.getLogger("plaita.core.errors")
+    logger.warning(
+        "%s 非法值 %s（合法：error/warn）——按严格档 error 处理",
+        SUSPEND_GUARD_ENV, _redact_env_value(raw),
+    )
+    return "error"
+
+
+class SuspendNotExecutableError(FlowExecutionException):
+    """挂起节点在 normal/generator 模式根出口的具名终态失败（plaita#330）。
+
+    **呈现层身份转换，不是新抛点**：闸点（``_advance_one``）维持抛
+    :class:`FlowSuspendedCarrier`（NS-M3 传播载体不动）；仅当载体穿出
+    normal/generator **模式根**（无父执行）时，由根出口把它包装成本类——
+    子执行里 carrier 原样上抛（分布式父执行靠它把挂起送到步边界）。
+
+    独立异常类（非 carrier 子类）：worker / 上层按类型判**终态不重试**
+    （同 ``FlowTimeoutError`` 家族先例）；若继承 carrier，任何
+    ``except FlowSuspendedCarrier`` 都会把它误当可挂起载体。
+
+    错误体（:meth:`to_dict`）：``{error_type, node_id, node_type, source_line,
+    flow_id, cause, fix, frame_path, message}``；``message`` 首行写死
+    「这不是源码缺陷，不要删除/替换该节点」。``cause`` 阶段口径（A2 评审 §1）：
+    运行期只见 ``environment``（profile 不满足）与过渡期 ``undeclared``
+    （注册不变量被旋钮降级放行的节点）；``unregistered`` 是加载期事实，
+    不经本类呈现。
+    """
+
+    code = -500
+    error_type = FlowErrorType.SUSPEND_NOT_EXECUTABLE
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        node=None,
+        node_id: Optional[str] = None,
+        node_type: Optional[str] = None,
+        source_line: Optional[int] = None,
+        flow_id: Optional[str] = None,
+        cause: str = "environment",
+        fix: Optional[dict] = None,
+        frame_path: Optional[list] = None,
+    ) -> None:
+        super().__init__(self.code, message, self.error_type, node,
+                         source_line=source_line)
+        self.node_id = node_id or getattr(node, "id", None)
+        self.node_type = node_type or getattr(node, "node_type", None)
+        self.flow_id = flow_id
+        self.cause = cause
+        self.fix = dict(fix or {})
+        self.frame_path = list(frame_path or [])
+
+    def to_dict(self) -> dict:
+        """结构化错误体（flow_run ``error_detail`` / 日志 WARNING 共用形状）。"""
+        return {
+            "error_type": self.error_type.value,
+            "message": str(self),
+            "node_id": self.node_id,
+            "node_type": self.node_type,
+            "source_line": self.source_line,
+            "flow_id": self.flow_id,
+            "cause": self.cause,
+            "fix": dict(self.fix),
+            "frame_path": list(self.frame_path),
+        }
 
 
 class ResumeError(FlowExecutionException):

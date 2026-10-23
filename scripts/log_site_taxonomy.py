@@ -54,6 +54,13 @@ OVERRIDES: dict[tuple[str, str], tuple[str, str]] = {
         "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
     ("plaita/core/parallel_executor.py:114", "entry[0]"): (
         "B", "fork 池缓存的 pid（消息模板 'cached pid %s'）"),
+    # plaita#330（B1 r89）两个新站点（第三个 errors.py:361 由规则表自然判定）：
+    ("plaita/node/capabilities.py:91", "message"): (
+        "B", "执行能力契约违规消息：node_type/未知 token 名/合法词表——全部来自"
+             "节点类声明与引擎词表（开发者写的类属性名，非运行时作者数据）"),
+    ("plaita/core/_error_normalization.py:114", "presented.to_dict()"): (
+        "A", "SuspendNotExecutableError 结构化错误体：node_id/flow_id/frame_path"
+             "（流程实体标识）+ fix（引擎构造文案），无异常文本/凭据/env 投影"),
 }
 
 # ---------------------------------------------------------------------------

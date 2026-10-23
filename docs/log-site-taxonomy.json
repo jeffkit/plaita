@@ -3,16 +3,16 @@
   "issue": "plaita#168",
   "coverage_grep": "grep -rn \"logger\\.(info|warning|error|debug)\" plaita/",
   "counts": {
-   "grep_hit_lines": 818,
-   "ast_associated_calls": 802,
-   "interpolated_sites": 653,
+   "grep_hit_lines": 821,
+   "ast_associated_calls": 805,
+   "interpolated_sites": 656,
    "constant_message_sites": 149,
    "grep_false_hits": 16
   },
   "class_distribution": {
-   "A": 249,
-   "B": 85,
-   "C": 319,
+   "A": 250,
+   "B": 86,
+   "C": 320,
    "N/A": 165
   },
   "note": "site = 文件:行（验收 grep 命中行）；class ∈ A/B/C/D/N/A；判据=docs/log-site-taxonomy.md §3 与 scripts/log_site_taxonomy.py 规则表（一一对应）"
@@ -198,6 +198,16 @@
    "rationale": "e ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）"
   },
   {
+   "site": "plaita/core/_error_normalization.py:114",
+   "method": "warning",
+   "interp": true,
+   "class": "A",
+   "exprs": [
+    "presented.to_dict()"
+   ],
+   "rationale": "presented.to_dict() ⇒ A（SuspendNotExecutableError 结构化错误体：node_id/flow_id/frame_path（流程实体标识）+ fix（引擎构造文案），无异常文本/凭据/env 投影）"
+  },
+  {
    "site": "plaita/core/async_utils.py:172",
    "method": "debug",
    "interp": false,
@@ -360,6 +370,17 @@
    "interp": false,
    "class": "N/A",
    "rationale": "常量消息，无插值 ⇒ 无数据流出口"
+  },
+  {
+   "site": "plaita/core/errors.py:361",
+   "method": "warning",
+   "interp": true,
+   "class": "C",
+   "exprs": [
+    "SUSPEND_GUARD_ENV",
+    "_redact_env_value(raw)"
+   ],
+   "rationale": "SUSPEND_GUARD_ENV ⇒ B（引擎常量（数值/键名/env 变量名/具名原因串））; _redact_env_value(raw) ⇒ C（环境投影值：插值变量在所在函数内赋值自 os.environ/os.getenv）"
   },
   {
    "site": "plaita/core/executor.py:452",
@@ -1657,6 +1678,16 @@
    "interp": false,
    "class": "N/A",
    "rationale": "grep 误命中：注释/文档串内提及，非调用点"
+  },
+  {
+   "site": "plaita/node/capabilities.py:91",
+   "method": "warning",
+   "interp": true,
+   "class": "B",
+   "exprs": [
+    "message"
+   ],
+   "rationale": "message ⇒ B（执行能力契约违规消息：node_type/未知 token 名/合法词表——全部来自节点类声明与引擎词表（开发者写的类属性名，非运行时作者数据））"
   },
   {
    "site": "plaita/node/code.py:135",

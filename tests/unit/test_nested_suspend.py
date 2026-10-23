@@ -24,6 +24,7 @@ from plaita.core.errors import (
     FlowSuspendRejectedError,
     FlowSuspendedCarrier,
     ResumeGuardError,
+    SuspendNotExecutableError,
 )
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
@@ -425,13 +426,15 @@ class TestScopeGate:
         assert flow_contains_suspending_node(wrapper)
 
     def test_gate_rejection_is_typed_in_normal_mode(self):
-        """normal 模式下闸拒绝保留具名类型（finish_normal 对
-        FlowExecutionException 子类原样透传）。"""
+        """normal 模式下闸拒绝保留具名类型（#330 后根出口呈现为
+        SuspendNotExecutableError；闸点载体/闸具名拒经 __cause__ 与 fix 可辨）。"""
         flow = Flow.model_validate(LOOP_ROOT)
         ex = FlowExecution()
         ex.mode = "normal"
-        with pytest.raises((FlowSuspendRejectedError, FlowSuspendedCarrier)):
+        with pytest.raises(SuspendNotExecutableError) as ei:
             ex.run_compatible(flow, False, items=[1])
+        # 迭代帧挂起：即便分布式也救不了（作用域闸）——fix 点名 restructure。
+        assert ei.value.to_dict()["fix"]["action"] == "restructure"
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +444,12 @@ class TestScopeGate:
 
 class TestNormalModeNamedFailure:
     def test_root_event_in_normal_mode_is_named_failure(self):
-        """根流程 normal 模式的挂起节点：不再静默假完成。"""
+        """根流程 normal 模式的挂起节点：不再静默假完成。
+
+        #330 起根出口呈现为 ``SuspendNotExecutableError``（独立异常类）；闸点
+        仍是 carrier（见 test_carrier_escapes_normal_drive 的 ``_advance_one``
+        直抛钉），经 ``__cause__`` 链可达。
+        """
         flow = Flow.model_validate({
             "flow_id": "n1", "version": "1", "runtime": "python",
             "nodes": [
@@ -452,8 +460,9 @@ class TestNormalModeNamedFailure:
         })
         ex = FlowExecution()
         ex.mode = "normal"
-        with pytest.raises(FlowSuspendedCarrier):
+        with pytest.raises(SuspendNotExecutableError) as ei:
             ex.run_compatible(flow, False)
+        assert isinstance(ei.value.__cause__, FlowSuspendedCarrier)
 
     def test_child_event_in_normal_mode_is_named_failure(self):
         """child 内 event 在 normal 模式：pending 载荷不再被当数据（历史静默
@@ -461,14 +470,15 @@ class TestNormalModeNamedFailure:
         flow = _root_flow()
         ex = FlowExecution()
         ex.mode = "normal"
-        with pytest.raises(FlowSuspendedCarrier) as ei:
+        with pytest.raises(SuspendNotExecutableError) as ei:
             ex.run_compatible(flow, False)
         # 消息点名挂起节点与所在 flow（fail-open 时代的静默零报错对照面）。
         assert "'wait'" in str(ei.value)
         assert "child1" in str(ei.value)
 
     def test_root_event_in_generator_mode_is_named_failure(self):
-        """根流程 generator 模式：同一具名失败。"""
+        """根流程 generator 模式：同一具名失败（A2 评审 §2 采 Throw——与 Go
+        ExecuteGenerator 的 Step{Error} 决策分类对齐，不做 yield 挂起步）。"""
         flow = Flow.model_validate({
             "flow_id": "g1", "version": "1", "runtime": "python",
             "nodes": [
@@ -479,7 +489,7 @@ class TestNormalModeNamedFailure:
         })
         ex = FlowExecution()
         ex.mode = "generator"
-        with pytest.raises(FlowSuspendedCarrier):
+        with pytest.raises(SuspendNotExecutableError):
             list(ex.run_compatible(flow, True))
 
     def test_carrier_escapes_normal_drive_of_suspended_checkpoint(self):

@@ -20,6 +20,8 @@ class RedisNode(Node):
 
     node_type: ClassVar[str] = "redis"
     dry_run_safe: ClassVar[bool] = False
+    # 功能面 = 出网访问 redis 实例（plaita#331 词表：network = 宿主出网能力）。
+    execution_requirements: ClassVar[tuple] = ("network",)
     node_name: ClassVar[str] = "redis缓存"
 
     target: str = Field(..., description="Redis connection URL")

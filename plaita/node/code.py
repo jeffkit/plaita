@@ -1231,6 +1231,8 @@ class CodeNode(Node):
 
     node_type: ClassVar[str] = "code"
     dry_run_safe: ClassVar[bool] = False
+    # 任意代码执行须在宿主沙箱档位内跑（sandbox_backend 白名单体系，plaita#22/#29）。
+    execution_requirements: ClassVar[tuple] = ("sandbox",)
     node_name: ClassVar[str] = "代码"
 
     language: Optional[str] = None

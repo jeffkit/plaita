@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from plaita.core.errors import SuspendNotExecutableError
 from plaita.dsl.codeflow import compile_source, flow_from_source
 from plaita.dsl.ir_validate import FlowIRValidationError, build_flow
 from plaita.node import get_default_registry
@@ -47,14 +49,23 @@ class RunResult:
     result: Any = None
     error: Optional[str] = None
     error_type: Optional[str] = None
+    # plaita#330：具名错误的结构化错误体（目前仅 suspend_not_executable 携带
+    # {error_type, node_id, node_type, source_line, flow_id, cause, fix,
+    # frame_path, message}）。**稀疏键**：仅非 None 时进 to_dict ——ok/普通失败
+    # 载荷的 JSON 形状逐字节不变（test_json_guard 形状负控钉此契约），具名错误
+    # 才多出 error_detail 键。
+    error_detail: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "ok": self.ok,
             "result": self.result,
             "error": self.error,
             "error_type": self.error_type,
         }
+        if self.error_detail is not None:
+            payload["error_detail"] = self.error_detail
+        return payload
 
 
 def _parse_codeflow_error(exc: Exception) -> CompileError:
@@ -123,12 +134,26 @@ def run_flow(
             flow.global_context = dict(globals_ctx)
         result = flow.run(**(inputs or {}))
     except Exception as exc:
-        error_type = type(exc).__name__
-        if hasattr(exc, "error_type"):
-            error_type = str(getattr(exc, "error_type"))
-        return RunResult(ok=False, error=str(exc), error_type=error_type)
+        error_type = _stable_error_type(exc)
+        detail = exc.to_dict() if isinstance(exc, SuspendNotExecutableError) else None
+        return RunResult(ok=False, error=str(exc), error_type=error_type, error_detail=detail)
 
     return RunResult(ok=True, result=result)
+
+
+def _stable_error_type(exc: Exception) -> str:
+    """具名错误类型 → 稳定字符串（plaita#330）。
+
+    ``FlowErrorType`` 枚举取 ``.value``（历史上 ``str(Enum)`` 产出
+    ``FlowErrorType.FLOW_ERROR`` 这种机器键，AI 作者无法按它分流）；自带
+    ``error_type`` 字符串属性的异常原样采用；其余回落异常类名。
+    """
+    raw = getattr(exc, "error_type", None)
+    if isinstance(raw, Enum):
+        return raw.value
+    if isinstance(raw, str) and raw:
+        return raw
+    return type(exc).__name__
 
 
 def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, str]]:
