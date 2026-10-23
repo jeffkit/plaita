@@ -1,0 +1,223 @@
+FFFFFF..                                                                 [100%]
+=================================== FAILURES ===================================
+__ TestEpistemicRedelivery.test_status_read_failure_pending_then_salvageable ___
+
+self = <tests.unit.test_issue312_epistemic_reject_redelivery.TestEpistemicRedelivery object at 0x110f49090>
+
+    def test_status_read_failure_pending_then_salvageable(self):
+        """格①：状态读抖动一轮 ⇒ 不收容不 ack；自愈后重投走主 DLQ 可救。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-s312a", _terminal_state("exec-s312a"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker, max_deliveries=1)
+        _healthy_tenant(fake, "beta")
+    
+        body = _body("exec-s312a", "beta")
+        # 载体带源世代（G2 同构）：自愈轮过闸走主 DLQ，而非 R2 的
+        # legacy×已发布世代收容面（那面由 A125 r2 格锁定）。
+        enqueue_task(fake, QUEUE, dict(body), tenant_generation="g2")
+        queue.ensure_group()
+        assert queue.read(block_ms=1) is not None  # 首投 → PEL
+    
+        _poison_hget_once(fake, TENANT_STATUS_KEY)
+        assert queue.read(block_ms=1) is None  # reclaim → 死信尝试被认识论拒绝
+>       assert _pel_count(fake) == 1, "读失败型拒绝必须留 pending（at-least-once）"
+E       AssertionError: 读失败型拒绝必须留 pending（at-least-once）
+E       assert 0 == 1
+E        +  where 0 = _pel_count(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=0489b4abc4cd4f5a8828e4800ab8b7c4,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>)
+
+tests/unit/test_issue312_epistemic_reject_redelivery.py:208: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:689 新消费组 plaita-workers（stream=test:a312:tasks）从 id=0 建立，将重放 1 条历史条目；若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ （B2R31-01：改名不重放）
+WARNING  plaita.server.tenant_status:tenant_status.py:252 租户 beta 写闸读状态失败（fail-closed）: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/tenant_status.py", line 250, in tenant_write_allowed
+    raw_status = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue312_epistemic_reject_redelivery.py", line 172, in hget
+    raise ConnectionError("transient redis flap")
+ConnectionError: transient redis flap
+
+WARNING  plaita.server.task_queue:task_queue.py:1435 死信写入拒绝（status_read_failed）：tenant=beta message=1792743557470-0——旧世代/已删租户，不写 DLQ、不 ack
+ERROR    plaita.server.task_queue:task_queue.py:1362 Dead-letter quarantined task 1792743557470-0 -> test:a312:tasks:dlq:quarantine:beta id=1792743557472-0 (tenant=beta rejected=status_read_failed, max_deliveries=1)
+_ TestEpistemicRedelivery.test_meta_read_failure_not_quarantined_as_generation_missing _
+
+self = <tests.unit.test_issue312_epistemic_reject_redelivery.TestEpistemicRedelivery object at 0x110f49450>
+
+    def test_meta_read_failure_not_quarantined_as_generation_missing(self):
+        """格②：meta 读抖动伪装 generation_missing 的那格被收回——留 pending。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-s312b", _terminal_state("exec-s312b"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker, max_deliveries=1)
+        _healthy_tenant(fake, "beta")
+    
+        body = _body("exec-s312b", "beta")
+        enqueue_task(fake, QUEUE, dict(body), tenant_generation="g2")
+        queue.ensure_group()
+        assert queue.read(block_ms=1) is not None
+    
+        _poison_hget_once(fake, TENANT_STATUS_META_KEY)
+        assert queue.read(block_ms=1) is None
+>       assert _pel_count(fake) == 1
+E       assert 0 == 1
+E        +  where 0 = _pel_count(<fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=1cedc07ebabd45298ff30ec9ba1faca6,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>)
+
+tests/unit/test_issue312_epistemic_reject_redelivery.py:236: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.task_queue:task_queue.py:689 新消费组 plaita-workers（stream=test:a312:tasks）从 id=0 建立，将重放 1 条历史条目；若是 group 改名请改用 PLAITA_CONSUMER_GROUP_START_ID=$ （B2R31-01：改名不重放）
+WARNING  plaita.server.tenant_status:tenant_status.py:212 租户 beta 世代读取失败: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/tenant_status.py", line 210, in read_tenant_generation
+    raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue312_epistemic_reject_redelivery.py", line 172, in hget
+    raise ConnectionError("transient redis flap")
+ConnectionError: transient redis flap
+
+WARNING  plaita.server.task_queue:task_queue.py:1435 死信写入拒绝（generation_missing）：tenant=beta message=1792743557505-0——旧世代/已删租户，不写 DLQ、不 ack
+ERROR    plaita.server.task_queue:task_queue.py:1362 Dead-letter quarantined task 1792743557505-0 -> test:a312:tasks:dlq:quarantine:beta id=1792743557506-0 (tenant=beta rejected=generation_missing, max_deliveries=1)
+______ TestQueueLayerRouting.test_status_read_failed_direct_returns_false ______
+
+self = <tests.unit.test_issue312_epistemic_reject_redelivery.TestQueueLayerRouting object at 0x110f49590>
+
+    def test_status_read_failed_direct_returns_false(self):
+        """格③：status_read_failed 直格——dead_letter_if_allowed False + 留 pending。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-s312c", _terminal_state("exec-s312c"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker, with_guard=False)
+        _healthy_tenant(fake, "acme")
+    
+        body = _body("exec-s312c", "acme")
+        mid = _to_pel(fake, body)
+        task = StreamTask(
+            message_id=mid, body=dict(body), delivery_count=5,
+            tenant_generation="g2",
+        )
+    
+        _poison_hget_once(fake, TENANT_STATUS_KEY)
+>       assert queue.dead_letter_if_allowed(task, reason="max_deliveries=5") is False
+E       AssertionError: assert True is False
+E        +  where True = dead_letter_if_allowed(StreamTask(message_id='1792743557512-0', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-s312c', 'resum...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation='g2'), reason='max_deliveries=5')
+E        +    where dead_letter_if_allowed = <plaita.server.task_queue.RedisStreamTaskQueue object at 0x1119bb610>.dead_letter_if_allowed
+
+tests/unit/test_issue312_epistemic_reject_redelivery.py:269: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.tenant_status:tenant_status.py:252 租户 acme 写闸读状态失败（fail-closed）: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/tenant_status.py", line 250, in tenant_write_allowed
+    raw_status = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue312_epistemic_reject_redelivery.py", line 172, in hget
+    raise ConnectionError("transient redis flap")
+ConnectionError: transient redis flap
+
+WARNING  plaita.server.task_queue:task_queue.py:1435 死信写入拒绝（status_read_failed）：tenant=acme message=1792743557512-0——旧世代/已删租户，不写 DLQ、不 ack
+ERROR    plaita.server.task_queue:task_queue.py:1362 Dead-letter quarantined task 1792743557512-0 -> test:a312:tasks:dlq:quarantine:acme id=1792743557513-0 (tenant=acme rejected=status_read_failed, max_deliveries=5)
+_ TestQueueLayerRouting.test_generation_read_failed_named_reason_no_quarantine _
+
+self = <tests.unit.test_issue312_epistemic_reject_redelivery.TestQueueLayerRouting object at 0x110f49310>
+
+    def test_generation_read_failed_named_reason_no_quarantine(self):
+        """格④：meta 读失败具名 generation_read_failed——不落任何收容条目。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-s312d", _terminal_state("exec-s312d"))
+        worker = _worker(fake, storage)
+        queue = _queue(fake, worker, with_guard=False)
+        _healthy_tenant(fake, "beta")
+    
+        body = _body("exec-s312d", "beta")
+        mid = _to_pel(fake, body)
+        task = StreamTask(
+            message_id=mid, body=dict(body), delivery_count=5,
+            tenant_generation="g2",
+        )
+    
+        _poison_hget_once(fake, TENANT_STATUS_META_KEY)
+>       assert queue.dead_letter_if_allowed(task, reason="max_deliveries=5") is False
+E       AssertionError: assert True is False
+E        +  where True = dead_letter_if_allowed(StreamTask(message_id='1792743557520-0', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-s312d', 'resum...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation='g2'), reason='max_deliveries=5')
+E        +    where dead_letter_if_allowed = <plaita.server.task_queue.RedisStreamTaskQueue object at 0x110f70d60>.dead_letter_if_allowed
+
+tests/unit/test_issue312_epistemic_reject_redelivery.py:293: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.tenant_status:tenant_status.py:212 租户 beta 世代读取失败: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/tenant_status.py", line 210, in read_tenant_generation
+    raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue312_epistemic_reject_redelivery.py", line 172, in hget
+    raise ConnectionError("transient redis flap")
+ConnectionError: transient redis flap
+
+WARNING  plaita.server.task_queue:task_queue.py:1435 死信写入拒绝（generation_missing）：tenant=beta message=1792743557520-0——旧世代/已删租户，不写 DLQ、不 ack
+ERROR    plaita.server.task_queue:task_queue.py:1362 Dead-letter quarantined task 1792743557520-0 -> test:a312:tasks:dlq:quarantine:beta id=1792743557520-0 (tenant=beta rejected=generation_missing, max_deliveries=5)
+__ TestGuardEpistemicSkip.test_guard_conservative_skip_on_status_read_failure __
+
+self = <tests.unit.test_issue312_epistemic_reject_redelivery.TestGuardEpistemicSkip object at 0x110f496d0>
+
+    def test_guard_conservative_skip_on_status_read_failure(self):
+        """格⑤：状态读失败 ⇒ False（不克隆、不放行收容、消息留 pending）。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-s312e", _running_state("exec-s312e"))
+        worker = _worker(fake, storage)
+        _healthy_tenant(fake, "acme")
+    
+        task = StreamTask(
+            message_id="1-1", body=_body("exec-s312e", "acme"),
+            delivery_count=5, tenant_generation="g2",
+        )
+        _poison_hget_once(fake, TENANT_STATUS_KEY)
+>       assert worker._dead_letter_guard(task) is False
+E       AssertionError: assert True is False
+E        +  where True = _dead_letter_guard(StreamTask(message_id='1-1', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-s312e', 'resume_type': 'co...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation='g2'))
+E        +    where _dead_letter_guard = <plaita.server.flow_worker.RedisFlowWorker object at 0x1119b9090>._dead_letter_guard
+
+tests/unit/test_issue312_epistemic_reject_redelivery.py:314: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.tenant_status:tenant_status.py:252 租户 acme 写闸读状态失败（fail-closed）: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/tenant_status.py", line 250, in tenant_write_allowed
+    raw_status = redis_client.hget(TENANT_STATUS_KEY, tenant_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue312_epistemic_reject_redelivery.py", line 172, in hget
+    raise ConnectionError("transient redis flap")
+ConnectionError: transient redis flap
+
+WARNING  plaita:flow_worker.py:5431 死信守卫：租户 acme 写闸关闭（status_read_failed），不克隆恢复副本（派发闸必丢），放行死信交队列层收容终局: 1-1
+___ TestGuardEpistemicSkip.test_guard_conservative_skip_on_meta_read_failure ___
+
+self = <tests.unit.test_issue312_epistemic_reject_redelivery.TestGuardEpistemicSkip object at 0x110f49810>
+
+    def test_guard_conservative_skip_on_meta_read_failure(self):
+        """格⑥：meta 读失败（原伪装 generation_missing）⇒ 同样保守跳过。"""
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state("exec-s312f", _running_state("exec-s312f"))
+        worker = _worker(fake, storage)
+        _healthy_tenant(fake, "beta")
+    
+        task = StreamTask(
+            message_id="1-2", body=_body("exec-s312f", "beta"),
+            delivery_count=5, tenant_generation="g2",
+        )
+        _poison_hget_once(fake, TENANT_STATUS_META_KEY)
+>       assert worker._dead_letter_guard(task) is False
+E       AssertionError: assert True is False
+E        +  where True = _dead_letter_guard(StreamTask(message_id='1-2', body={'type': 'resume', 'flow_id': 'f1', 'execution_id': 'exec-s312f', 'resume_type': 'co...ily='legacy', config_generation='legacy', budget_generation='legacy', config_effective_at=None, tenant_generation='g2'))
+E        +    where _dead_letter_guard = <plaita.server.flow_worker.RedisFlowWorker object at 0x1119b9bd0>._dead_letter_guard
+
+tests/unit/test_issue312_epistemic_reject_redelivery.py:330: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.server.tenant_status:tenant_status.py:212 租户 beta 世代读取失败: Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita/plaita/server/tenant_status.py", line 210, in read_tenant_generation
+    raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
+  File "/Users/kong/projects/infra4agent/plaita/tests/unit/test_issue312_epistemic_reject_redelivery.py", line 172, in hget
+    raise ConnectionError("transient redis flap")
+ConnectionError: transient redis flap
+
+WARNING  plaita:flow_worker.py:5431 死信守卫：租户 beta 写闸关闭（generation_missing），不克隆恢复副本（派发闸必丢），放行死信交队列层收容终局: 1-2
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue312_epistemic_reject_redelivery.py::TestEpistemicRedelivery::test_status_read_failure_pending_then_salvageable
+FAILED tests/unit/test_issue312_epistemic_reject_redelivery.py::TestEpistemicRedelivery::test_meta_read_failure_not_quarantined_as_generation_missing
+FAILED tests/unit/test_issue312_epistemic_reject_redelivery.py::TestQueueLayerRouting::test_status_read_failed_direct_returns_false
+FAILED tests/unit/test_issue312_epistemic_reject_redelivery.py::TestQueueLayerRouting::test_generation_read_failed_named_reason_no_quarantine
+FAILED tests/unit/test_issue312_epistemic_reject_redelivery.py::TestGuardEpistemicSkip::test_guard_conservative_skip_on_status_read_failure
+FAILED tests/unit/test_issue312_epistemic_reject_redelivery.py::TestGuardEpistemicSkip::test_guard_conservative_skip_on_meta_read_failure
+6 failed, 2 passed in 0.53s

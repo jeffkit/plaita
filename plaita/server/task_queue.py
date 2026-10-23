@@ -15,7 +15,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from plaita.core.url_redaction import _scrub_url_text, _redact_env_value
 from plaita.tenant_context import TenantWriteRejected
-from plaita.server.tenant_status import tenant_write_allowed
+from plaita.server.tenant_status import is_epistemic_reject_reason, tenant_write_allowed
 from plaita.runtime_config import (
     LEGACY_GENERATION,
     normalize_generation,
@@ -1229,10 +1229,12 @@ class RedisStreamTaskQueue:
         ``_reclaim_one`` 完全一致：
 
         - 返回 ``True``：已死信（payload 进 DLQ，原消息已 ack）；租户写闸
-          拒绝时为**已收容终局**（信封进租户隔离流，原消息已 ack，见下）；
+          **确认态**拒绝时为已收容终局（信封进租户隔离流，原消息已 ack）；
         - 返回 ``False``：守卫拒绝或抛异常（``dlq_guard_skipped`` 已计数），
           消息**留在 pending**，调用方不得 ack，等下一轮处置；或收容写失败
-          （Redis 故障，同样留 pending 重试）；
+          （Redis 故障，同样留 pending 重试）；或租户写闸**认识论性拒绝**
+          （读失败型，#312——不收容不 ack，留 pending 等重投，
+          ``tenant_reject_epistemic_pending`` 已计数）；
         - 守卫为 ``None``（默认）：恒放行——存量行为零变化。
 
         覆盖 ``payload``/``extra`` 只给畸形消息信封用（原始串 + raw_fields）；
@@ -1243,10 +1245,12 @@ class RedisStreamTaskQueue:
         信封版本拒收（A42-05）与畸形 payload（B44-05）是同一契约下的另两处
         历史旁路：现在都经由本方法。
 
-        A125-01/02：租户写闸（#277）拒绝不再是「留 pending 永久滞留」——
-        那让超投递原消息永无终局（每轮 reclaim×拒绝 churn；守卫恢复分支还
-        会每轮泵 1 条注定被派发闸丢弃的副本）。现在改收容语义：信封写**租
-        户隔离流** + ack 原消息（终局出口），平台 DLQ 纯净性不变。
+        A125-01/02：租户写闸（#277）**确认态**拒绝不再是「留 pending 永久
+        滞留」——那让超投递原消息永无终局（每轮 reclaim×拒绝 churn；守卫恢
+        复分支还会每轮泵 1 条注定被派发闸丢弃的副本）。确认态改收容语义：
+        信封写**租户隔离流** + ack 原消息（终局出口），平台 DLQ 纯净性不变。
+        #312：读失败型拒绝（status/generation hget 瞬断）不是确认态——照旧
+        留 pending 重投（瞬断自愈后按真实状态终局），不参与收容。
         """
         if not self._guard_allows_dead_letter(task):
             return False
@@ -1261,8 +1265,9 @@ class RedisStreamTaskQueue:
             self.dead_letter(task, reason=reason, **overrides)
         except TenantWriteRejected as rejected:
             # plaita#277：旧世代/已删租户的迟到死信写被拒——平台 DLQ 不收。
-            # A125-01/02：拒绝后不无限留 pending，收容到租户隔离流并 ack
-            # （终局）；收容失败（Redis 故障）才留 pending 等下一轮。
+            # A125-01/02：确认态拒绝不无限留 pending，收容到租户隔离流并
+            # ack（终局）；收容失败（Redis 故障）才留 pending 等下一轮。
+            # #312：认识论性拒绝（读失败型）在分流内留 pending 重投。
             return self._quarantine_rejected_dead_letter(
                 task, rejected, reason=reason, overrides=overrides
             )
@@ -1276,25 +1281,47 @@ class RedisStreamTaskQueue:
         reason: str,
         overrides: Dict[str, Any],
     ) -> bool:
-        """租户写闸拒绝后的收容终局（A125-01/02）。
+        """租户写闸拒绝后的终局分流（A125-01/02 收容 + #312 认识论性重投）。
 
-        #277 把平台 DLQ 设为 fail-closed 写闸（旧世代/已删租户的 payload
-        不得回流平台级键），但「拒绝后留 pending」让原消息永无终局出口
-        （A125-02：legacy 载体「执行得到、死不掉」；A125-01：停用租户的
-        超投递载体每轮被守卫泵 1 条垃圾副本）。收容语义补齐终局：
+        #312：``TenantWriteRejected`` 混杂两类，先辨性质再决定终局形态——
 
-        - 信封（与 ``dead_letter`` 同形 + ``tenant_write_rejected`` /
-          ``quarantined``）写**租户隔离流** ``{dlq_key}:quarantine:{tenant}``
-          ——按键隔离，同名重建租户的 worker 不读此流；按 ``dlq_max_len``
-          裁剪防无界；条目可观察（XLEN/XRANGE）、可救（租户恢复后按信封内
-          源世代/信封版本人工重放，与 DLQ replay 同思路）。刻意不随租户
-          删除清理（证据保全；键数以租户数为上界）。
-        - 原消息 ack 出 PEL（终局）。ack 失败返回 False 留 pending 重试
-          ——收容条目可能重复，at-least-once，与 DLQ ack 失败同语义。
+        - **认识论性拒绝**（``status_read_failed`` / ``generation_read_failed``
+          ——读失败/瞬断窗，「不知道租户状态」）：**不收容不 ack**，消息留
+          pending 走 at-least-once 重投（修前语义；与 #310 StatePersistError
+          同哲学：读不到真实状态时不做不可逆处置）。收容+ack 会把健康租户的
+          唯一恢复载体终局化进 console 不可见的隔离流——可救塌缩不可救。
+          瞬断自愈后下一轮重走守卫/写闸，按真实状态终局。
+        - **确认态拒绝**（tenant_disabled / generation_missing /
+          generation_changed，租户真停用或世代真前移）：维持 A125 收容终局
+          （#277 把平台 DLQ 设为 fail-closed 写闸，旧世代/已删租户的 payload
+          不得回流平台级键；「拒绝后留 pending」在确认态下让原消息永无终局
+          出口——A125-02：legacy 载体「执行得到、死不掉」；A125-01：停用租
+          户的超投递载体每轮被守卫泵 1 条垃圾副本）：
 
-        返回 ``True`` = 已收容终局；``False`` = 无法收容（无 Redis/写失败/
-        ack 失败），消息留 pending 等下一轮（存量语义）。
+          - 信封（与 ``dead_letter`` 同形 + ``tenant_write_rejected`` /
+            ``quarantined``）写**租户隔离流** ``{dlq_key}:quarantine:{tenant}``
+            ——按键隔离，同名重建租户的 worker 不读此流；按 ``dlq_max_len``
+            裁剪防无界；条目可观察（XLEN/XRANGE）、可救（租户恢复后按信封内
+            源世代/信封版本人工重放，与 DLQ replay 同思路）。刻意不随租户
+            删除清理（证据保全；键数以租户数为上界）。
+          - 原消息 ack 出 PEL（终局）。ack 失败返回 False 留 pending 重试
+            ——收容条目可能重复，at-least-once，与 DLQ ack 失败同语义。
+
+        返回 ``True`` = 已收容终局（确认态）；``False`` = 认识论性拒绝（留
+        pending 重投）或无法收容（无 Redis/写失败/ack 失败，同样留 pending）。
         """
+        if is_epistemic_reject_reason(rejected.reason):
+            self._metrics["tenant_reject_epistemic_pending"] = (
+                self._metrics.get("tenant_reject_epistemic_pending", 0) + 1
+            )
+            logger.warning(
+                "死信写闸读失败型拒绝（%s，tenant=%s，message=%s）——不收容不 "
+                "ack，留 pending 等重投（瞬断自愈后按真实状态终局）",
+                rejected.reason,
+                rejected.tenant_id,
+                getattr(task, "message_id", "?"),
+            )
+            return False
         if self.redis is None:
             return False
         tenant_id = str(rejected.tenant_id or "?")
@@ -1313,8 +1340,10 @@ class RedisStreamTaskQueue:
             "budget_generation": task.budget_generation,
             "config_effective_at": task.config_effective_at,
             "tenant_generation": task.tenant_generation,
-            # A125：写闸拒绝的具名原因（tenant_disabled / generation_missing
-            # / generation_changed / status_read_failed）。
+            # A125：写闸拒绝的具名原因（确认态：tenant_disabled /
+            # generation_missing / generation_changed）。#312：读失败型
+            # （status_read_failed / generation_read_failed）在上游分流已留
+            # pending 重投，不会落进收容信封。
             "tenant_write_rejected": reject_reason,
             "quarantined": True,
             "payload": task.body,

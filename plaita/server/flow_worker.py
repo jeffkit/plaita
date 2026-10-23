@@ -138,6 +138,7 @@ from plaita.tenant_context import (
     set_current_tenant_generation,
 )
 from plaita.server.tenant_status import (
+    is_epistemic_reject_reason,
     read_tenant_generation,
     tenant_is_active,
     tenant_write_allowed,
@@ -5422,12 +5423,26 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         # pending ⇒ 下轮再泵）。不克隆，放行死信——DLQ 写闸虽同样拒绝，队列
         # 层会收容到租户隔离流并 ack 原消息（A125 终局出口）；执行态保持不
         # 动，租户恢复后经 console resume / 隔离流按源世代重放可救。
+        # #312：关闭分两种性质——确认态照上段放行收容；**读失败型关闭**
+        # （status/generation hget 瞬断，「不知道租户状态」）不得放行收容：
+        # 那会把健康租户的可救载体终局化进 console 不可见的隔离流。改走本
+        # 函数既有纪律（执行状态读失败 :5276 同款）：保守跳过死信，消息留
+        # pending，瞬断自愈后下一轮按真实状态处置。
         gate_allowed, gate_reason = tenant_write_allowed(
             self.redis_client,
             body.get("tenant_id"),
             getattr(task, "tenant_generation", None),
         )
         if not gate_allowed:
+            if is_epistemic_reject_reason(gate_reason):
+                logger.warning(
+                    "死信守卫：租户 %s 写闸读失败（%s，认识论性拒绝）——保守跳过"
+                    "死信（不克隆不收容），消息留 pending 等重投: %s",
+                    body.get("tenant_id") or "default",
+                    gate_reason,
+                    getattr(task, "message_id", "?"),
+                )
+                return False
             logger.warning(
                 "死信守卫：租户 %s 写闸关闭（%s），不克隆恢复副本（派发闸必丢），"
                 "放行死信交队列层收容终局: %s",

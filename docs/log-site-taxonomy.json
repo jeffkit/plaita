@@ -3,14 +3,14 @@
   "issue": "plaita#168",
   "coverage_grep": "grep -rn \"logger\\.(info|warning|error|debug)\" plaita/",
   "counts": {
-   "grep_hit_lines": 812,
-   "ast_associated_calls": 796,
-   "interpolated_sites": 647,
+   "grep_hit_lines": 815,
+   "ast_associated_calls": 799,
+   "interpolated_sites": 650,
    "constant_message_sites": 149,
    "grep_false_hits": 16
   },
   "class_distribution": {
-   "A": 246,
+   "A": 249,
    "B": 85,
    "C": 316,
    "N/A": 165
@@ -7544,6 +7544,16 @@
    "rationale": "tenant_id ⇒ A（流程/运行实体标识（跨日志可回查））"
   },
   {
+   "site": "plaita/server/tenant_status.py:312",
+   "method": "warning",
+   "interp": true,
+   "class": "A",
+   "exprs": [
+    "tenant_id"
+   ],
+   "rationale": "tenant_id ⇒ A（流程/运行实体标识（跨日志可回查））"
+  },
+  {
    "site": "plaita/storage/base.py:175",
    "method": "error",
    "interp": true,
@@ -7992,6 +8002,18 @@
    "rationale": "component ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; root ⇒ B（基础设施标量/文件系统路径/对象句柄）; OPT_OUT_ENV ⇒ B（引擎常量（数值/键名/env 变量名/具名原因串））"
   },
   {
+   "site": "plaita/server/task_queue.py:1318",
+   "method": "warning",
+   "interp": true,
+   "class": "A",
+   "exprs": [
+    "rejected.reason",
+    "rejected.tenant_id",
+    "getattr(task, \"message_id\", \"?\")"
+   ],
+   "rationale": "rejected.reason ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; rejected.tenant_id ⇒ A（流程/运行实体标识（跨日志可回查））; getattr(task, \"message_id\", \"?\") ⇒ A（流程/运行实体标识（跨日志可回查））"
+  },
+  {
    "site": "plaita/server/task_queue.py:1342",
    "method": "warning",
    "interp": true,
@@ -8063,6 +8085,18 @@
     "getattr(task, \"message_id\", \"?\")"
    ],
    "rationale": "body.get(\"tenant_id\") ⇒ A（流程/运行实体标识（跨日志可回查））; gate_reason ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; getattr(task, \"message_id\", \"?\") ⇒ A（流程/运行实体标识（跨日志可回查））"
+  },
+  {
+   "site": "plaita/server/flow_worker.py:5439",
+   "method": "warning",
+   "interp": true,
+   "class": "A",
+   "exprs": [
+    "body.get(\"tenant_id\") or \"default\"",
+    "gate_reason",
+    "getattr(task, \"message_id\", \"?\")"
+   ],
+   "rationale": "body.get(\"tenant_id\") or \"default\" ⇒ B（布尔判定/具名拒绝原因/特性名/回退默认值）; gate_reason ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; getattr(task, \"message_id\", \"?\") ⇒ A（流程/运行实体标识（跨日志可回查））"
   }
  ]
 }

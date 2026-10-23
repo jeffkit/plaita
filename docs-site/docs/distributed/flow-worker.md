@@ -152,6 +152,11 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 世代时写闸关闭，恢复副本注定被派发闸丢弃（克隆只会形成「每轮泵 1 条垃圾
 副本」的泵循环），守卫不克隆、放行死信交队列层收容终局（见下）；执行态
 不动，租户恢复后经 console resume 或隔离流按源世代重放可救。
+**读失败型关闭不在此列（#312）**：`status_read_failed` /
+`generation_read_failed`（Redis 读抖动窗，「不知道租户状态」）是认识论性
+拒绝而非确认态——守卫与执行状态/租约查询失败同款**保守跳过死信**（消息留
+pending），瞬断自愈后下一轮按真实状态处置，绝不把健康租户的可救载体放行
+收容终局化。
 
 **死信路径收敛（#252）**：`run()` 兜底异常分支
 （`ExecutionStateLoadError` / `StatePersistError` 等瞬态失败的落点）、
@@ -160,17 +165,24 @@ pending；执行仍非终态但**节点重试计数已达预算**（见下节）
 队列层 `dead_letter_if_allowed` 单一入口）：守卫拒绝/抛异常时**不 ack**，消息
 留 pending 等下一轮处置并推进 `dlq_guard_skipped`；守卫为 `None`（默认）恒
 放行，存量行为不变。DLQ 信封固定带 `schema_version`（畸形消息另带
-`raw_fields`），审计与重放不靠猜。**租户写闸拒绝的收容终局（A125-01/02）**：
-`dead_letter_if_allowed` 捕获 `TenantWriteRejected` 后不再「留 pending 永久
-滞留」——信封（与 DLQ 同形，另带 `tenant_write_rejected` 具名原因与
-`quarantined` 标记）写**租户隔离流** `{dlq}:quarantine:{tenant}` 并 ack 原消息
-（终局出口）；平台 DLQ 纯净性不变，隔离流按键裁剪（同 `PLAITA_DLQ_MAX_LEN`）、
-刻意不随租户删除清理（证据保全）。租户恢复后可经 console 按信封内源世代
-人工重放（A135-01）：隔离流进 `/api/queues/dlq` 看板（租户视角只见本租户的
-隔离流），`POST /api/queues/dlq/{id}/replay` 传 `dlq_key=<隔离流键>` 回灌，
-与 DLQ replay 同一幂等/审计路径、目标缺省反推为源任务队列；回灌成功
-（含 `already_replayed` 补摘）后隔离条目即**摘除**——清债语义，与平台 DLQ
-的证据保留刻意不同，失败路径条目保留。
+`raw_fields`），审计与重放不靠猜。**租户写闸拒绝的分流终局（A125-01/02 +
+#312）**：`dead_letter_if_allowed` 捕获 `TenantWriteRejected` 后先辨拒绝
+性质——**确认态**（`tenant_disabled` / `generation_missing` /
+`generation_changed`，租户真停用或世代真前移）不再「留 pending 永久滞留」：
+信封（与 DLQ 同形，另带 `tenant_write_rejected` 具名原因与 `quarantined`
+标记）写**租户隔离流** `{dlq}:quarantine:{tenant}` 并 ack 原消息（终局出口）；
+平台 DLQ 纯净性不变，隔离流按键裁剪（同 `PLAITA_DLQ_MAX_LEN`）、刻意不随租
+户删除清理（证据保全）。租户恢复后可经 console 按信封内源世代人工重放
+（A135-01）：隔离流进 `/api/queues/dlq` 看板（租户视角只见本租户的隔离流），
+`POST /api/queues/dlq/{id}/replay` 传 `dlq_key=<隔离流键>` 回灌，与 DLQ
+replay 同一幂等/审计路径、目标缺省反推为源任务队列；回灌成功（含
+`already_replayed` 补摘）后隔离条目即**摘除**——清债语义，与平台 DLQ 的
+证据保留刻意不同，失败路径条目保留。**认识论性拒绝**（`status_read_failed`
+/ `generation_read_failed`，读失败/瞬断窗——meta 读失败在 #312 前会被吞成
+None 伪装成 `generation_missing`）**不收容不 ack**，消息留 pending 走
+at-least-once 重投（与 `StatePersistError` 同哲学：读不到真实状态时不做
+不可逆处置），自愈后按真实状态终局；计数 `tenant_reject_epistemic_pending`
+入 `/metrics` 快照。
 `tenant_quarantined` / `tenant_quarantine_failures` 计数入 `/metrics` 快照。
 
 **超版本拒收不触发死信守卫的「克隆恢复」（A49-01）**：守卫在「执行非终态 +

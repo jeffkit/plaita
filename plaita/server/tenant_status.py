@@ -200,29 +200,70 @@ def publish_tenant_generation(
         return False
 
 
-def read_tenant_generation(
+# plaita#312：认识论性拒绝——「不知道租户状态」（读失败/瞬断窗），不是确认态。
+# 这类拒绝**不得终局化**（收容/ack 会把可救载体变成不可救），调用方只能留
+# pending 走 at-least-once 重投；确认态（tenant_disabled / generation_changed /
+# 无记录的 generation_missing）才允许收容终局。
+EPISTEMIC_REJECT_REASONS = frozenset(
+    {"status_read_failed", "generation_read_failed"}
+)
+
+
+def is_epistemic_reject_reason(reason: Optional[str]) -> bool:
+    """租户写闸拒绝原因是否为认识论性（读失败型，#312）。"""
+    return reason in EPISTEMIC_REJECT_REASONS
+
+
+def _read_tenant_generation_strict(
     redis_client, tenant_id: Optional[str]
-) -> Optional[str]:
-    """读租户当前世代；无客户端/记录/读失败 → None。"""
+) -> tuple[Optional[str], bool]:
+    """读租户当前世代，读失败可辨识（plaita#312）。
+
+    返回 ``(generation, read_failed)``：
+
+    - ``read_failed=True``：hget 抛错（瞬断窗）——「不知道」，调用方闸门
+      必须按认识论性拒绝处置（不得据此做不可逆终局化）；
+    - ``read_failed=False`` 且 ``generation=None``：无客户端/无租户/无记录/
+      内容不可解析——持久事实（记录性缺失），非瞬态窗。
+
+    ``read_tenant_generation`` 是本函数的兼容薄包装（取值型调用方按 None=legacy
+    处理的契约不变）；需要辨识读失败的闸门直接用本函数。
+    """
     if redis_client is None or not tenant_id:
-        return None
+        return None, False
     try:
         raw = redis_client.hget(TENANT_STATUS_META_KEY, tenant_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — 读失败必须可辨识（#312）
         logger.warning(
             "租户 %s 世代读取失败: %s", tenant_id, _scrub_exception_text(exc)
         )
-        return None
+        return None, True
     if raw is None:
-        return None
+        return None, False
     try:
         meta = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
     except (TypeError, ValueError):
-        return None
+        return None, False
     if not isinstance(meta, dict):
-        return None
+        return None, False
     generation = meta.get("tenant_generation")
-    return str(generation) if generation else None
+    return (str(generation) if generation else None), False
+
+
+def read_tenant_generation(
+    redis_client, tenant_id: Optional[str]
+) -> Optional[str]:
+    """读租户当前世代；无客户端/记录/读失败 → None。
+
+    兼容契约（#277 取值面：None 按无世代/legacy 处理）不变。#312：读失败与
+    「无记录」在本函数仍合流为 None——需要辨识读失败的闸门（死信收容分流、
+    守卫保守跳过）走 :func:`tenant_write_allowed`（内部 strict 自辨识）或
+    :func:`_read_tenant_generation_strict`。
+    """
+    generation, _read_failed = _read_tenant_generation_strict(
+        redis_client, tenant_id
+    )
+    return generation
 
 
 def tenant_write_allowed(
@@ -236,7 +277,10 @@ def tenant_write_allowed(
 
     - 空/default 租户：放行（#237 单租兼容；default 的删除不在此单范围）。
     - 无 Redis 客户端：非 default 一律拒绝（fail-closed）。
+    - 状态读失败：拒绝，reason=``status_read_failed``（**认识论性**，#312）。
     - 状态 ``disabled``：拒绝（删除墓碑；即使尚未重建也不得写回）。
+    - 当前世代读失败：拒绝，reason=``generation_read_failed``（**认识论性**，
+      #312——读失败不再伪装成 ``generation_missing`` 确认态）。
     - 调用方带 ``expected_generation``（在途 worker 派发时捕获的世代）：
       当前世代缺失或不同 → 拒绝。
     - 调用方不带世代（老消息/队列内部路径）：只有当前世代也缺失才放行；
@@ -257,7 +301,18 @@ def tenant_write_allowed(
         return False, "status_read_failed"
     if raw_status is not None and _status_from_value(raw_status) == STATUS_DISABLED:
         return False, "tenant_disabled"
-    current = read_tenant_generation(redis_client, tenant_id)
+    current, generation_read_failed = _read_tenant_generation_strict(
+        redis_client, tenant_id
+    )
+    if generation_read_failed:
+        # #312：meta 读失败原被 read_tenant_generation 吞成 None、伪装成
+        # generation_missing 确认态收容——现具名认识论性拒绝，调用方留
+        # pending 重投，不得据此终局化（读失败详情已由 strict 读 WARNING）。
+        logger.warning(
+            "租户 %s 写闸读世代失败（fail-closed，认识论性拒绝 generation_read_failed）",
+            tenant_id,
+        )
+        return False, "generation_read_failed"
     if expected_generation is None:
         if current is None:
             return True, None
