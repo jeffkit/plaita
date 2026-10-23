@@ -253,9 +253,24 @@ def _within_clean_budget(url: object) -> bool:
     return length is None or length <= _MAX_CLEAN_INPUT
 
 
+#: A2R58-03：未注册分支触发计数（进程级、单调递增，测试可断言）。WARNING 只在
+#: **首次**触发打一条——读面 scrub（timeline/SSE 每帧每字段）是高频路径，无频控
+#: 的 WARNING 曾把 console 日志逐条刷屏；之后降 DEBUG。「未注册」是进程级装配
+#: 事实，不是逐次事件：响亮一次 + 计数可查即足，噪音无增量信息。
+_unregistered_count = 0
+
+
 def _mask_url_for_log(url: object) -> str:
+    global _unregistered_count
     if _mask_url is None:                     # factory 未注册（纯 node 进程）：fail-closed
-        logger.warning("_mask_url 未注册——日志路径 fail-closed 掩码")
+        _unregistered_count += 1
+        if _unregistered_count == 1:
+            logger.warning(
+                "_mask_url 未注册——日志路径 fail-closed 掩码（本进程后续同类降 DEBUG；当前计数=%d）",
+                _unregistered_count,
+            )
+        else:
+            logger.debug("_mask_url 未注册——日志路径 fail-closed 掩码")
         return UNPRINTABLE_URL
     """Redis/通用 URL（``userinfo`` 口令）进日志前的**总兜底**渲染。
 
