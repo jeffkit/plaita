@@ -349,7 +349,14 @@ worker 启动时计算并打印 `event=config.effective`，同时写入 registry
   旧世代的迟到写具名拒绝（订阅写拒绝；DLQ 死信经 A125-01/02 收容终局，见
   flow-worker.md「死信路径收敛」——平台 DLQ 不收，证据进租户隔离流
   `{dlq}:quarantine:{tenant}` 并 ack 原消息），同名重建的新租户读不到前代
-  payload。`PLAITA_DISABLE_FENCING=1` 只关闭 execution 状态
+  payload。隔离流的观察与重放（A135-01）：隔离流进 console DLQ 看板
+  （`GET /api/queues/dlq`；租户视角只见本租户的隔离流），租户恢复后用
+  `POST /api/queues/dlq/{id}/replay` 回灌（`dlq_key` 传隔离流键；目标缺省
+  按基 DLQ 反推为源任务队列）。回灌成功（含 `already_replayed` 补摘）后
+  条目即从隔离流**摘除**（清债，与平台 DLQ 的证据保留不同）；失败路径
+  （`schema_too_new` / `target_family_mismatch` 等）条目保留，修复配置后
+  可重试。
+  `PLAITA_DISABLE_FENCING=1` 只关闭 execution 状态
   写的 fencing，本闸独立于该开关生效（状态写回滚路径的既有风险按原样注记）。
 - **世代随消息走（#283）**：任务信封新增 `tenant_generation`；重投/交接/
   归一化副本继承源值，worker dispatch 入口与 DLQ/订阅写闸比对**源世代**而非
