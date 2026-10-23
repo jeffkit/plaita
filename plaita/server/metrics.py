@@ -51,11 +51,6 @@ QUEUE_COUNTERS: Tuple[Tuple[str, str, str], ...] = (
     ("dlq_ack_failures", "queue_dlq_ack_failures_total", "本进程死信后 ACK 原消息失败数"),
     ("residue_swept", "queue_residue_swept_total", "本进程回收的已 ack 未删残留数"),
     ("schema_rejected", "queue_schema_rejected_total", "信封版本过新被拒收数"),
-    ("config_family_mismatch", "queue_config_family_mismatch_total",
-     "配置族不兼容被拒执行数（消息留 pending）"),
-    ("config_legacy", "queue_config_legacy_total", "无代际字段的 legacy 载体处理数"),
-    ("config_budget_stale", "queue_config_budget_stale_total",
-     "旧预算代际 PEL 被跳过数（不立即死信）"),
 )
 
 

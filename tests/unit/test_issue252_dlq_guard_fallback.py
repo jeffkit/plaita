@@ -108,7 +108,7 @@ def _seed_pending(fake, *, deliveries, max_deliveries=5):
         claim_min_idle_ms=1,
         max_deliveries=max_deliveries,
     )
-    mid = seed.enqueue(dict(BODY))
+    mid = seed.enqueue(dict(BODY), max_deliveries=None)  # legacy 载体：预算由队列本地值裁判
     first = seed.read(block_ms=100)
     assert first is not None and first.message_id == mid, "首投必须可被派发"
     for _ in range(deliveries - 1):
@@ -385,7 +385,7 @@ class TestMaxDeliveriesOne:
         """首投之后（未 ack = 这次尝试没成功）才允许死信。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         writer = self._queue(fake, max_deliveries=1)
-        mid = writer.enqueue(dict(BODY))
+        mid = writer.enqueue(dict(BODY), max_deliveries=None)  # legacy 载体：预算=队列本地 1
         first = writer.read(block_ms=100)
         assert first is not None and first.message_id == mid
 
@@ -407,7 +407,7 @@ class TestMaxDeliveriesOne:
         """守卫拒绝时首投之后的 reclaim 也不得死信（消息留 pending）。"""
         fake = fakeredis.FakeRedis(decode_responses=True)
         writer = self._queue(fake, max_deliveries=1)
-        mid = writer.enqueue(dict(BODY))
+        mid = writer.enqueue(dict(BODY), max_deliveries=None)  # legacy 载体：预算=队列本地 1
         assert writer.read(block_ms=100) is not None
 
         time.sleep(0.01)

@@ -132,7 +132,7 @@ def _body(exec_id, tenant):
 
 def _to_pel(fake, body):
     """入队并把唯一消息拉进 PEL（模拟已消费/超投递后的 pending 状态）。"""
-    enqueue_task(fake, QUEUE, dict(body))
+    enqueue_task(fake, QUEUE, dict(body), max_deliveries=None)  # legacy 载体：预算由队列本地值裁判
     fake.xgroup_create(QUEUE, GROUP, id="0")
     resp = fake.xreadgroup(GROUP, "c1", {QUEUE: ">"}, count=10)
     ids = [
@@ -199,7 +199,7 @@ class TestEpistemicRedelivery:
         body = _body("exec-s312a", "beta")
         # 载体带源世代（G2 同构）：自愈轮过闸走主 DLQ，而非 R2 的
         # legacy×已发布世代收容面（那面由 A125 r2 格锁定）。
-        enqueue_task(fake, QUEUE, dict(body), tenant_generation="g2")
+        enqueue_task(fake, QUEUE, dict(body), tenant_generation="g2", max_deliveries=None)
         queue.ensure_group()
         assert queue.read(block_ms=1) is not None  # 首投 → PEL
 
@@ -227,7 +227,7 @@ class TestEpistemicRedelivery:
         _healthy_tenant(fake, "beta")
 
         body = _body("exec-s312b", "beta")
-        enqueue_task(fake, QUEUE, dict(body), tenant_generation="g2")
+        enqueue_task(fake, QUEUE, dict(body), tenant_generation="g2", max_deliveries=None)
         queue.ensure_group()
         assert queue.read(block_ms=1) is not None
 

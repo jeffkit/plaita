@@ -3,8 +3,8 @@
   "issue": "87",
   "concern": "规则子句2：超时链路入队失败必须释放 timeout dedup 键",
   "file": "plaita/server/event_filter.py",
-  "old": "        try:\n            from plaita.runtime_config import envelope_for_stream\n\n            enqueue_task(\n                self.redis_client, self.queue_name, resume_task,\n                tenant_generation=getattr(\n                    subscription, \"tenant_generation\", None\n                ),\n                **envelope_for_stream(self.queue_name, role=\"event_filter\"),\n            )\n        except Exception as exc:\n            self._release_dedup_key(dedup_key)\n",
-  "new": "        try:\n            from plaita.runtime_config import envelope_for_stream\n\n            enqueue_task(\n                self.redis_client, self.queue_name, resume_task,\n                tenant_generation=getattr(\n                    subscription, \"tenant_generation\", None\n                ),\n                **envelope_for_stream(self.queue_name, role=\"event_filter\"),\n            )\n        except Exception:\n            pass\n",
+  "old": "        try:\n            # plaita#328：同上——快照由 enqueue_task 缺省盖章。\n            enqueue_task(\n                self.redis_client, self.queue_name, resume_task,\n                tenant_generation=getattr(\n                    subscription, \"tenant_generation\", None\n                ),\n            )\n        except Exception as exc:\n            self._release_dedup_key(dedup_key)",
+  "new": "        try:\n            # plaita#328：同上——快照由 enqueue_task 缺省盖章。\n            enqueue_task(\n                self.redis_client, self.queue_name, resume_task,\n                tenant_generation=getattr(\n                    subscription, \"tenant_generation\", None\n                ),\n            )\n        except Exception:\n            pass",
   "rationale": "回到缺陷形态：超时链路入队失败不释放键 ⇒ 订阅超时唤醒同样静默丢失",
   "expect_fail": [
     "tests/unit/test_event_reconcile.py::TestEnqueueFailureReleasesDedupKey::test_failed_timeout_enqueue_releases_dedup_key"

@@ -257,14 +257,14 @@ class EventFilter:
                     # 回扫器据此不推进游标、改计 rejected；推送链路是
                     # fire-and-forget，由 event/redis.py 的包装接收。
                     try:
-                        from plaita.runtime_config import envelope_for_stream
-
+                        # plaita#328：信封快照由 enqueue_task 缺省盖章
+                        # （PLAITA_MAX_DELIVERIES 随信封走），不再拆
+                        # envelope_for_stream 代际包。
                         enqueue_task(
                             self.redis_client, self.queue_name, resume_task,
                             tenant_generation=getattr(
                                 subscription, "tenant_generation", None
                             ),
-                            **envelope_for_stream(self.queue_name, role="event_filter"),
                         )
                     except Exception as exc:
                         self._release_dedup_key(dedup_key)
@@ -373,14 +373,12 @@ class EventFilter:
         # 该包装记 ERROR 后**继续上抛**到 `_check_loop`（记日志、下轮重试）——
         # 失败不再被抹平。
         try:
-            from plaita.runtime_config import envelope_for_stream
-
+            # plaita#328：同上——快照由 enqueue_task 缺省盖章。
             enqueue_task(
                 self.redis_client, self.queue_name, resume_task,
                 tenant_generation=getattr(
                     subscription, "tenant_generation", None
                 ),
-                **envelope_for_stream(self.queue_name, role="event_filter"),
             )
         except Exception as exc:
             self._release_dedup_key(dedup_key)

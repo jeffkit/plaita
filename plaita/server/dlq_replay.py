@@ -282,53 +282,6 @@ def _reject(
     return result
 
 
-def _resolve_target_family(
-    target_stream: str,
-    *,
-    explicit: Optional[str] = None,
-    consumer_group: Optional[str] = None,
-    dlq_key: Optional[str] = None,
-) -> Optional[str]:
-    """目标 stream 的生效 family（r58）；无法确定 ⇒ None（调用方 fail-closed）。
-
-    默认按目标 stream + 生效 group/DLQ 走 ``envelope_for_stream``（与目标
-    worker/生产者同源）。自定义 group/DLQ 的部署由调用方显式传
-    ``target_config_family``（或 group/DLQ 参数）；显式值必须是合法
-    ``cf1-`` 代际，否则按未知拒绝，绝不猜。
-    """
-    from plaita.runtime_config import (
-        FAMILY_PREFIX,
-        envelope_for_stream,
-        is_valid_generation,
-    )
-
-    if explicit is not None:
-        text = str(explicit).strip()
-        if not is_valid_generation(text, FAMILY_PREFIX):
-            logger.warning(
-                "DLQ replay 显式 target_config_family 非法（%r），按未知拒绝",
-                _redact_env_value(text),
-            )
-            return None
-        return text
-    try:
-        env = envelope_for_stream(
-            target_stream,
-            role="worker",
-            consumer_group=consumer_group,
-            dlq_key=dlq_key,
-        )
-        family = env.get("config_family")
-        return str(family) if family else None
-    except Exception as exc:  # noqa: BLE001 — 无法确定目标 family ⇒ fail-closed
-        logger.warning(
-            "DLQ replay 无法解析目标 family（%s）: %s",
-            _scrub_url_text(target_stream),
-            _scrub_url_text(exc),
-        )
-        return None
-
-
 def replay_dead_letter(
     redis,
     *,
@@ -341,10 +294,6 @@ def replay_dead_letter(
     tenant_id: Optional[str] = None,
     max_schema_version: Optional[int] = None,
     now: Optional[float] = None,
-    target_config_family: Optional[str] = None,
-    target_consumer_group: Optional[str] = None,
-    target_dlq_key: Optional[str] = None,
-    allow_family_mismatch: bool = False,
 ) -> ReplayResult:
     """把一条 DLQ 条目幂等回灌到 ``target_stream``。
 
@@ -354,11 +303,11 @@ def replay_dead_letter(
       与 payload 自带租户不一致时拒绝（``tenant_mismatch``）。
     - ``force=True``：绕过已存在的 replay 标记（仍要求平台管理员）。确定性
       execution_id 保证同一死信的 force 重灌仍收敛到一条执行。
-    - ``target_config_family``：目标 stream 的生效 family（自定义 group/DLQ
-      部署必须显式给）；缺省按目标 stream + 生效 group/DLQ 解析。源/目标
-      family 不一致 ⇒ ``target_family_mismatch``（marker/目标 Stream 均不动）。
-    - ``allow_family_mismatch=True``：管理员显式跨 family 回灌（WARNING +
-      审计仍记录本次操作）；不得静默继承源 family 进不同 stream。
+
+    plaita#328：不再校验/携带 config_family 等 配置代际哈希——版本维度收敛为
+    wire schema + IR，拓扑一致性由 worker 启动校验把守；回灌继承源信封的
+    ``schema_version``/``tenant_generation``/``max_deliveries`` 预算快照
+    （缺失/畸形快照按 legacy 处理，消费端用本地预算，绝不盖当前 env 值）。
     """
     dlq_key = _text(dlq_key)
     dlq_id = _text(dlq_id)
@@ -490,71 +439,23 @@ def replay_dead_letter(
         if max_schema_version is None
         else int(max_schema_version)
     )
-    # B2R31-01：replay 继承源代际（缺失/畸形 → legacy，绝不盖当前值）。
-    from plaita.runtime_config import normalize_generation
-
-    config_envelope = {
-        "config_family": normalize_generation(envelope.get("config_family"), kind="family"),
-        "config_generation": normalize_generation(
-            envelope.get("config_generation"), kind="generation"
-        ),
-        "budget_generation": normalize_generation(
-            envelope.get("budget_generation"), kind="budget"
-        ),
-    }
-    effective_at = envelope.get("config_effective_at")
-    if isinstance(effective_at, str) and effective_at.strip():
-        config_envelope["config_effective_at"] = effective_at.strip()
+    # plaita#328：代际哈希维度已删除；回灌只继承 tenant_generation（#283，
+    # 身份字段）与 max_deliveries 预算快照。快照缺失/畸形 ⇒ 显式传 ``None``
+    # = legacy 信封（消费端按本地预算），**不得**落到 enqueue_task 的缺省
+    # （那是「取当前 env 预算」，会盖掉源预算语义）。
+    config_envelope: Dict[str, Any] = {"max_deliveries": None}
+    raw_snapshot = envelope.get("max_deliveries")
+    if raw_snapshot is not None:
+        try:
+            snapshot = int(raw_snapshot)
+        except (TypeError, ValueError):
+            snapshot = 0
+        if snapshot > 0:
+            config_envelope["max_deliveries"] = snapshot
     # plaita#283：DLQ replay 继承源租户世代（缺失=legacy，不按当前 meta 猜）。
     tenant_generation = envelope.get("tenant_generation")
     if isinstance(tenant_generation, str) and tenant_generation.strip():
         config_envelope["tenant_generation"] = tenant_generation.strip()
-    # r58 a/P2：replay 必须校验目标 stream family——源 family 与目标不一致时
-    # 目标 worker 会按 family gate 拒收并留 pending，replay 却报 ok 是假成功。
-    # 检查在 marker/入队之前：拒绝不烧幂等标记、目标 XLEN 不变、源 DLQ 保留。
-    source_family = config_envelope["config_family"]
-    target_family = _resolve_target_family(
-        target_stream,
-        explicit=target_config_family,
-        consumer_group=target_consumer_group,
-        dlq_key=target_dlq_key,
-    )
-    if target_family is None:
-        return _reject(
-            redis,
-            actor=actor,
-            dlq_key=dlq_key,
-            dlq_id=msg_id,
-            target_stream=target_stream,
-            reason="target_family_unknown",
-            detail="cannot resolve target stream config_family; pass target_config_family",
-            schema_version=schema_version,
-            source_id=source_id,
-            force=force,
-        )
-    if source_family != target_family and not allow_family_mismatch:
-        return _reject(
-            redis,
-            actor=actor,
-            dlq_key=dlq_key,
-            dlq_id=msg_id,
-            target_stream=target_stream,
-            reason="target_family_mismatch",
-            detail=(
-                f"source_family={source_family!r} "
-                f"target_family={target_family!r}"
-            ),
-            schema_version=schema_version,
-            source_id=source_id,
-            force=force,
-        )
-    if source_family != target_family:
-        logger.warning(
-            "DLQ replay 跨 family 覆盖（allow_family_mismatch）：dlq=%s id=%s "
-            "source_family=%s target_family=%s actor=%s",
-            _scrub_url_text(dlq_key), msg_id, source_family, target_family,
-            _scrub_url_text(actor),
-        )
     if schema_version > limit:
         # 入队前拒绝：先入队再靠消费侧死信会让超版本副本（或 A49-01 克隆）
         # 继续污染 DLQ。
