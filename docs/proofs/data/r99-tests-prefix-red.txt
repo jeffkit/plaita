@@ -1,0 +1,231 @@
+FFFFFFFFF                                                                [100%]
+=================================== FAILURES ===================================
+_________________ test_console_import_chain_registers_mask_url _________________
+
+    def test_console_import_chain_registers_mask_url():
+        """子进程证明（生产态，不受宿主进程态污染）：console 导入链加载完后
+        ``url_redaction._mask_url`` 必须已注册。修前恒 UNREGISTERED。"""
+        code = (
+            "import sys; sys.path[:0]=[%r,%r]\n"
+            "import plaita.core.url_redaction as UR\n"
+            "import api.executions, api.flows, api.schedules, api.tenants\n"
+            "import main\n"
+            "print('REGISTERED' if UR._mask_url is not None else 'UNREGISTERED')\n"
+        ) % (str(REPO_ROOT), str(BACKEND_DIR))
+        env = dict(os.environ, PLAITA_CONSOLE_DB_URL="sqlite:////tmp/a2r58-03-registration-check.db")
+        r = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True,
+            env=env, cwd=str(BACKEND_DIR), timeout=180,
+        )
+>       assert "UNREGISTERED" not in r.stdout and r.stdout.strip().endswith("REGISTERED"), (
+            f"console 进程 _mask_url 未注册（stdout={r.stdout.strip()!r}）\n"
+            f"stderr[-600:]={r.stderr[-600:]!r}"
+        )
+E       AssertionError: console 进程 _mask_url 未注册（stdout='UNREGISTERED'）
+E         stderr[-600:]='2026-10-23 16:44:58,227 - plaita.writefile_jail - INFO - [console] writefile 写入 jail: /private/tmp（显式配置）\n'
+E       assert ('UNREGISTERED' not in 'UNREGISTERED\n'
+E         
+E         'UNREGISTERED' is contained here:
+E         Strings contain only whitespace, escaping them using repr()
+E           'UNREGISTERED\n')
+
+tests/console/test_a2r58_03_mask_url_registration.py:101: AssertionError
+____ test_console_process_registered_scrub_keeps_host_and_masks_credentials ____
+
+    def test_console_process_registered_scrub_keeps_host_and_masks_credentials():
+        """注册态（本进程经 main 导入链产生）scrub 语义：保 host、抹 path/query、
+        抹凭据——与 worker（factory 注册态）同判据，四面读面共用这一条单一判据。"""
+>       assert UR._mask_url is not None, "宿主进程未注册（隔离会话里应由 main 导入链产生）"
+E       AssertionError: 宿主进程未注册（隔离会话里应由 main 导入链产生）
+E       assert None is not None
+E        +  where None = UR._mask_url
+
+tests/console/test_a2r58_03_mask_url_registration.py:110: AssertionError
+___________ test_console_rescrub_of_worker_scrubbed_text_keeps_host ____________
+
+    def test_console_rescrub_of_worker_scrubbed_text_keeps_host():
+        """console 二次 scrub 不许把 worker 已保住的 host 抹掉（A2 探针 04b 的 S1→S2
+        形态，修后语义）：已掩码形态是幂等不动点，host 必须存活。"""
+>       assert UR._mask_url is not None
+E       assert None is not None
+E        +  where None = UR._mask_url
+
+tests/console/test_a2r58_03_mask_url_registration.py:118: AssertionError
+_____________________ test_detail_error_message_keeps_host _____________________
+
+console_client = (<starlette.testclient.TestClient object at 0x117968980>, <fakeredis._clients._sync.FakeRedis(<redis.connection.Connec...ype=None),orig_host_address=823aabf414a2426c85f5e66ac34ea8d5,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>)
+
+    def test_detail_error_message_keeps_host(console_client):
+        """面 1：detail ``error.message``（前端取作人话标题）。"""
+        client, rd = console_client
+        eid = _seed(rd)
+        r = client.get(f"/api/executions/{eid}")
+        assert r.status_code == 200, r.text
+        err = r.json()["error"]
+        assert err["error_type"] == "NodeExecutionError"  # 机器判读键守恒（对照）
+>       _assert_correctly_masked(err["message"])
+
+tests/console/test_a2r58_03_mask_url_registration.py:175: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = '节点执行失败: HTTPError 502 Server Error for url: <unprintable-url>'
+
+    def _assert_correctly_masked(text: str) -> None:
+        """区分「正确掩码」与「过度掩码」的断言形（本单的测试盲修正本体）。
+    
+        旧形「凭据针不在」对 ``<unprintable-url>`` 与 ``https://host/***`` 同真；
+        这里三元组缺一不可：host 保留（诊断价值）+ 常量不在场（不过度掩码）+
+        凭据针与 path 明文不在场（真掩过）。
+        """
+>       assert HOST in text, f"host:port 丢失（过度掩码）：{text!r}"
+E       AssertionError: host:port 丢失（过度掩码）：'节点执行失败: HTTPError 502 Server Error for url: <unprintable-url>'
+E       assert 'api.example.com' in '节点执行失败: HTTPError 502 Server Error for url: <unprintable-url>'
+
+tests/console/test_a2r58_03_mask_url_registration.py:74: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+_____________ test_timeline_worker_preserved_host_survives_rescrub _____________
+
+console_client = (<starlette.testclient.TestClient object at 0x1179ea5d0>, <fakeredis._clients._sync.FakeRedis(<redis.connection.Connec...ype=None),orig_host_address=f6ac0d2c22de47459ee6977dd70932b4,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>)
+
+    def test_timeline_worker_preserved_host_survives_rescrub(console_client):
+        """面 2：timeline 端点——worker 已 scrub 保住 host 的存量文本（seq2）不许被
+        console 二次 scrub 抹掉；旧版存量含凭据行（seq3）凭据针仍不在（对照）。"""
+        client, rd = console_client
+        eid = _seed(rd)
+        r = client.get(f"/api/executions/{eid}/timeline")
+        assert r.status_code == 200, r.text
+        events = r.json()["events"]
+        e2 = next(e for e in events if e.get("seq") == 2)["error"]
+>       _assert_correctly_masked(e2)
+
+tests/console/test_a2r58_03_mask_url_registration.py:187: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = 'HTTPError 502 Server Error for url: <unprintable-url>'
+
+    def _assert_correctly_masked(text: str) -> None:
+        """区分「正确掩码」与「过度掩码」的断言形（本单的测试盲修正本体）。
+    
+        旧形「凭据针不在」对 ``<unprintable-url>`` 与 ``https://host/***`` 同真；
+        这里三元组缺一不可：host 保留（诊断价值）+ 常量不在场（不过度掩码）+
+        凭据针与 path 明文不在场（真掩过）。
+        """
+>       assert HOST in text, f"host:port 丢失（过度掩码）：{text!r}"
+E       AssertionError: host:port 丢失（过度掩码）：'HTTPError 502 Server Error for url: <unprintable-url>'
+E       assert 'api.example.com' in 'HTTPError 502 Server Error for url: <unprintable-url>'
+
+tests/console/test_a2r58_03_mask_url_registration.py:74: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+____________________ test_sse_initial_state_view_keeps_host ____________________
+
+console_client = (<starlette.testclient.TestClient object at 0x117b1cf50>, <fakeredis._clients._sync.FakeRedis(<redis.connection.Connec...ype=None),orig_host_address=538a1ca8d97f4d12bcd42cbba5ea4dcc,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>)
+
+    def test_sse_initial_state_view_keeps_host(console_client):
+        """面 3：SSE ``initial_state`` 与 detail 共用 ``_redact_execution_view``。"""
+        _client, rd = console_client
+        eid = _seed(rd)
+        info = json.loads(rd.get(f"plaita:execution:{eid}"))
+        from api.executions import _redact_execution_view
+    
+        view = _redact_execution_view(dict(info))
+>       _assert_correctly_masked(view["error"]["message"])
+
+tests/console/test_a2r58_03_mask_url_registration.py:201: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = '节点执行失败: HTTPError 502 Server Error for url: <unprintable-url>'
+
+    def _assert_correctly_masked(text: str) -> None:
+        """区分「正确掩码」与「过度掩码」的断言形（本单的测试盲修正本体）。
+    
+        旧形「凭据针不在」对 ``<unprintable-url>`` 与 ``https://host/***`` 同真；
+        这里三元组缺一不可：host 保留（诊断价值）+ 常量不在场（不过度掩码）+
+        凭据针与 path 明文不在场（真掩过）。
+        """
+>       assert HOST in text, f"host:port 丢失（过度掩码）：{text!r}"
+E       AssertionError: host:port 丢失（过度掩码）：'节点执行失败: HTTPError 502 Server Error for url: <unprintable-url>'
+E       assert 'api.example.com' in '节点执行失败: HTTPError 502 Server Error for url: <unprintable-url>'
+
+tests/console/test_a2r58_03_mask_url_registration.py:74: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+_______________________ test_sse_update_frame_keeps_host _______________________
+
+    def test_sse_update_frame_keeps_host():
+        """面 4：SSE update 帧消费侧 scrub（``_scrub_update_payload``）。"""
+        from api.executions import _scrub_update_payload
+    
+        frame = json.dumps({
+            "execution_id": "e", "type": "node_end", "node_id": "call", "ok": False,
+            "error": WORKER_SCRUBBED, "duration_ms": 1,
+        })
+        out = json.loads(_scrub_update_payload(frame))
+>       _assert_correctly_masked(out["error"])
+
+tests/console/test_a2r58_03_mask_url_registration.py:215: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+text = 'HTTPError 502 Server Error for url: <unprintable-url>'
+
+    def _assert_correctly_masked(text: str) -> None:
+        """区分「正确掩码」与「过度掩码」的断言形（本单的测试盲修正本体）。
+    
+        旧形「凭据针不在」对 ``<unprintable-url>`` 与 ``https://host/***`` 同真；
+        这里三元组缺一不可：host 保留（诊断价值）+ 常量不在场（不过度掩码）+
+        凭据针与 path 明文不在场（真掩过）。
+        """
+>       assert HOST in text, f"host:port 丢失（过度掩码）：{text!r}"
+E       AssertionError: host:port 丢失（过度掩码）：'HTTPError 502 Server Error for url: <unprintable-url>'
+E       assert 'api.example.com' in 'HTTPError 502 Server Error for url: <unprintable-url>'
+
+tests/console/test_a2r58_03_mask_url_registration.py:74: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.url_redaction:url_redaction.py:258 _mask_url 未注册——日志路径 fail-closed 掩码
+_________ test_unregistered_fallback_fail_closed_and_warning_throttled _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x117b30c30>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x11796b8c0>
+
+    def test_unregistered_fallback_fail_closed_and_warning_throttled(monkeypatch, caplog):
+        """``_mask_url`` 未注册（纯 node 进程态）：结果仍 fail-closed 常量（契约守恒），
+        但 WARNING 只打**首条**，后续降 DEBUG——高频 scrub 面上不再逐条刷屏。"""
+        monkeypatch.setattr(UR, "_mask_url", None)
+>       monkeypatch.setattr(UR, "_unregistered_count", 0)
+E       AttributeError: <module 'plaita.core.url_redaction' from '/private/tmp/plaita-b3-r99/plaita/core/url_redaction.py'> has no attribute '_unregistered_count'
+
+tests/console/test_a2r58_03_mask_url_registration.py:232: AttributeError
+___________ test_registered_path_does_not_trip_unregistered_counter ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x117b30e90>
+
+    def test_registered_path_does_not_trip_unregistered_counter(monkeypatch):
+        """对照：注册态 scrub 不走未注册分支（计数不动）。"""
+>       assert UR._mask_url is not None
+E       assert None is not None
+E        +  where None = UR._mask_url
+
+tests/console/test_a2r58_03_mask_url_registration.py:252: AssertionError
+=============================== warnings summary ===============================
+config.py:18
+  /private/tmp/plaita-b3-r99/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_console_import_chain_registers_mask_url
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_console_process_registered_scrub_keeps_host_and_masks_credentials
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_console_rescrub_of_worker_scrubbed_text_keeps_host
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_detail_error_message_keeps_host
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_timeline_worker_preserved_host_survives_rescrub
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_sse_initial_state_view_keeps_host
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_sse_update_frame_keeps_host
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_unregistered_fallback_fail_closed_and_warning_throttled
+FAILED tests/console/test_a2r58_03_mask_url_registration.py::test_registered_path_does_not_trip_unregistered_counter
+9 failed, 1 warning in 4.14s

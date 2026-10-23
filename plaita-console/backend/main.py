@@ -25,6 +25,16 @@ from plaita.tenant_context import (
     TENANT_SOURCE_EXPLICIT,
     set_current_tenant,
 )
+from plaita.core.url_redaction import register_mask_url_impl
+from plaita.server.factory import _mask_url as _console_mask_url_impl
+
+# A2R58-03：读面清洗器（detail/timeline/SSE 经 plaita.core.url_redaction 抹 URL
+# 凭据分量）依赖的掩码实现 _mask_url 住在 plaita.server.factory（#88，server→core
+# 向下注册）。console 进程此前零 factory 导入 ⇒ 未注册分支把一切绝对 URL（含零
+# 凭据的诊断 URL）坠成 <unprintable-url>、丢 host:port，且每次 scrub 一条 WARNING。
+# 与 worker（flow_worker 导入 factory）对称：进程入口注册一次，注册实现仍以
+# factory 为唯一家（不另起第二套掩码文法）。
+register_mask_url_impl(_console_mask_url_impl)
 
 # 支持多种运行方式的导入
 try:
