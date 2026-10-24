@@ -34,8 +34,11 @@ from plaita.core.errors import (
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
 from plaita.core.ownership import (
+    FAILED_STEP_EVIDENCE_KEY,
     declared_step_id,
+    failed_step_evidence,
     new_step_id,
+    preserve_failed_step,
     progress_report_min_interval_seconds,
 )
 from plaita.core.runner import is_retryable_error
@@ -2367,10 +2370,24 @@ class FlowWorker:
         #316 违例类 orphan_terminal 的对偶生成面），也不得声明未完成的工作
         （next_step 同清）；dispatch_pending 一并清（#320 退役字段的残余
         兜底——顺带修掉 resume except 面终态化携带陈旧凭据的存量边角）。
+
+        plaita#336（owner 裁决案 b）：error 行在清声明**前**把行上 token
+        转存进 ``state.error`` 扩展键、随失败证据同一次落盘——retry 唤醒
+        复用同 token，「同逻辑步骤重试 N 次 = 至多 1 次副作用」在
+        error→retry 主路径不破（#322 契约）。``next_step`` 照清：#320
+        不变量 1 不开口子（案 a 不采）；completed/cancelled 不转存（retry
+        只唤醒 error 行，终态收据残留无消费方）。
         """
         if getattr(state, "status", None) in TERMINAL_EXECUTION_STATUSES:
             state.pending = None
             state.dispatch_pending = None
+            if getattr(state, "status", None) == "error":
+                evidence = preserve_failed_step(state.next_step)
+                if evidence is not None:
+                    if state.error is None:
+                        state.error = {}
+                    if isinstance(state.error, dict):
+                        state.error[FAILED_STEP_EVIDENCE_KEY] = evidence
             state.next_step = None
         with self._state_write_lock(execution_id):
             self._collect_node_timings(execution_id, state)
@@ -4264,23 +4281,35 @@ class FlowWorker:
                 )
                 raise ResumeProtocolError(message, execution_id=execution_id)
             if retry_wakeup:
+                # plaita#336：error 清空前先读失败证据的转存声明——retry
+                # 重跑节点（$LAST_NODE）与转存声明同节点 ⇒ 复用同 token
+                # （重试 = 同逻辑步骤，连接器幂等键稳定）；无证据/节点漂移
+                # ⇒ 照铸新（首投/其它路径不变）。案 c（按世代推导 token）
+                # 不采：与 new_step_id 随机防伪造设计冲突。
+                rerun_node = (
+                    state.context.get("$LAST_NODE")
+                    if isinstance(state.context, dict)
+                    else None
+                )
+                evidence = failed_step_evidence(state.error)
+                reused_token = (
+                    evidence.get("step_id")
+                    if evidence is not None and evidence.get("node_id") == rerun_node
+                    else None
+                )
                 state.status = "running"
                 state.error = None
                 state.end_time = None
                 # plaita#322：唤醒即声明 re-run 节点（write-ahead——先声明、
                 # 再执行；re-run 节点 = $LAST_NODE，重投读同一行 ⇒ 同 token
                 # ⇒ 连接器幂等键稳定）。progress_at 不动（#320 §四.2 钉死：
-                # 非步迁移不刷新）。
+                # 非步迁移不刷新）。#336：有失败证据且节点吻合 ⇒ 复用原
+                # token（error→retry 不漂移）；无 ⇒ 照铸新。
                 if not declared_step_id(state.next_step):
-                    rerun_node = (
-                        state.context.get("$LAST_NODE")
-                        if isinstance(state.context, dict)
-                        else None
-                    )
                     state.next_step = (
                         {
                             "node_id": rerun_node,
-                            "step_id": new_step_id(),
+                            "step_id": reused_token or new_step_id(),
                             "parent_step_id": None,
                         }
                         if isinstance(rerun_node, str) and rerun_node

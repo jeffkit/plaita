@@ -1,26 +1,31 @@
+[warn] 当前用 Python 3.13，而 CI 用 3.10。
+[warn] 依赖解析结果可能不同（见本脚本头部说明），结论未必代表 CI。
+==> 建 venv（/opt/homebrew/bin/python3）并安装 docs-site/requirements.txt
+==> 安装 plaita（mkdocstrings 内省需要）
+==> 实际解析到的关键版本（出现冲突时先看这里）
+mkdocs                     1.6.1
+mkdocs-material            9.8.0
+mkdocstrings               1.0.8
+mkdocstrings-python        2.0.10
+pymdown-extensions         12.1
+==> mkdocs build --clean --strict
 
-[31m │  ⚠  Warning from the Material for MkDocs team[0m
-[31m │[0m
-[31m │[0m  MkDocs 2.0, the underlying framework of Material for MkDocs,
-[31m │[0m  will introduce backward-incompatible changes, including:
-[31m │[0m
-[31m │  × [0mAll plugins will stop working – the plugin system has been removed
-[31m │  × [0mAll theme overrides will break – the theming system has been rewritten
-[31m │  × [0mNo migration path exists – existing projects cannot be upgraded
-[31m │  × [0mClosed contribution model – community members can't report bugs
-[31m │  × [0mCurrently unlicensed – unsuitable for production use
-[31m │[0m
-[31m │[0m  Our full analysis:
-[31m │[0m
-[31m │[0m  [4mhttps://squidfunk.github.io/mkdocs-material/blog/2026/02/18/mkdocs-2.0/[0m
-[0m
+[33m │  [1mMaterial for MkDocs reaches end of life on May 5, 2027.[0m
+[33m │[0m  Critical fixes and security updates continue until that date.
+[33m │[0m
+[33m │[0m  Zensical is its maintained successor, built by the same team.
+[33m │[0m  Try it alongside MkDocs with your existing mkdocs.yml:
+[33m │[0m  [36m[4mhttps://zensical.org/docs/compatibility/mkdocs/migration/[0m
+
+[90m  To disable this warning, set NO_MKDOCS_2_WARNING=1.[0m
+
 INFO    -  MERMAID2  - Initialization arguments: {'theme': '{\n  "dark": "dark",\n  "default": "default"\n}\n'}
 INFO    -  MERMAID2  - Using javascript library (10.4.0):
    https://unpkg.com/mermaid@10.4.0/dist/mermaid.esm.min.mjs
 INFO    -  Cleaning site directory
-INFO    -  Building documentation to directory: /Users/kong/projects/infra4agent/plaita-wt2/docs-site/site
+INFO    -  Building documentation to directory: /Users/kong/projects/infra4agent/plaita/docs-site/site
 INFO    -  mkdocstrings_handlers: Formatting signatures requires either Black or Ruff to be installed.
-INFO    -  MERMAID2  - Found superfences config: {'custom_fences': [{'name': 'mermaid', 'class': 'mermaid', 'format': functools.partial(<function fence_mermaid at 0x106a3a830>, custom=True)}]}
+INFO    -  MERMAID2  - Found superfences config: {'custom_fences': [{'name': 'mermaid', 'class': 'mermaid', 'format': functools.partial(<function fence_mermaid at 0x105f4cb80>, custom=True)}]}
 INFO    -  MERMAID2  - Found 'fence_mermaid_custom' function: activate custom loader for superfences
 INFO    -  MERMAID2  - Custom loader activated
 INFO    -  MERMAID2  - Page 'AI 集成（plaita-ai）': found 1 diagrams, adding scripts
@@ -65,4 +70,5 @@ INFO    -  Doc file 'distributed/flow-worker.md' contains a link '../guide/callb
 INFO    -  Doc file 'distributed/ops-runbook.md' contains a link 'flow-worker.md#start-dedup-受理状态机', but the doc 'distributed/flow-worker.md' does not contain an anchor '#start-dedup-受理状态机'.
 INFO    -  Doc file 'guide/code-dsl.md' contains a link '#子流程-childflow--child', but there is no such anchor on this page.
 INFO    -  Doc file 'guide/expressions.md' contains a link '#内置函数一览', but there is no such anchor on this page.
-INFO    -  Documentation built in 12.62 seconds
+INFO    -  Documentation built in 5.45 seconds
+==> ✅ 本地构建通过（与 CI build job 等价）

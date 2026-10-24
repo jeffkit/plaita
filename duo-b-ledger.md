@@ -1090,3 +1090,14 @@
 - 残面：#339 代码级关闭候 #335 落地（验收格已绿、依赖其 `engine_backend.resume_execution`）；本席不代收官。
 - 证据：`docs/proofs/r93-i338-nested-env-faces.md` + `docs/proofs/data/r93-probe-nested-env-postfix.txt`。交付=主 clone 直落 main（主 clone 席位口径；逐路径 add，邻席 #335 WIP 不暂存）；landing_gate 推前核验；回评附 #338/#339 各一行。
 - **CI 终态补记（同日）**：本轮两推 `9343910b`（代码+proofs+台账）+ `5bcb4084`（探针归档）在途 run 被后继推送取代 cancelled（非红判据）；终判=后继 run `97859f20`（B1 r93 #338，含本轮提交祖先）四腿 **CI success / slow lane success / Console E2E success / Deploy docs success**。回评 #319/#335 已发；两单留 open 待提报方验收。
+
+## 第九十四轮 · plaita#336（失败重试幂等键漂移——error 终态咽喉转存 token 随失败证据落盘 × retry_wakeup 复用，P1，owner 裁决案 b，#329 B 线 #322 后继，2026-10-24，B1 修复席）
+
+- 缺陷（#336，A1 r139 实弹）：#322 幂等键稳定性锚「重投读同一行 ⇒ 同 token」在 error→retry 主路径失效——咽喉终态化无条件清 `next_step`（#320 不变量 1 机械化点）后 retry_wakeup 必铸新 token，两次执行携带不同 `Idempotency-Key`、外部去重失效，失效点恰在上次尝试已外发收据之后。进程内 redelivery（未终态化）同键保证不受影响。
+- owner 三案对表（留档）：a=error 行豁免清声明**不采**（违 #320 不变量字面，对账/#321 读面全开口子）；b=token 存 error 扩展键随失败证据落盘**采纳（owner 拍板，A1 倾向案）**；c=按 noderetry 世代推导 token**不采**（与 `new_step_id` 随机防伪造设计冲突——不可推导是特性）。
+- 修法：①转存面 `core/ownership.py` 新增 `FAILED_STEP_EVIDENCE_KEY="failed_step"` + `preserve_failed_step`（摘出 `{node_id, step_id, parent_step_id}`，形态同 #320 next_step 字段设计；缺失/畸形 None 不编造）+ `failed_step_evidence`（读面同款缺省纪律）；②咽喉 `_persist_state_or_raise` 终态分支 error 行在 `next_step=None` **前**转存（同一次落盘 CAS 原子；error=None 兜底造 dict；completed/cancelled 不转存〔retry 只唤醒 error 行〕；再终态化幂等不覆写；与既有 `failed_node`/`node_retries`/`error_type` 扩展键共存只加键）；③retry_wakeup 铸造点 error 清空前读证据——重跑节点（$LAST_NODE）与转存声明同节点 ⇒ 复用同 token，无证据/节点漂移 ⇒ 照铸新（首投/其它路径零变化；行上声明存活时 #322「读同一行」锚优先不变）；④`WORKER_PROTOCOL.md` §2.1 扩 #336 语义。
+- 与 #337 组合（B2 在修，覆盖互补不冲突）：#337 封「SNE 确定性失败被节点 retryTimes + worker 重投双层烧穿」（重投≠唤醒，不经 retry_wakeup）；本单封「合法 retry（G1/人工）唤醒时键漂移」。#337 落地后 SNE 类=自动面已封 + 人工面键稳定（本单咽喉对 SNE 终态化行同样生效；#337 建议 3 `_error_fields` 身份修正与本单扩展键互不相扰，共存格已钉）。
+- 先红后绿：新 `tests/unit/test_issue336_retry_token_stability.py` 13 格基线 **6F/7P**（3 咽喉未转存 + 3 漂移实锤〔真组件探针复刻：首跑 T1 失败→retry 绑 T2，连接器键两 token 逐字节不同〕；7 守恒/防御格本就绿）→ **13/13 绿**。A 组 8（同 CAS 落盘/无声明不造键/畸形不转存/error=None 兜底/终态两态不转存/再终态化幂等/扩展键共存）+ B 组 5（探针全链绑回 T1/双 retry 同 token〔G1 预算=2 内、`ValueError` 真步循环终态化、`NodeFailureTerminalizedError` 面接住〕/无证据铸新守恒/节点漂移不复用防御/连接器键端到端逐字节相同）。形制注记：失败 staging 用 `ValueError`（`RuntimeError` 判可重试走重投不终态化）。
+- 守恒：#320/#322 家族 **82P rc=0**（43+39 与 r90 台账吻合，咽喉 E 组/retry_wakeup C 组原样绿）；#151 卫生定向 14P；ruff 改动三文件全检零新增（flow_worker 11 条 BLE001=r93 台账既有同数，advisory）+ E722 CI 口径 rc=0。
+- 门禁（无管道直录，串行独跑零并行负载）：unit 独跑 **9160P/13S/3501 subtests rc=0**（757.2s；=r93 基线 9147+13 新格精确对账）/console 后端门 **1637P/14S rc=0**（=r93 同数零增量）/integ+e2e **287P/4S rc=0**（家族同数）/mkdocs --strict rc=0（`PYENV_VERSION=system` 绕 shim）/landing_gate 推前核验。
+- 证据：`docs/proofs/r94-i336-retry-token-stability.md` + `docs/proofs/data/r94-tests336-{red,green}.txt`、`r94-family-320-322.txt`、`r94-hygiene-151.txt`。交付=主 clone 直落 main（逐路径 add，A1 台账未跟踪文件不碰）；回评附 #336 一行。

@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from plaita.core.url_redaction import _scrub_exception_text
 from plaita.runtime_config import optional_float_env
@@ -109,6 +109,49 @@ def declared_step_id(next_step: Any) -> Optional[str]:
         return None
     token = next_step.get("step_id")
     return token if isinstance(token, str) and token else None
+
+
+# plaita#336：error 终态把行上声明转存进 state.error 的扩展键（随失败证据
+# 落盘）——retry 唤醒复用同 token，「同逻辑步骤重试 = 同键」在 error→retry
+# 主路径不破。值形态与 #320 ``next_step`` 字段设计一致。
+FAILED_STEP_EVIDENCE_KEY = "failed_step"
+
+
+def preserve_failed_step(next_step: Any) -> Optional[Dict[str, Any]]:
+    """error 终态清声明**前**的转存面（plaita#336，owner 裁决案 b）。
+
+    #320 咽喉清 ``next_step``（终态不得声明未完成的工作）与 #322「重投读
+    同一行 ⇒ 同 token」在 error→retry 路径互斥；本函数校验并摘出转存面，
+    由咽喉点写进 ``state.error[FAILED_STEP_EVIDENCE_KEY]``。声明缺失/畸形
+    返回 None（无可转存，retry 照铸新——不编造）。
+    """
+    if not isinstance(next_step, dict):
+        return None
+    token = next_step.get("step_id")
+    if not isinstance(token, str) or not token:
+        return None
+    node = next_step.get("node_id")
+    parent = next_step.get("parent_step_id")
+    return {
+        "node_id": node if isinstance(node, str) and node else None,
+        "step_id": token,
+        "parent_step_id": parent if isinstance(parent, str) and parent else None,
+    }
+
+
+def failed_step_evidence(error: Any) -> Optional[Dict[str, Any]]:
+    """从 ``state.error`` 扩展键读转存声明（plaita#336）；缺失/畸形一律
+    None（读取方照铸新 token，与 ``declared_step_id`` 同款缺省纪律）。
+    """
+    if not isinstance(error, dict):
+        return None
+    evidence = error.get(FAILED_STEP_EVIDENCE_KEY)
+    if not isinstance(evidence, dict):
+        return None
+    token = evidence.get("step_id")
+    if not isinstance(token, str) or not token:
+        return None
+    return evidence
 
 
 def connector_idempotency_key(execution: Any, node_id: Any) -> Optional[str]:

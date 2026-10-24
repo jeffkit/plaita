@@ -64,8 +64,15 @@
   `retry_wakeup`（声明 re-run 节点 = `$LAST_NODE`）、`step_persist`（声明
   图遍历后继，`parent_step_id` = 刚消费的 token）。token = `uuid4().hex`
   （`core/ownership.new_step_id()`）——跨重放的稳定性锚在「重投读同一行」，
-  不在 token 形状；挂起行 `next_step=None`（等待意图由 pending 承载）、
+  不在 token 形状（#336：**不可推导**是防伪造设计，按世代/计数推导 token
+  的方案不采）；挂起行 `next_step=None`（等待意图由 pending 承载）、
   终态行随咽喉同 CAS 清除（终态不得声明未完成的工作）。
+  **error→retry 不漂移（plaita#336，owner 裁决案 b）**：error 终态在清
+  声明**前**把行上声明转存 `state.error["failed_step"]`（形态同
+  `next_step`：`{node_id, step_id, parent_step_id}`，随失败证据落盘）；
+  `retry_wakeup` 先读该键——重跑节点与转存声明同节点 ⇒ 复用同 token
+  （重试 N 次 = 同键 = 外部去重生效），无证据/节点漂移 ⇒ 照铸新。案 a
+  （error 行豁免清声明）不采：#320 不变量不开口子。
 - **消费**：worker 在每次 `run_distributed` 前把行声明的 token 绑到执行对象
   （`bind_step`）。**键锚在行上而非节点上**：声明与实际推进偶有错位
   （如 start 首步在步循环前的预消费）不影响重放稳定性——同状态行 ⇒ 同
