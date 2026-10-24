@@ -21,16 +21,23 @@ NS-M3 既有传播面守恒格（distributed child 停挂 / 迭代帧具名拒�
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from plaita.core.errors import (
+    FlowErrorException,
     FlowErrorType,
     FlowSuspendedCarrier,
+    NodeExecutionError,
+    RecoverableErrorHandler,
     SuspendNotExecutableError,
 )
+from plaita.core._error_normalization import surface_root_suspension
+from plaita.core.context import ExecutionContext
 from plaita.core.executor import FlowExecution
 from plaita.core.flow import Flow
+from plaita.core.runner import NodeRunner, is_retryable_error
 from plaita.node import NodeRegistry
 from plaita.node.basic import Node
 from plaita.server.nodes.approval_node import ApprovalNode
@@ -470,3 +477,261 @@ class TestSuspendGuardKnob:
         with caplog.at_level(logging.WARNING):
             with pytest.raises(SuspendNotExecutableError):
                 ex.run_compatible(flow, False)
+
+
+# ---------------------------------------------------------------------------
+# 6. 「终态不重试」契约接线（plaita#337）：runner / worker 两层判据 + 落盘身份
+# ---------------------------------------------------------------------------
+
+
+def _runtime_sne() -> SuspendNotExecutableError:
+    """运行期呈现形态的 SNE（``__cause__``=carrier）。
+
+    复合节点（静态闭包看不见的自定义节点函数）内 eager 子流程挂起穿出 normal
+    根时，``finish_normal`` 以 ``raise exc from carrier`` 抛出本类——carrier
+    挂 ``__cause__``，这正是 #337 附带症状里「链上最深引擎异常=carrier」的来源。
+    入口静态闸路径的 SNE 无 cause，不经过本帮手。
+    """
+    node = SimpleNamespace(
+        id="wait", name="wait", node_type="event", source_line=3,
+        execution_requirements=("suspend:root",),
+    )
+    flow = SimpleNamespace(flow_id="s1")
+    carrier = FlowSuspendedCarrier("pending", node=node, flow=flow)
+    exc = surface_root_suspension(carrier)
+    exc.__cause__ = carrier  # finish_normal 的 `raise exc from carrier` 现场
+    return exc
+
+
+def _wrapped_worker_chain(sne: SuspendNotExecutableError) -> FlowErrorException:
+    """abort 包装 + 分布式归一化后的 worker 视角链形（#337 反证三）：
+    FlowErrorException → NodeExecutionError → SNE → carrier。"""
+    wrapped = NodeExecutionError(f"执行节点n1出错了: {sne}", node="n1")
+    wrapped.__cause__ = sne
+    outer = FlowErrorException(str(wrapped))
+    outer.__cause__ = wrapped
+    return outer
+
+
+def _direct_worker_chain(sne: SuspendNotExecutableError) -> FlowErrorException:
+    """逃逸分支（#331）之后 worker 视角的实际链形：SNE 不经 abort 包装，
+    分布式归一化直接把它挂 ``__cause__``：
+    FlowErrorException → SNE → carrier。"""
+    outer = FlowErrorException(str(sne))
+    outer.__cause__ = sne
+    return outer
+
+
+class TestTerminalNoRetryWiring:
+    """#337：SNE 是确定性终态失败，两层判据 + 终态落盘身份都不得丢。
+
+    修前红相（r99 探针 docs/proofs/data/r99-prefix-probe.txt）：R1/W1/E1/E2；
+    R2/W2/I1 修前已绿——#331 W2 的逃逸分支（runner.py ``_execute_with_retry``
+    通用 except 之前原样上抛）已把 issue 反证一的「retryTimes 烧穿」关掉，
+    本类将其钉成守恒格，防后续重构把逃逸分支挪进重试/errorHandler 链。
+    """
+
+    # ---- runner 层：分类单一来源 ----
+
+    def test_is_retryable_error_sne_is_terminal(self):
+        """R1：``is_retryable_error`` 按类型判 SNE 不重试（类 docstring 契约
+        「worker / 上层按类型判终态不重试」的判据面接线）。"""
+        assert is_retryable_error(_runtime_sne()) is False
+
+    def test_is_retryable_error_sne_subclass_is_terminal(self):
+        """R1b：子类同判——终态身份按类型传递，不因继承而漂移。"""
+
+        class _EntryGateSne(SuspendNotExecutableError):
+            pass
+
+        assert is_retryable_error(_EntryGateSne("entry", node=None)) is False
+
+    # ---- runner 层：节点循环行为（#331 逃逸分支守恒格） ----
+
+    @pytest.mark.asyncio
+    async def test_node_loop_sne_runs_once_identity_preserved(self):
+        """R2：retryTimes=3 下 SNE 只执行 1 次、SNE 身份原样穿出（不被 abort
+        包成 NodeExecutionError、不进退避）。"""
+        from unittest.mock import MagicMock, patch
+
+        sne = _runtime_sne()
+        node = MagicMock()
+        node.id = "n1"
+        node.name = "n1"
+        node.timeout = None
+        node.timeout_handler = None
+        node.source_line = None
+        node.error_handler = RecoverableErrorHandler.model_validate(
+            {"strategy": "abort", "retryTimes": 3}
+        )
+        node.run.side_effect = sne
+        delays = []
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+
+        with patch("plaita.core.runner._backoff_sleep", new=fake_sleep):
+            with pytest.raises(SuspendNotExecutableError) as ei:
+                await NodeRunner(ExecutionContext())._execute_with_retry(
+                    MagicMock(), node, None
+                )
+        assert ei.value is sne, "逃逸分支必须原样上抛 SNE 本体（不得改写身份）"
+        assert node.run.call_count == 1
+        assert delays == []
+
+    # ---- worker 层：重投判据 ----
+
+    def test_worker_wrapped_chain_not_retryable(self):
+        """W1：abort 包装层之下的 SNE 不得被重新判成可重试（A50-03 单一来源
+        契约的 SNE 面——``is_retryable_error`` 分类经包装层必须保真）。"""
+        from plaita.server.flow_worker import _is_retryable_node_failure
+
+        assert _is_retryable_node_failure(_wrapped_worker_chain(_runtime_sne())) is False
+
+    def test_worker_direct_chain_not_retryable(self):
+        """W2：逃逸分支后的实际链形（SNE 直接挂 ``__cause__``）同样不重投——
+        修前靠「链上无 NodeExecutionError」缺省 False 侥幸成立，修后按类型成立。"""
+        from plaita.server.flow_worker import _is_retryable_node_failure
+
+        assert _is_retryable_node_failure(_direct_worker_chain(_runtime_sne())) is False
+
+    # ---- worker 层：重投预算行为（A50-03 全链格同形） ----
+
+    def test_worker_terminalizes_without_retry_budget_burn(self):
+        """W3：SNE 链走 ``resume_flow`` 必须终态化 error（非重投异常），
+        可重试预算键（noderetry）不得被写。"""
+        fakeredis = pytest.importorskip("fakeredis")
+        from unittest.mock import MagicMock, patch
+
+        from plaita.server.flow_worker import (
+            NodeFailureTerminalizedError,
+            RedisFlowWorker,
+        )
+        from plaita.storage.base import ExecutionState
+        from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
+
+        exec_id = "exec-sne-1"
+        noderetry_key = f"plaita:execution:noderetry:{exec_id}"
+        flows = MemoryFlowStorage()
+        flows.save_flow(
+            {"flow_id": "f1", "version": "1", "runtime": "python",
+             "nodes": [{"type": "start", "id": "start"}]}
+        )
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state(
+            exec_id,
+            ExecutionState(
+                execution_id=exec_id, flow_id="f1", flow_version="1",
+                status="running", context={"$LAST_NODE": "start"},
+            ),
+        )
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name="test:issue337-sne-terminal",
+            execution_storage=storage,
+            flow_storage=flows,
+            redis_client=fake,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+        chain = _wrapped_worker_chain(_runtime_sne())
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.run_distributed.side_effect = chain
+            with pytest.raises(NodeFailureTerminalizedError):
+                worker.resume_flow("f1", exec_id, "continue")
+        assert storage.load_execution_state(exec_id).status == "error"
+        assert fake.get(noderetry_key) is None, (
+            "SNE 是确定性终态失败：不得消耗可重试预算（noderetry 键必须为空）"
+        )
+
+    # ---- 终态落盘身份（#337 附带症状，#312 分流依赖） ----
+
+    def test_error_fields_direct_chain_keeps_suspend_identity(self):
+        """E1：链上最深引擎异常是 carrier（FlowErrorType.FLOW_ERROR）时，
+        落盘 error_type 必须仍取 SNE——carrier 只是因果载体，不是语义主体。"""
+        from plaita.server.flow_worker import _error_fields
+
+        fields = _error_fields(_direct_worker_chain(_runtime_sne()))
+        assert fields["error_type"] == "suspend_not_executable"
+
+    def test_error_fields_wrapped_chain_beats_abort_wrapper(self):
+        """E2：abort 包装在场时身份同样优先取 SNE——包装层与归一化外壳
+        都不得把稳定 error_type 顶成 node_error / flow_error。"""
+        from plaita.server.flow_worker import _error_fields
+
+        fields = _error_fields(_wrapped_worker_chain(_runtime_sne()))
+        assert fields["error_type"] == "suspend_not_executable"
+
+    # ---- 集成场景（issue 验收负控形制）：节点内 eager 子流程含挂起节点 ----
+
+    def test_nested_eager_subflow_terminal_no_retry(self):
+        """I1：宿主自定义节点函数内以公开 eager API 驱动含挂起节点的子流程，
+        retryTimes=3：外层节点只执行 1 次、挂起点之后节点零执行、SNE 具名穿出。"""
+        calls: list[str] = []
+        inner_calls: list[str] = []
+
+        class _InnerCounter(Node):
+            node_type = "r99_inner_counter"
+            node_name = "内层计数桩"
+            dry_run_safe = True
+
+            def execute(self, execution):
+                inner_calls.append(self.id)
+                return "counted"
+
+        class _OuterSubflowNode(Node):
+            node_type = "r99_outer_subflow"
+            node_name = "外层嵌套桩"
+            dry_run_safe = True
+
+            def execute(self, execution):
+                calls.append(self.id)
+                inner = Flow.model_validate(
+                    {
+                        "flow_id": "inner1",
+                        "version": "1",
+                        "runtime": "python",
+                        "nodes": [
+                            {"type": "start", "id": "start", "next": "iwait"},
+                            {"type": "event", "id": "iwait",
+                             "event_type": "approve_me", "next": "iafter"},
+                            {"type": "r99_inner_counter", "id": "iafter", "next": "iend"},
+                            {"type": "end", "id": "iend", "output": "x"},
+                        ],
+                    },
+                    registry=_fresh_registry(_InnerCounter, _OuterSubflowNode),
+                )
+                ex = FlowExecution()
+                ex.mode = "normal"
+                ex.run_compatible(inner, False)
+                return "done"
+
+        reg = _fresh_registry(_InnerCounter, _OuterSubflowNode)
+        flow = Flow.model_validate(
+            {
+                "flow_id": "outer1",
+                "version": "1",
+                "runtime": "python",
+                "nodes": [
+                    {"type": "start", "id": "start", "next": "sub"},
+                    {
+                        "type": "r99_outer_subflow", "id": "sub", "next": "end",
+                        "errorHandler": {"strategy": "abort", "retryTimes": 3},
+                    },
+                    {"type": "end", "id": "end", "output": "x"},
+                ],
+            },
+            registry=reg,
+        )
+        ex = FlowExecution()
+        ex.mode = "normal"
+        with pytest.raises(SuspendNotExecutableError) as ei:
+            ex.run_compatible(flow, False)
+        assert ei.value.error_type is FlowErrorType.SUSPEND_NOT_EXECUTABLE
+        assert len(calls) == 1, (
+            f"SNE 是确定性终态失败：retryTimes=3 也不得重跑节点函数，实际 {len(calls)} 次"
+        )
+        assert inner_calls == [], "挂起点之后的节点绝不能执行（#330 验收第 6 条同形）"
