@@ -110,6 +110,7 @@ _DOMAINS: dict[str, str] = {
     "services.examples": "gateway",
     "services.flow_agent": "gateway",
     "services.graph_generation": "gateway",
+    "services.engine_backend": "gateway",
     "services.local_executor": "gateway",
     "services.local_scheduler": "gateway",
     "services.login_guard": "gateway",
