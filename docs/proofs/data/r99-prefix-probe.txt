@@ -1,0 +1,13 @@
+[FAIL] P1 is_retryable_error(SNE)==False got=True
+[PASS] P2 node-loop runs-once SNE-identity exc=SuspendNotExecutableError count=1
+[FAIL] W1 wrapped-chain not-retryable got=True
+[PASS] W2 direct-chain not-retryable got=False
+[FAIL] E1 direct-chain error_type got='flow_error'
+[FAIL] E2 wrapped-chain error_type got='node_error'
+[PASS] P5 nested-eager runs-once SNE-out exc=SuspendNotExecutableError outer=1 inner=0 etype='suspend_not_executable'
+
+=== 修前总判：3/7 PASS，红相 4 格 ===
+  RED: P1 is_retryable_error(SNE)==False got=True
+  RED: W1 wrapped-chain not-retryable got=True
+  RED: E1 direct-chain error_type got='flow_error'
+  RED: E2 wrapped-chain error_type got='node_error'

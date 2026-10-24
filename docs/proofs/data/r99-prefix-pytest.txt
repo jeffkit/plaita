@@ -1,0 +1,1123 @@
+FF.F.FFF.                                                                [100%]
+=================================== FAILURES ===================================
+______ TestTerminalNoRetryWiring.test_is_retryable_error_sne_is_terminal _______
+
+self = <tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring object at 0x1063d8690>
+
+    def test_is_retryable_error_sne_is_terminal(self):
+        """R1：``is_retryable_error`` 按类型判 SNE 不重试（类 docstring 契约
+        「worker / 上层按类型判终态不重试」的判据面接线）。"""
+>       assert is_retryable_error(_runtime_sne()) is False
+E       assert True is False
+E        +  where True = is_retryable_error(SuspendNotExecutableError("这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。"))
+E        +    where SuspendNotExecutableError("这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。") = _runtime_sne()
+
+tests/unit/test_issue330_suspend_not_executable.py:539: AssertionError
+__ TestTerminalNoRetryWiring.test_is_retryable_error_sne_subclass_is_terminal __
+
+self = <tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring object at 0x107bfd590>
+
+    def test_is_retryable_error_sne_subclass_is_terminal(self):
+        """R1b：子类同判——终态身份按类型传递，不因继承而漂移。"""
+    
+        class _EntryGateSne(SuspendNotExecutableError):
+            pass
+    
+>       assert is_retryable_error(_EntryGateSne("entry", node=None)) is False
+E       AssertionError: assert True is False
+E        +  where True = is_retryable_error(_EntryGateSne('entry'))
+E        +    where _EntryGateSne('entry') = <class 'tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring.test_is_retryable_error_sne_subclass_is_terminal.<locals>._EntryGateSne'>('entry', node=None)
+
+tests/unit/test_issue330_suspend_not_executable.py:547: AssertionError
+______ TestTerminalNoRetryWiring.test_worker_wrapped_chain_not_retryable _______
+
+self = <tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring object at 0x107ba1e00>
+
+    def test_worker_wrapped_chain_not_retryable(self):
+        """W1：abort 包装层之下的 SNE 不得被重新判成可重试（A50-03 单一来源
+        契约的 SNE 面——``is_retryable_error`` 分类经包装层必须保真）。"""
+        from plaita.server.flow_worker import _is_retryable_node_failure
+    
+>       assert _is_retryable_node_failure(_wrapped_worker_chain(_runtime_sne())) is False
+E       assert True is False
+E        +  where True = <function _is_retryable_node_failure at 0x1095e9300>(FlowErrorException("执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。"))
+E        +    where FlowErrorException("执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。") = _wrapped_worker_chain(SuspendNotExecutableError("这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。"))
+E        +      where SuspendNotExecutableError("这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。") = _runtime_sne()
+
+tests/unit/test_issue330_suspend_not_executable.py:589: AssertionError
+_ TestTerminalNoRetryWiring.test_worker_terminalizes_without_retry_budget_burn _
+plaita.core.errors.FlowSuspendedCarrier: pending
+
+The above exception was the direct cause of the following exception:
+plaita.core.errors.FlowSuspendedCarrier: pending
+
+The above exception was the direct cause of the following exception:
+
+plaita.core.errors.SuspendNotExecutableError: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+The above exception was the direct cause of the following exception:
+plaita.core.errors.FlowSuspendedCarrier: pending
+
+The above exception was the direct cause of the following exception:
+
+plaita.core.errors.SuspendNotExecutableError: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+The above exception was the direct cause of the following exception:
+
+plaita.core.errors.NodeExecutionError: 执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+The above exception was the direct cause of the following exception:
+
+self = <plaita.server.flow_worker.RedisFlowWorker object at 0x1096e7620>
+flow_id = 'f1', execution_id = 'exec-sne-1', resume_type = 'continue'
+data = None, delivery_count = None, params = None
+
+    def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
+                    data: Optional[Dict[str, Any]] = None,
+                    delivery_count: Optional[int] = None,
+                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        恢复流程执行。
+    
+        取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
+        ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
+    
+        Args:
+            flow_id: 流程ID
+            execution_id: 执行ID
+            resume_type: 恢复类型
+            data: 恢复数据
+            delivery_count: 消息投递次数（可观测；见 _process_execution_result）
+            params: 可选入参（#122）。只在盘上 checkpoint 为空时被引擎用来
+                重新 ``setup_flow``（start→resume 载体转换会撞上这种窗口）；
+                checkpoint 非空（正常 resume）时**不参与**——续跑一律以盘上
+                context 为准，续跑语义零变化。
+        """
+        # 前置判定（租约之前）：终态/挂起幂等短路在此完成，保持 #33 的
+        # 「suspended + continue 不取租约」契约。这里拿到的 state 只是
+        # **预读快照**——取到租约后必须重读并以盘上状态为准（plaita#241）。
+        state, early_result = self._load_and_guard_resume_state(
+            flow_id, execution_id, resume_type
+        )
+        if early_result is not None:
+            return early_result
+    
+        # 获取流程版本
+        version = state.flow_version
+    
+        # 获取流程定义
+        try:
+            flow = self.get_flow_definition(flow_id, version)
+        except FlowDefinitionMissingError:
+            # #304：定义缺失（版本被删/未同步）不再裸 ValueError poison ack
+            # ——先终态化 error（可观测 + 配额名额释放）再上抛。位置在租约
+            # 前（#33「suspended + continue 不取租约」契约保持）。不传上面
+            # 的预读快照（B123-01）：load→取定义的窗口内，持缓存定义的活
+            # worker 可能已把执行推进到 completed 终态，快照（suspended +
+            # 旧 context）的 error 写会无条件覆写终态——状态回退 + 整行
+            # 倒灌旧断点（retry 重放已成功节点）+ 按快照 context 误 pause
+            # 活跑沙箱 + 假终态 run_end 先行双发。传 None 让助手**现读盘**：
+            # 已终态一律不覆写，非终态才终态化且落在现读行（与 start 路径
+            # 同款）。现读后的写仍走普通写（未持租约）——写的是刚读到的
+            # 行，窗口收窄到读-写之间。
+            self._terminalize_definition_missing(
+                execution_id, flow_id, version, None,
+                phase="flow_definition_missing_resume",
+            )
+            raise
+    
+        # flow 定义指纹（波次二任务②）：worker 的定义 TTLCache 有 300s 窗口、
+        # console engine_sync 可直接覆盖 Redis 定义——挂起执行 resume 用
+        # latest 版本定义时，若定义自启动后被改过，``_get_next_from_last``
+        # 找不到节点/走错分支且无任何告警。指纹在 lease 内判定（与活
+        # worker 的推进写串行化，防「他人持租约推进中却被误终态化」），
+        # 不一致 → 终态化 error + raise ValueError（poison ack）——意图是
+        # 可观测的终态而不是重投风暴。老状态 flow_hash 为 None → 跳过校验
+        # （零回归）。指纹取**存储中的原始定义**（plaita#36 口径 v2）：同一份
+        # 存储定义不受引擎版本/模型字段演进影响。
+        current_flow_hash = self.get_flow_definition_hash(flow_id, version)
+    
+        # 解析流程定义
+        logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
+    
+        # holder 嵌入注册表 instance id（#50），语义同 start 路径。
+        holder = new_holder_token(
+            prefix="resume", instance_id=getattr(self, "instance_id", None)
+        )
+        lease_value, fence_token = self._acquire_lease(execution_id, holder)
+        if lease_value is None:
+            raise ExecutionLeaseError(
+                f"execution {execution_id} is leased by another worker; refuse concurrent resume"
+            )
+    
+        fence_token_reset = None
+        if fence_token is not None:
+            # fencing 写侧守门（设计稿 §4.2）：本 resume 的所有状态落盘带
+            # 世代号，FencedExecutionStorage 据此 CAS；finally 复位。
+            fence_token_reset = set_current_fence_token(fence_token)
+    
+        try:
+            # TOCTOU 复核（plaita#241）：上面的 load 发生在取租约**之前**。
+            # 若窗口内另一 worker 已把执行推到终态并释放租约，本 worker 随后
+            # 取得的是**新一代**租约——fencing 只拒绝旧世代写，不会拦它拿
+            # 旧 state 继续 run_distributed（节点副作用重放、终态行被二次
+            # 改写）。租约内重读并重跑前置判定；state/early_result 均以本次
+            # 为准，不复用 acquire 前的快照。
+            state, early_result = self._load_and_guard_resume_state(
+                flow_id, execution_id, resume_type, lease_held=True
+            )
+            if early_result is not None:
+                logger.info(
+                    "执行 %s 租约内复核发现状态已变更（status=%s）：拒绝本次 "
+                    "resume，不复用 acquire 前的旧 state（plaita#241）",
+                    execution_id, early_result.get("status"),
+                )
+                # 具名拒绝：区别于入口即终态的重复投递——本次是**赢了租约
+                # 竞争、但盘上状态已由上一持有者推进**，测试/值守可据此
+                # 识别 TOCTOU 窗口，而不是当成普通幂等短路。
+                early_result["rejected_after_lease"] = True
+                return early_result
+    
+            # plaita#247：#241 的复核只替换了 state，version/flow/current_flow_hash
+            # 仍是 acquire 前快照算出的值。窗口内 flow_version 变更（同 flow_id 新
+            # 版本 / 另一 start 载体回写）时，继续用旧 flow 执行并把结果写回新
+            # version 的状态行 ⇒ 执行定义与状态身份不一致。复核后的 state 才是
+            # 权威：版本变了就用新版本重算定义与指纹；hash 冲突仍走下方既有
+            # mismatch 终态路径（绝不带着旧定义/旧指纹续跑）。
+            if state.flow_version != version:
+                logger.warning(
+                    "执行 %s 在 load→acquire 窗口内 flow_version 变更（%r → %r），"
+                    "按租约内复核的新版本重算 flow 定义与指纹（plaita#247）",
+                    execution_id, version, state.flow_version,
+                )
+                version = state.flow_version
+                try:
+                    flow = self.get_flow_definition(flow_id, version)
+                except FlowDefinitionMissingError:
+                    # #304：租约内复核换到的新版本定义缺失——同款终态化
+                    # （此时持租约，fenced 写生效），具名上抛走下方专属
+                    # except（不进通用 except 二次终态化）。
+                    self._terminalize_definition_missing(
+                        execution_id, flow_id, version, state,
+                        phase="flow_definition_missing_resume_recheck",
+                    )
+                    raise
+                current_flow_hash = self.get_flow_definition_hash(flow_id, version)
+    
+            state_status = getattr(state, "status", "") or ""
+            retry_wakeup = state_status == "error" and \
+                ResumeType.coerce(resume_type) is ResumeType.RETRY
+            if state_status == "running" and \
+                    ResumeType.coerce(resume_type) is ResumeType.RETRY:
+                # running 执行没有失败节点可重跑（plaita#53 验收 2）：retry 在此的
+                # 语义 = 从 checkpoint 派发后继节点（与 continue 同路），**必须真实
+                # 重派**——禁止「受理后无动作」。显式留痕，值守从日志即可区分
+                # 「真的推进了」与「白等」（租约被他人持有等不生效情形另见 run()
+                # 的租约冲突日志）。
+                logger.warning(
+                    "执行 %s 处于 running，resume_type=retry 按「从断点续跑」处理"
+                    "（running 执行无失败节点可重跑），本次将从 checkpoint 派发后继节点",
+                    execution_id,
+                )
+    
+            # 陈旧 event/timeout 载体的归一化（plaita#258）：resume 在流内
+            # 推进并落过 step_persist 后，若发生瞬态 StatePersistError / 进程
+            # 崩溃，消息按 at-least-once 重投，但 resume_type 仍是 event/timeout
+            # ———而挂起订阅已在第一次 resume 时注销、$LAST_NODE 已不是 pending
+            # 挂起点。策略层会抛 ResumeGuardError（协议错误），旧 run() 分支据此
+            # ack 唯一载体 ⇒ 执行永久停在 running。这里在**取得租约并重读状态
+            # 之后**确认「执行仍活、但决议无处可落」，把本次意图改写为 continue
+            # （剩余工作就是从 checkpoint 续跑，已完成节点不重放）。租约内
+            # 复核保证：另一 worker 已推进到**新的挂起点**时 status=suspended，
+            # 不会走本分支，陈旧 resume 仍由策略层的订阅绑定守卫拒绝（#221）。
+            if resume_type in (ResumeType.EVENT, ResumeType.TIMEOUT, "event", "timeout"):
+                stale_reason = self._resume_carrier_stale_reason(state, flow)
+                if stale_reason:
+                    logger.warning(
+                        "执行 %s 的 %s resume 载体已错过挂起点（%s）；订阅早已注销、"
+                        "执行仍 running，本次归一化为 continue 从 checkpoint 续跑"
+                        "（plaita#258）",
+                        execution_id, resume_type, stale_reason,
+                    )
+                    resume_type = ResumeType.CONTINUE.value
+    
+            # XCLAIM 恢复路径取消检查点（设计稿 §3.1）：crash 后 cancel 消息
+            # 或任一 resume 消息被重投，若取消标志在（控制面对运行中执行写的
+            # 意图键），直接终态化而非继续推进。上一 checkpoint 已落盘，
+            # cancelled 的 context 即取消点前一步的完整快照（§3.3）。
+            if self._cancel_requested(execution_id):
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "cancelled_at_resume_entry")
+                logger.info("执行 %s 在 resume 入口命中取消标志，终态化", execution_id)
+                return {
+                    "execution_id": execution_id,
+                    "status": "cancelled",
+                    "cancelled_at_resume": True,
+                }
+    
+            # flow 定义指纹校验（波次二任务②）在 G1 retry 唤醒**之前**：
+            # 定义被改时执行保持 error（hash 不匹配信息落盘），修复定义后
+            # 仍可再 retry——G1 的「error 态可反复唤醒」语义不被破坏。
+            # 取消是用户意图，已在上方优先放行。写盘走 _persist_state_or_raise
+            # （带本 resume 的 fence 世代），随后 raise FlowHashMismatchError
+            # → run() 按 ValueError poison ack（终态已可观测，重投无意义）。
+            stored_flow_hash = getattr(state, "flow_hash", None)
+            stored_algo = getattr(state, "flow_hash_algo", None)
+            algo_changed = bool(stored_algo) and stored_algo != FLOW_HASH_ALGO
+            allow_hash_change = bool(
+                isinstance(data, dict) and data.get(ALLOW_FLOW_HASH_CHANGE_KEY)
+            )
+            hash_decision = classify_flow_hash_change(
+                stored_hash=stored_flow_hash,
+                current_hash=current_flow_hash,
+                stored_algo=stored_algo,
+                current_algo=FLOW_HASH_ALGO,
+                allow_change=allow_hash_change,
+            )
+            if hash_decision in ("mismatch", "accepted"):
+                if hash_decision == "accepted":
+                    # 升级后的人工裁决入口：显式承认「换算法/换定义」并续跑，
+                    # 必须留痕（WARNING + 状态里刷新指纹），不静默放行。
+                    logger.warning(
+                        "执行 %s 的 flow 指纹变化被显式放行续跑（%s）：stored=%s(%s) current=%s(%s)",
+                        execution_id,
+                        ALLOW_FLOW_HASH_CHANGE_KEY,
+                        stored_flow_hash[:12],
+                        stored_algo or "unknown",
+                        current_flow_hash[:12],
+                        FLOW_HASH_ALGO,
+                    )
+                    state.flow_hash = current_flow_hash
+                    state.flow_hash_algo = FLOW_HASH_ALGO
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_change_accepted")
+                else:
+                    mismatch_msg = (
+                        "flow 定义自启动后已变更，hash 不匹配，执行无法安全续跑 "
+                        f"(execution_id={execution_id}, flow_id={flow_id}, "
+                        f"stored_hash={stored_flow_hash[:12]}..., "
+                        f"current_hash={current_flow_hash[:12]}..., "
+                        f"stored_algo={stored_algo or 'unknown'}, current_algo={FLOW_HASH_ALGO})"
+                    )
+                    logger.error(mismatch_msg)
+                    state.status = "error"
+                    state.error = {
+                        "message": mismatch_msg,
+                        # plaita#93：本处终态化不由异常驱动（有专门的字段承载
+                        # 细节），但落盘面同样要给下游一个机器可判别的身份：
+                        # code 用引擎的通用 flow 级错误码（-500），error_type
+                        # 是本处的 worker 级判据（不是节点业务码）。
+                        "code": _FLOW_ERROR_CODE,
+                        "error_type": "flow_hash_mismatch",
+                        "stored_flow_hash": stored_flow_hash,
+                        "current_flow_hash": current_flow_hash,
+                        "stored_flow_hash_algo": stored_algo,
+                        "current_flow_hash_algo": FLOW_HASH_ALGO,
+                        # 升级疑似（算法标记变了且哈希也不同）：给运维明确下一步，
+                        # 而不是只丢一句「hash 不匹配」。
+                        "upgrade_suspected": algo_changed,
+                        "hint": (
+                            "引擎升级可能改变指纹算法；确认流程定义未变且可接受后，"
+                            f"在 resume data 里带 {ALLOW_FLOW_HASH_CHANGE_KEY}: true 显式放行"
+                        ) if algo_changed else None,
+                    }
+                    state.end_time = datetime.now().isoformat()
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_mismatch")
+                    raise FlowHashMismatchError(mismatch_msg)
+            elif hash_decision == "refresh":
+                # 哈希相同 → 定义确实没变，只是算法标记变了（引擎升级）：续跑并刷新标记
+                logger.info(
+                    "执行 %s 的 flow 指纹一致但算法标记升级（%s → %s），续跑并刷新标记",
+                    execution_id,
+                    stored_algo,
+                    FLOW_HASH_ALGO,
+                )
+                state.flow_hash_algo = FLOW_HASH_ALGO
+    
+            # 引擎版本跨 minor：只告警不拦截（硬门由 flow_hash 承担，这里给可观测性）
+            stored_engine = getattr(state, "engine_version", None)
+            current_engine = _engine_version()
+            if stored_engine and _major_minor(stored_engine) != _major_minor(current_engine):
+                logger.warning(
+                    "执行 %s 由引擎 %s 创建，当前 %s：跨 minor 续跑，"
+                    "若流程行为与预期不符请复核定义与节点实现",
+                    execution_id,
+                    stored_engine,
+                    current_engine,
+                )
+    
+            # G1 retry 唤醒：error → running 翻转并先落盘（观察者/监控立即
+            # 可见；若本 worker 接着硬死，行是 running 而非 error——再一轮
+            # retry 仍可放行，zombie 判定也不误报「终态」）。checkpoint 原样，
+            # saved_context 由下方 run_distributed 携带。
+            # 与任务①组合语义：唤醒即清零节点重试计数键——预算耗尽终态化的
+            # 执行经人工 retry 唤醒后拿全新预算，否则唤醒的执行第一次失败就
+            # 立刻再耗尽，G1 形同虚设。翻转落盘成功后才清零（落盘失败抛
+            # StatePersistError 走重投，唤醒未生效不清预算）。
+            # 不传 node_id ⇒ 清**该执行下所有节点**的计数键（plaita#123 起键按
+            # 节点隔离，唤醒是执行级意图，必须整体重来）。
+            if retry_wakeup and not state.context:
+                # plaita#240：retry 的能力前提是盘上有 checkpoint。此前先翻
+                # running 再落盘、等 run_distributed 才由策略层抛
+                # ResumeGuardError；协议错误分支虽「保持原状」，但原状已经被
+                # 改成 running（error/end_time 也被清空）——非法 error→running
+                # 迁移 + 失败证据丢失。必须在**任何状态变更之前**拒绝。
+                # 保持 error 原状（不落盘）、不创建 FlowExecution、不触发节点。
+                message = (
+                    "resume_type='retry' requires a saved checkpoint, but the "
+                    f"execution has none; execution {execution_id} remains error "
+                    "(status=error, error/end_time preserved)"
+                )
+                logger.warning(
+                    "执行 %s 收到 retry 但 checkpoint 为空，拒绝唤醒（保持 error 原状）",
+                    execution_id,
+                )
+                raise ResumeProtocolError(message, execution_id=execution_id)
+            if retry_wakeup:
+                state.status = "running"
+                state.error = None
+                state.end_time = None
+                # plaita#322：唤醒即声明 re-run 节点（write-ahead——先声明、
+                # 再执行；re-run 节点 = $LAST_NODE，重投读同一行 ⇒ 同 token
+                # ⇒ 连接器幂等键稳定）。progress_at 不动（#320 §四.2 钉死：
+                # 非步迁移不刷新）。
+                if not declared_step_id(state.next_step):
+                    rerun_node = (
+                        state.context.get("$LAST_NODE")
+                        if isinstance(state.context, dict)
+                        else None
+                    )
+                    state.next_step = (
+                        {
+                            "node_id": rerun_node,
+                            "step_id": new_step_id(),
+                            "parent_step_id": None,
+                        }
+                        if isinstance(rerun_node, str) and rerun_node
+                        else None
+                    )
+                self._persist_state_or_raise(execution_id, state, "retry_wakeup")
+                # 清预算 + 记配额原子收口（第七十一轮任务①）：两步散调在清
+                # 计数失败时会留下「配额已消耗、预算没拿到」的半生效态（记数
+                # 照常执行、失败被吞）——下一次失败直接终态化，每次半生效唤醒
+                # 净烧一次额度。收敛为单段 Lua：整体生效或具名抛
+                # G1WakeupAccountingError（StatePersistError 子族，消息不 ack
+                # 重投、不终态化，配额守恒）。达上限的拒绝仍在上方入口处
+                # （`_g1_wakeup_budget_exhausted`）。
+                self._commit_g1_wakeup(execution_id)
+                logger.info("执行 %s error 态经 retry 放行（重试计数已清零），从断点步进", execution_id)
+    
+            # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
+            execution = FlowExecution(
+                event_bus=self.event_bus,
+                callback_handlers=self._handlers_for(execution_id),
+            )
+            execution.mode = ExecutionMode.DISTRIBUTED
+            self._bind_observers(execution)
+            # plaita#322：进度上报回调（同 start 路径——report_progress 的
+            # worker 面）。
+            _reporter_binder = getattr(execution, "bind_progress_reporter", None)
+            if callable(_reporter_binder):
+                # 替身执行对象（console conformance StubExecution 等）缺绑定时
+                # 静默跳过——上报是观测面，绝不打断执行（d61a038a CI 红教训）。
+                _reporter_binder(
+                    lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+                )
+            # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
+            # 被 XCLAIM 抢占双跑（fence 世代随登记带上，心跳写要过世代 CAS）
+            self._register_lease_watch(
+                execution_id, lease_value, execution, fence_token=fence_token
+            )
+            # 登记取消监听（波次③）：命中标志键即中止在途节点（与租约登记
+            # 同窗口；finally 一并撤销）
+            self._register_cancel_watch(execution_id, execution)
+    
+            # 直接使用 run_distributed 恢复执行
+            # ``execution_id`` 必须显式透传（plaita#123 配套）：不传时引擎侧
+            # 的 execution_id 与 worker 脱钩——resume 走 ``context.context =
+            # saved_context`` 整体替换 checkpoint，若 checkpoint 缺
+            # ``$EXECUTION_ID``（resume 常见），引擎 execution_id 为空串 ⇒
+            # ``result.execution_id`` 回空、且重试计数键退化成
+            # ``noderetry::{node}``（无执行 id），运维无法从键反查执行。
+            # start 路径（本文件 ``start_flow``）早已是同款正确范式。
+            #
+            # ``params``（#122）：仅在 ``state.context`` 为空（假值）时被引擎
+            # 用于 ``setup_flow``——即 start→resume 载体转换撞上的「首节点还
+            # 没成功过」窗口；checkpoint 非空时引擎走真值分支，params 不参与
+            # （续跑语义零变化，见 ``DistributedStrategy.execute``）。
+            #
+            # plaita#322：恢复首步消费行声明的 token（step_persist/retry_wakeup
+            # 铸的声明）；挂起/老行无声明 ⇒ tokenless（见
+            # ``_bind_step_ownership``）。重投读同一行 ⇒ 同 token。
+            self._bind_step_ownership(execution, state)
+            # plaita#326 E1（owner 裁决①②）：checkpoint 已不落 $ENV 快照，
+            # 恢复/重投路径的 ``$ENV.XXX`` 求值来源 = **重注后的进程 env**——
+            # 按 flow expose_env allowlist 从当前 worker 进程 env 重注；
+            # 不重注则表达式静默为空（0.5.0 语义），违「降级必须可观测」红线。
+            self._reinject_env_for_resume(flow, state)
+>           result = execution.run_distributed(
+                flow,
+                params=params,
+                saved_context=state.context,
+                resume_type=resume_type,
+                resume_data=data,
+                execution_id=execution_id,
+            )
+
+plaita/server/flow_worker.py:4348: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py:1169: in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py:1173: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <MagicMock name='FlowExecution().run_distributed' id='4454236912'>
+args = (Flow(flow_id='f1', version='1', runtime='python', input_type=None, output_type=None, nodes=[Start(id='start', name=No... error_message=None, retry_times=0))], author='', desc='', metadata={}, timeout='', global_context={}, expose_env=[]),)
+kwargs = {'params': None, 'saved_context': {'$LAST_NODE': 'start'}, 'resume_type': 'continue', 'resume_data': None, ...}
+
+    def _execute_mock_call(self, /, *args, **kwargs):
+        # separate from _increment_mock_call so that awaited functions are
+        # executed separately from their call, also AsyncMock overrides this method
+    
+        effect = self.side_effect
+        if effect is not None:
+            if _is_exception(effect):
+>               raise effect
+E               plaita.core.errors.FlowErrorException: 执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：
+E               挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py:1228: FlowErrorException
+
+The above exception was the direct cause of the following exception:
+
+self = <tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring object at 0x107cc5480>
+
+    def test_worker_terminalizes_without_retry_budget_burn(self):
+        """W3：SNE 链走 ``resume_flow`` 必须终态化 error（非重投异常），
+        可重试预算键（noderetry）不得被写。"""
+        fakeredis = pytest.importorskip("fakeredis")
+        from unittest.mock import MagicMock, patch
+    
+        from plaita.server.flow_worker import (
+            NodeFailureTerminalizedError,
+            RedisFlowWorker,
+        )
+        from plaita.storage.base import ExecutionState
+        from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
+    
+        exec_id = "exec-sne-1"
+        noderetry_key = f"plaita:execution:noderetry:{exec_id}"
+        flows = MemoryFlowStorage()
+        flows.save_flow(
+            {"flow_id": "f1", "version": "1", "runtime": "python",
+             "nodes": [{"type": "start", "id": "start"}]}
+        )
+        storage = MemoryExecutionStorage()
+        storage.save_execution_state(
+            exec_id,
+            ExecutionState(
+                execution_id=exec_id, flow_id="f1", flow_version="1",
+                status="running", context={"$LAST_NODE": "start"},
+            ),
+        )
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        worker = RedisFlowWorker(
+            redis_url="redis://localhost:6379/15",
+            queue_name="test:issue337-sne-terminal",
+            execution_storage=storage,
+            flow_storage=flows,
+            redis_client=fake,
+            enable_registry=False,
+            enable_redis_logging=False,
+        )
+        chain = _wrapped_worker_chain(_runtime_sne())
+        with patch("plaita.server.flow_worker.FlowExecution") as FE:
+            inst = MagicMock()
+            FE.return_value = inst
+            inst.run_distributed.side_effect = chain
+            with pytest.raises(NodeFailureTerminalizedError):
+>               worker.resume_flow("f1", exec_id, "continue")
+
+tests/unit/test_issue330_suspend_not_executable.py:644: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <plaita.server.flow_worker.RedisFlowWorker object at 0x1096e7620>
+flow_id = 'f1', execution_id = 'exec-sne-1', resume_type = 'continue'
+data = None, delivery_count = None, params = None
+
+    def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
+                    data: Optional[Dict[str, Any]] = None,
+                    delivery_count: Optional[int] = None,
+                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        恢复流程执行。
+    
+        取得 ``execution_id`` 租约后才推进；另一 worker 已持有租约时抛
+        ``ExecutionLeaseError``（RedisFlowWorker 对此**不** XACK，待租约过期后回收）。
+    
+        Args:
+            flow_id: 流程ID
+            execution_id: 执行ID
+            resume_type: 恢复类型
+            data: 恢复数据
+            delivery_count: 消息投递次数（可观测；见 _process_execution_result）
+            params: 可选入参（#122）。只在盘上 checkpoint 为空时被引擎用来
+                重新 ``setup_flow``（start→resume 载体转换会撞上这种窗口）；
+                checkpoint 非空（正常 resume）时**不参与**——续跑一律以盘上
+                context 为准，续跑语义零变化。
+        """
+        # 前置判定（租约之前）：终态/挂起幂等短路在此完成，保持 #33 的
+        # 「suspended + continue 不取租约」契约。这里拿到的 state 只是
+        # **预读快照**——取到租约后必须重读并以盘上状态为准（plaita#241）。
+        state, early_result = self._load_and_guard_resume_state(
+            flow_id, execution_id, resume_type
+        )
+        if early_result is not None:
+            return early_result
+    
+        # 获取流程版本
+        version = state.flow_version
+    
+        # 获取流程定义
+        try:
+            flow = self.get_flow_definition(flow_id, version)
+        except FlowDefinitionMissingError:
+            # #304：定义缺失（版本被删/未同步）不再裸 ValueError poison ack
+            # ——先终态化 error（可观测 + 配额名额释放）再上抛。位置在租约
+            # 前（#33「suspended + continue 不取租约」契约保持）。不传上面
+            # 的预读快照（B123-01）：load→取定义的窗口内，持缓存定义的活
+            # worker 可能已把执行推进到 completed 终态，快照（suspended +
+            # 旧 context）的 error 写会无条件覆写终态——状态回退 + 整行
+            # 倒灌旧断点（retry 重放已成功节点）+ 按快照 context 误 pause
+            # 活跑沙箱 + 假终态 run_end 先行双发。传 None 让助手**现读盘**：
+            # 已终态一律不覆写，非终态才终态化且落在现读行（与 start 路径
+            # 同款）。现读后的写仍走普通写（未持租约）——写的是刚读到的
+            # 行，窗口收窄到读-写之间。
+            self._terminalize_definition_missing(
+                execution_id, flow_id, version, None,
+                phase="flow_definition_missing_resume",
+            )
+            raise
+    
+        # flow 定义指纹（波次二任务②）：worker 的定义 TTLCache 有 300s 窗口、
+        # console engine_sync 可直接覆盖 Redis 定义——挂起执行 resume 用
+        # latest 版本定义时，若定义自启动后被改过，``_get_next_from_last``
+        # 找不到节点/走错分支且无任何告警。指纹在 lease 内判定（与活
+        # worker 的推进写串行化，防「他人持租约推进中却被误终态化」），
+        # 不一致 → 终态化 error + raise ValueError（poison ack）——意图是
+        # 可观测的终态而不是重投风暴。老状态 flow_hash 为 None → 跳过校验
+        # （零回归）。指纹取**存储中的原始定义**（plaita#36 口径 v2）：同一份
+        # 存储定义不受引擎版本/模型字段演进影响。
+        current_flow_hash = self.get_flow_definition_hash(flow_id, version)
+    
+        # 解析流程定义
+        logger.info("恢复流程执行: %s, 执行ID: %s, 恢复类型: %s", flow_id, execution_id, resume_type)
+    
+        # holder 嵌入注册表 instance id（#50），语义同 start 路径。
+        holder = new_holder_token(
+            prefix="resume", instance_id=getattr(self, "instance_id", None)
+        )
+        lease_value, fence_token = self._acquire_lease(execution_id, holder)
+        if lease_value is None:
+            raise ExecutionLeaseError(
+                f"execution {execution_id} is leased by another worker; refuse concurrent resume"
+            )
+    
+        fence_token_reset = None
+        if fence_token is not None:
+            # fencing 写侧守门（设计稿 §4.2）：本 resume 的所有状态落盘带
+            # 世代号，FencedExecutionStorage 据此 CAS；finally 复位。
+            fence_token_reset = set_current_fence_token(fence_token)
+    
+        try:
+            # TOCTOU 复核（plaita#241）：上面的 load 发生在取租约**之前**。
+            # 若窗口内另一 worker 已把执行推到终态并释放租约，本 worker 随后
+            # 取得的是**新一代**租约——fencing 只拒绝旧世代写，不会拦它拿
+            # 旧 state 继续 run_distributed（节点副作用重放、终态行被二次
+            # 改写）。租约内重读并重跑前置判定；state/early_result 均以本次
+            # 为准，不复用 acquire 前的快照。
+            state, early_result = self._load_and_guard_resume_state(
+                flow_id, execution_id, resume_type, lease_held=True
+            )
+            if early_result is not None:
+                logger.info(
+                    "执行 %s 租约内复核发现状态已变更（status=%s）：拒绝本次 "
+                    "resume，不复用 acquire 前的旧 state（plaita#241）",
+                    execution_id, early_result.get("status"),
+                )
+                # 具名拒绝：区别于入口即终态的重复投递——本次是**赢了租约
+                # 竞争、但盘上状态已由上一持有者推进**，测试/值守可据此
+                # 识别 TOCTOU 窗口，而不是当成普通幂等短路。
+                early_result["rejected_after_lease"] = True
+                return early_result
+    
+            # plaita#247：#241 的复核只替换了 state，version/flow/current_flow_hash
+            # 仍是 acquire 前快照算出的值。窗口内 flow_version 变更（同 flow_id 新
+            # 版本 / 另一 start 载体回写）时，继续用旧 flow 执行并把结果写回新
+            # version 的状态行 ⇒ 执行定义与状态身份不一致。复核后的 state 才是
+            # 权威：版本变了就用新版本重算定义与指纹；hash 冲突仍走下方既有
+            # mismatch 终态路径（绝不带着旧定义/旧指纹续跑）。
+            if state.flow_version != version:
+                logger.warning(
+                    "执行 %s 在 load→acquire 窗口内 flow_version 变更（%r → %r），"
+                    "按租约内复核的新版本重算 flow 定义与指纹（plaita#247）",
+                    execution_id, version, state.flow_version,
+                )
+                version = state.flow_version
+                try:
+                    flow = self.get_flow_definition(flow_id, version)
+                except FlowDefinitionMissingError:
+                    # #304：租约内复核换到的新版本定义缺失——同款终态化
+                    # （此时持租约，fenced 写生效），具名上抛走下方专属
+                    # except（不进通用 except 二次终态化）。
+                    self._terminalize_definition_missing(
+                        execution_id, flow_id, version, state,
+                        phase="flow_definition_missing_resume_recheck",
+                    )
+                    raise
+                current_flow_hash = self.get_flow_definition_hash(flow_id, version)
+    
+            state_status = getattr(state, "status", "") or ""
+            retry_wakeup = state_status == "error" and \
+                ResumeType.coerce(resume_type) is ResumeType.RETRY
+            if state_status == "running" and \
+                    ResumeType.coerce(resume_type) is ResumeType.RETRY:
+                # running 执行没有失败节点可重跑（plaita#53 验收 2）：retry 在此的
+                # 语义 = 从 checkpoint 派发后继节点（与 continue 同路），**必须真实
+                # 重派**——禁止「受理后无动作」。显式留痕，值守从日志即可区分
+                # 「真的推进了」与「白等」（租约被他人持有等不生效情形另见 run()
+                # 的租约冲突日志）。
+                logger.warning(
+                    "执行 %s 处于 running，resume_type=retry 按「从断点续跑」处理"
+                    "（running 执行无失败节点可重跑），本次将从 checkpoint 派发后继节点",
+                    execution_id,
+                )
+    
+            # 陈旧 event/timeout 载体的归一化（plaita#258）：resume 在流内
+            # 推进并落过 step_persist 后，若发生瞬态 StatePersistError / 进程
+            # 崩溃，消息按 at-least-once 重投，但 resume_type 仍是 event/timeout
+            # ———而挂起订阅已在第一次 resume 时注销、$LAST_NODE 已不是 pending
+            # 挂起点。策略层会抛 ResumeGuardError（协议错误），旧 run() 分支据此
+            # ack 唯一载体 ⇒ 执行永久停在 running。这里在**取得租约并重读状态
+            # 之后**确认「执行仍活、但决议无处可落」，把本次意图改写为 continue
+            # （剩余工作就是从 checkpoint 续跑，已完成节点不重放）。租约内
+            # 复核保证：另一 worker 已推进到**新的挂起点**时 status=suspended，
+            # 不会走本分支，陈旧 resume 仍由策略层的订阅绑定守卫拒绝（#221）。
+            if resume_type in (ResumeType.EVENT, ResumeType.TIMEOUT, "event", "timeout"):
+                stale_reason = self._resume_carrier_stale_reason(state, flow)
+                if stale_reason:
+                    logger.warning(
+                        "执行 %s 的 %s resume 载体已错过挂起点（%s）；订阅早已注销、"
+                        "执行仍 running，本次归一化为 continue 从 checkpoint 续跑"
+                        "（plaita#258）",
+                        execution_id, resume_type, stale_reason,
+                    )
+                    resume_type = ResumeType.CONTINUE.value
+    
+            # XCLAIM 恢复路径取消检查点（设计稿 §3.1）：crash 后 cancel 消息
+            # 或任一 resume 消息被重投，若取消标志在（控制面对运行中执行写的
+            # 意图键），直接终态化而非继续推进。上一 checkpoint 已落盘，
+            # cancelled 的 context 即取消点前一步的完整快照（§3.3）。
+            if self._cancel_requested(execution_id):
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "cancelled_at_resume_entry")
+                logger.info("执行 %s 在 resume 入口命中取消标志，终态化", execution_id)
+                return {
+                    "execution_id": execution_id,
+                    "status": "cancelled",
+                    "cancelled_at_resume": True,
+                }
+    
+            # flow 定义指纹校验（波次二任务②）在 G1 retry 唤醒**之前**：
+            # 定义被改时执行保持 error（hash 不匹配信息落盘），修复定义后
+            # 仍可再 retry——G1 的「error 态可反复唤醒」语义不被破坏。
+            # 取消是用户意图，已在上方优先放行。写盘走 _persist_state_or_raise
+            # （带本 resume 的 fence 世代），随后 raise FlowHashMismatchError
+            # → run() 按 ValueError poison ack（终态已可观测，重投无意义）。
+            stored_flow_hash = getattr(state, "flow_hash", None)
+            stored_algo = getattr(state, "flow_hash_algo", None)
+            algo_changed = bool(stored_algo) and stored_algo != FLOW_HASH_ALGO
+            allow_hash_change = bool(
+                isinstance(data, dict) and data.get(ALLOW_FLOW_HASH_CHANGE_KEY)
+            )
+            hash_decision = classify_flow_hash_change(
+                stored_hash=stored_flow_hash,
+                current_hash=current_flow_hash,
+                stored_algo=stored_algo,
+                current_algo=FLOW_HASH_ALGO,
+                allow_change=allow_hash_change,
+            )
+            if hash_decision in ("mismatch", "accepted"):
+                if hash_decision == "accepted":
+                    # 升级后的人工裁决入口：显式承认「换算法/换定义」并续跑，
+                    # 必须留痕（WARNING + 状态里刷新指纹），不静默放行。
+                    logger.warning(
+                        "执行 %s 的 flow 指纹变化被显式放行续跑（%s）：stored=%s(%s) current=%s(%s)",
+                        execution_id,
+                        ALLOW_FLOW_HASH_CHANGE_KEY,
+                        stored_flow_hash[:12],
+                        stored_algo or "unknown",
+                        current_flow_hash[:12],
+                        FLOW_HASH_ALGO,
+                    )
+                    state.flow_hash = current_flow_hash
+                    state.flow_hash_algo = FLOW_HASH_ALGO
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_change_accepted")
+                else:
+                    mismatch_msg = (
+                        "flow 定义自启动后已变更，hash 不匹配，执行无法安全续跑 "
+                        f"(execution_id={execution_id}, flow_id={flow_id}, "
+                        f"stored_hash={stored_flow_hash[:12]}..., "
+                        f"current_hash={current_flow_hash[:12]}..., "
+                        f"stored_algo={stored_algo or 'unknown'}, current_algo={FLOW_HASH_ALGO})"
+                    )
+                    logger.error(mismatch_msg)
+                    state.status = "error"
+                    state.error = {
+                        "message": mismatch_msg,
+                        # plaita#93：本处终态化不由异常驱动（有专门的字段承载
+                        # 细节），但落盘面同样要给下游一个机器可判别的身份：
+                        # code 用引擎的通用 flow 级错误码（-500），error_type
+                        # 是本处的 worker 级判据（不是节点业务码）。
+                        "code": _FLOW_ERROR_CODE,
+                        "error_type": "flow_hash_mismatch",
+                        "stored_flow_hash": stored_flow_hash,
+                        "current_flow_hash": current_flow_hash,
+                        "stored_flow_hash_algo": stored_algo,
+                        "current_flow_hash_algo": FLOW_HASH_ALGO,
+                        # 升级疑似（算法标记变了且哈希也不同）：给运维明确下一步，
+                        # 而不是只丢一句「hash 不匹配」。
+                        "upgrade_suspected": algo_changed,
+                        "hint": (
+                            "引擎升级可能改变指纹算法；确认流程定义未变且可接受后，"
+                            f"在 resume data 里带 {ALLOW_FLOW_HASH_CHANGE_KEY}: true 显式放行"
+                        ) if algo_changed else None,
+                    }
+                    state.end_time = datetime.now().isoformat()
+                    self._persist_state_or_raise(execution_id, state, "flow_hash_mismatch")
+                    raise FlowHashMismatchError(mismatch_msg)
+            elif hash_decision == "refresh":
+                # 哈希相同 → 定义确实没变，只是算法标记变了（引擎升级）：续跑并刷新标记
+                logger.info(
+                    "执行 %s 的 flow 指纹一致但算法标记升级（%s → %s），续跑并刷新标记",
+                    execution_id,
+                    stored_algo,
+                    FLOW_HASH_ALGO,
+                )
+                state.flow_hash_algo = FLOW_HASH_ALGO
+    
+            # 引擎版本跨 minor：只告警不拦截（硬门由 flow_hash 承担，这里给可观测性）
+            stored_engine = getattr(state, "engine_version", None)
+            current_engine = _engine_version()
+            if stored_engine and _major_minor(stored_engine) != _major_minor(current_engine):
+                logger.warning(
+                    "执行 %s 由引擎 %s 创建，当前 %s：跨 minor 续跑，"
+                    "若流程行为与预期不符请复核定义与节点实现",
+                    execution_id,
+                    stored_engine,
+                    current_engine,
+                )
+    
+            # G1 retry 唤醒：error → running 翻转并先落盘（观察者/监控立即
+            # 可见；若本 worker 接着硬死，行是 running 而非 error——再一轮
+            # retry 仍可放行，zombie 判定也不误报「终态」）。checkpoint 原样，
+            # saved_context 由下方 run_distributed 携带。
+            # 与任务①组合语义：唤醒即清零节点重试计数键——预算耗尽终态化的
+            # 执行经人工 retry 唤醒后拿全新预算，否则唤醒的执行第一次失败就
+            # 立刻再耗尽，G1 形同虚设。翻转落盘成功后才清零（落盘失败抛
+            # StatePersistError 走重投，唤醒未生效不清预算）。
+            # 不传 node_id ⇒ 清**该执行下所有节点**的计数键（plaita#123 起键按
+            # 节点隔离，唤醒是执行级意图，必须整体重来）。
+            if retry_wakeup and not state.context:
+                # plaita#240：retry 的能力前提是盘上有 checkpoint。此前先翻
+                # running 再落盘、等 run_distributed 才由策略层抛
+                # ResumeGuardError；协议错误分支虽「保持原状」，但原状已经被
+                # 改成 running（error/end_time 也被清空）——非法 error→running
+                # 迁移 + 失败证据丢失。必须在**任何状态变更之前**拒绝。
+                # 保持 error 原状（不落盘）、不创建 FlowExecution、不触发节点。
+                message = (
+                    "resume_type='retry' requires a saved checkpoint, but the "
+                    f"execution has none; execution {execution_id} remains error "
+                    "(status=error, error/end_time preserved)"
+                )
+                logger.warning(
+                    "执行 %s 收到 retry 但 checkpoint 为空，拒绝唤醒（保持 error 原状）",
+                    execution_id,
+                )
+                raise ResumeProtocolError(message, execution_id=execution_id)
+            if retry_wakeup:
+                state.status = "running"
+                state.error = None
+                state.end_time = None
+                # plaita#322：唤醒即声明 re-run 节点（write-ahead——先声明、
+                # 再执行；re-run 节点 = $LAST_NODE，重投读同一行 ⇒ 同 token
+                # ⇒ 连接器幂等键稳定）。progress_at 不动（#320 §四.2 钉死：
+                # 非步迁移不刷新）。
+                if not declared_step_id(state.next_step):
+                    rerun_node = (
+                        state.context.get("$LAST_NODE")
+                        if isinstance(state.context, dict)
+                        else None
+                    )
+                    state.next_step = (
+                        {
+                            "node_id": rerun_node,
+                            "step_id": new_step_id(),
+                            "parent_step_id": None,
+                        }
+                        if isinstance(rerun_node, str) and rerun_node
+                        else None
+                    )
+                self._persist_state_or_raise(execution_id, state, "retry_wakeup")
+                # 清预算 + 记配额原子收口（第七十一轮任务①）：两步散调在清
+                # 计数失败时会留下「配额已消耗、预算没拿到」的半生效态（记数
+                # 照常执行、失败被吞）——下一次失败直接终态化，每次半生效唤醒
+                # 净烧一次额度。收敛为单段 Lua：整体生效或具名抛
+                # G1WakeupAccountingError（StatePersistError 子族，消息不 ack
+                # 重投、不终态化，配额守恒）。达上限的拒绝仍在上方入口处
+                # （`_g1_wakeup_budget_exhausted`）。
+                self._commit_g1_wakeup(execution_id)
+                logger.info("执行 %s error 态经 retry 放行（重试计数已清零），从断点步进", execution_id)
+    
+            # 复用同一个 FlowExecution 贯穿恢复后的所有分布式步骤
+            execution = FlowExecution(
+                event_bus=self.event_bus,
+                callback_handlers=self._handlers_for(execution_id),
+            )
+            execution.mode = ExecutionMode.DISTRIBUTED
+            self._bind_observers(execution)
+            # plaita#322：进度上报回调（同 start 路径——report_progress 的
+            # worker 面）。
+            _reporter_binder = getattr(execution, "bind_progress_reporter", None)
+            if callable(_reporter_binder):
+                # 替身执行对象（console conformance StubExecution 等）缺绑定时
+                # 静默跳过——上报是观测面，绝不打断执行（d61a038a CI 红教训）。
+                _reporter_binder(
+                    lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+                )
+            # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
+            # 被 XCLAIM 抢占双跑（fence 世代随登记带上，心跳写要过世代 CAS）
+            self._register_lease_watch(
+                execution_id, lease_value, execution, fence_token=fence_token
+            )
+            # 登记取消监听（波次③）：命中标志键即中止在途节点（与租约登记
+            # 同窗口；finally 一并撤销）
+            self._register_cancel_watch(execution_id, execution)
+    
+            # 直接使用 run_distributed 恢复执行
+            # ``execution_id`` 必须显式透传（plaita#123 配套）：不传时引擎侧
+            # 的 execution_id 与 worker 脱钩——resume 走 ``context.context =
+            # saved_context`` 整体替换 checkpoint，若 checkpoint 缺
+            # ``$EXECUTION_ID``（resume 常见），引擎 execution_id 为空串 ⇒
+            # ``result.execution_id`` 回空、且重试计数键退化成
+            # ``noderetry::{node}``（无执行 id），运维无法从键反查执行。
+            # start 路径（本文件 ``start_flow``）早已是同款正确范式。
+            #
+            # ``params``（#122）：仅在 ``state.context`` 为空（假值）时被引擎
+            # 用于 ``setup_flow``——即 start→resume 载体转换撞上的「首节点还
+            # 没成功过」窗口；checkpoint 非空时引擎走真值分支，params 不参与
+            # （续跑语义零变化，见 ``DistributedStrategy.execute``）。
+            #
+            # plaita#322：恢复首步消费行声明的 token（step_persist/retry_wakeup
+            # 铸的声明）；挂起/老行无声明 ⇒ tokenless（见
+            # ``_bind_step_ownership``）。重投读同一行 ⇒ 同 token。
+            self._bind_step_ownership(execution, state)
+            # plaita#326 E1（owner 裁决①②）：checkpoint 已不落 $ENV 快照，
+            # 恢复/重投路径的 ``$ENV.XXX`` 求值来源 = **重注后的进程 env**——
+            # 按 flow expose_env allowlist 从当前 worker 进程 env 重注；
+            # 不重注则表达式静默为空（0.5.0 语义），违「降级必须可观测」红线。
+            self._reinject_env_for_resume(flow, state)
+            result = execution.run_distributed(
+                flow,
+                params=params,
+                saved_context=state.context,
+                resume_type=resume_type,
+                resume_data=data,
+                execution_id=execution_id,
+            )
+    
+            # 处理执行结果
+            final_result = self._process_execution_result(
+                flow,
+                result,
+                state,
+                execution,
+                lease_execution_id=execution_id,
+                lease_holder=lease_value,
+                delivery_count=delivery_count,
+            )
+    
+            return final_result
+    
+        except ExecutionLeaseError:
+            raise
+        except (StatePersistError, ServiceDispatchError, NodeExecutionRetryableError):
+            # 落盘/派发失败：执行状态保持原样（is_end 前失败 → 仍 running，
+            # 挂起派发失败 → 仍 suspended），消息不 ack 走 at-least-once 重投，
+            # 下轮从 checkpoint / 挂起节点重入。绝不落 error 终态——重投消息
+            # 会命中上方 already_terminal 短路被 ack，执行永久卡死。
+            # NodeExecutionRetryableError（波次二任务①）同理：节点失败未
+            # 终态化，重投后从 checkpoint 重跑失败节点；finally 释放租约，
+            # 重投消息可重新取得租约。
+            raise
+        except FlowHashMismatchError:
+            # flow 定义指纹不匹配（波次二任务②）：执行已在 raise 前终态化
+            # error（可观测终态），原样上抛给 run() 按 ValueError poison
+            # ack——重投只会命中 already_terminal 短路，终态化已完成，无意义。
+            # 不落进下面的通用 except 二次终态化/包 RuntimeError。
+            raise
+        except FlowDefinitionMissingError:
+            # #304：租约内复核路径的定义缺失——raise 前已终态化 error
+            # （同 FlowHashMismatchError 的纪律），原样上抛 poison ack，
+            # 不进通用 except 二次终态化。
+            raise
+        except ResumeProtocolError:
+            # plaita#240：预检在**状态变更前**抛出的协议错误，必须原样上抛给
+            # run()（ack、不终态化）——不能被下面通用 except 当作执行失败
+            # 二次终态化 error。策略层守卫路径仍由 _chain_has_resume_guard_error
+            # 在通用 except 内包成同类异常。
+            raise
+        except Exception as e:
+            logger.error("恢复流程执行出错: %s", _scrub_exception_text(e))
+    
+            # 波次③步内取消：被恢复的节点在途命中取消监听 → 引擎抛
+            # FlowCancelledException（归一化后挂 __cause__）或协作节点自杀抛
+            # 普通异常。两条判据任一命中即终态化 cancelled，绝不写 error。
+            if _chain_has_cancellation(e) or self._cancel_requested(execution_id):
+                state.status = "cancelled"
+                state.end_time = datetime.now().isoformat()
+                self._persist_state_or_raise(execution_id, state, "cancelled_in_node")
+                self._finalize_observers()
+                logger.info(
+                    "执行 %s 在恢复节点执行期响应取消，终态化 cancelled", execution_id
+                )
+                return {
+                    "execution_id": execution_id,
+                    "status": "cancelled",
+                }
+    
+            # 挂起守卫豁免（#33）：**只**豁免策略层守卫 ``ResumeGuardError``
+            # （continue/retry 试图绕过 pending 挂起节点、resume 打在无挂起/
+            # 非挂起 checkpoint 上）——那是调用方协议与执行状态不匹配，不是
+            # 执行自身失败。终态化 error 会把本可被 event/cancel/timeout 唤醒的
+            # 挂起执行永久打封（终态短路从此拒绝一切 resume 类型，死局），且这类
+            # 错误天然由 at-least-once 重投产生（重复投递的 event resume 打在已
+            # 推进的 checkpoint 上同族），终态化会误杀健康执行。
+            # 豁免为「保持原状 + 上抛」：suspended 执行保持 suspended，消息被
+            # ack（重投也只会再次命中同一守卫，重投无意义）；running 执行保持
+            # checkpoint 现状。
+            # 裸 ``ResumeError``（节点 ``resume()`` 抛错被策略层包的那个，
+            # 如事件数据畸形）**不豁免**：静默保持原状 = 无 error 记录、永远等
+            # 不到决议的哑执行；交给下方现状路径（可重试判据 → 终态化 error）
+            # 才可观测、可人工 retry。
+            if _chain_has_resume_guard_error(e):
+                logger.warning(
+                    "执行 %s (status=%s) 收到与挂起状态不匹配的 resume 请求，"
+                    "协议错误不终态化，执行保持原状: %s",
+                    execution_id, getattr(state, "status", "?"), _scrub_url_text(e),
+                )
+                self._finalize_observers()
+                raise ResumeProtocolError(
+                    f"resume 协议错误（执行保持原状 status={getattr(state, 'status', '?')}）: {e}",
+                    execution_id=execution_id,
+                ) from e
+    
+            # 节点级有界重试（波次二任务①）：同 _process_execution_result，
+            # 瞬态节点失败不终态化、消息等重投；否则现状终态化 error。
+            # 失败节点 id 取自异常链（plaita#123：计数键按节点隔离）；取不到
+            # 时计数退化为执行维度，终态化 error 里也就没有按节点的次数。
+            failed_node = _node_id_from_chain(e)
+            retry_exc = self._node_failure_retry_decision(
+                e, execution_id, delivery_count, failed_node
+            )
+            if retry_exc is not None:
+>               raise retry_exc from e
+E               plaita.server.flow_worker.NodeExecutionRetryableError: 节点执行失败（可重试，第 1/5 次重试，execution_id=exec-sne-1）: 执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：
+E               挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+plaita/server/flow_worker.py:4452: NodeExecutionRetryableError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:flow_worker.py:4399 恢复流程执行出错: plaita.core.errors.FlowSuspendedCarrier: pending
+
+The above exception was the direct cause of the following exception:
+
+plaita.core.errors.SuspendNotExecutableError: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+The above exception was the direct cause of the following exception:
+
+plaita.core.errors.NodeExecutionError: 执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/kong/projects/infra4agent/plaita-wt2/plaita/server/flow_worker.py", line 4348, in resume_flow
+    result = execution.run_distributed(
+        flow,
+    ...<4 lines>...
+        execution_id=execution_id,
+    )
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/mock.py", line 1228, in _execute_mock_call
+    raise effect
+plaita.core.errors.FlowErrorException: 执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+
+WARNING  plaita:flow_worker.py:2073 执行 exec-sne-1 节点 n1 执行失败，不终态化等待显式重投后重跑失败节点（第 1/5 次重试，重投退避 1s，plaita#91）: 执行节点n1出错了: 这不是源码缺陷，不要删除/替换该节点：
+挂起节点 'wait' (event，source line 3) 在 flow 's1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。
+_ TestTerminalNoRetryWiring.test_error_fields_direct_chain_keeps_suspend_identity _
+
+self = <tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring object at 0x107cc56a0>
+
+    def test_error_fields_direct_chain_keeps_suspend_identity(self):
+        """E1：链上最深引擎异常是 carrier（FlowErrorType.FLOW_ERROR）时，
+        落盘 error_type 必须仍取 SNE——carrier 只是因果载体，不是语义主体。"""
+        from plaita.server.flow_worker import _error_fields
+    
+        fields = _error_fields(_direct_worker_chain(_runtime_sne()))
+>       assert fields["error_type"] == "suspend_not_executable"
+E       AssertionError: assert 'flow_error' == 'suspend_not_executable'
+E         
+E         - suspend_not_executable
+E         + flow_error
+
+tests/unit/test_issue330_suspend_not_executable.py:658: AssertionError
+_ TestTerminalNoRetryWiring.test_error_fields_wrapped_chain_beats_abort_wrapper _
+
+self = <tests.unit.test_issue330_suspend_not_executable.TestTerminalNoRetryWiring object at 0x107c24f50>
+
+    def test_error_fields_wrapped_chain_beats_abort_wrapper(self):
+        """E2：abort 包装在场时身份同样优先取 SNE——包装层与归一化外壳
+        都不得把稳定 error_type 顶成 node_error / flow_error。"""
+        from plaita.server.flow_worker import _error_fields
+    
+        fields = _error_fields(_wrapped_worker_chain(_runtime_sne()))
+>       assert fields["error_type"] == "suspend_not_executable"
+E       AssertionError: assert 'node_error' == 'suspend_not_executable'
+E         
+E         - suspend_not_executable
+E         + node_error
+
+tests/unit/test_issue330_suspend_not_executable.py:666: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring::test_is_retryable_error_sne_is_terminal
+FAILED tests/unit/test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring::test_is_retryable_error_sne_subclass_is_terminal
+FAILED tests/unit/test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring::test_worker_wrapped_chain_not_retryable
+FAILED tests/unit/test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring::test_worker_terminalizes_without_retry_budget_burn
+FAILED tests/unit/test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring::test_error_fields_direct_chain_keeps_suspend_identity
+FAILED tests/unit/test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring::test_error_fields_wrapped_chain_beats_abort_wrapper
+6 failed, 3 passed in 0.70s
+rc=1

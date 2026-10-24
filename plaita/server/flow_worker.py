@@ -30,6 +30,7 @@ from plaita.core.errors import (
     NodeExecutionError,
     NodeTimeoutError,
     ResumeGuardError,
+    SuspendNotExecutableError,
 )
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
@@ -993,17 +994,22 @@ def _is_retryable_node_failure(exc: BaseException) -> bool:
       （确定性信号，重试=再烧一次全款，对齐 v3 宿主 D4 决策），维持现状
       终态化 error；
     - 链中出现取消（``FlowCancelledException``）→ **不重试**（执行级意图）；
+    - 链中出现具名终态失败（``SuspendNotExecutableError``，plaita#337）→
+      **不重试**——与超时/取消同形：按类型判定的确定性终态（类 docstring
+      契约「worker / 上层按类型判终态不重试」），任何链位直接返回 False，
+      不依赖「NodeExecutionError 在前」才看得到 A50-03 分支；
     - 其余（``ResumeError`` 等协议类、图结构错误、无 ``__cause__`` 的引擎
       管线异常）→ **不重试**，维持现状终态化。
 
-    超时/取消优先于 NodeExecutionError 判定：防御节点函数把超时包进普通
+    超时/取消/SNE 优先于 NodeExecutionError 判定：防御节点函数把超时包进普通
     异常再被 abort 包装的病态链。
     """
     cause = getattr(exc, "__cause__", None)
     depth = 0
     node_failure_seen = False
     while cause is not None and depth < _NODE_RETRY_CHAIN_MAX_DEPTH:
-        if isinstance(cause, (NodeTimeoutError, FlowTimeoutError, FlowCancelledException)):
+        if isinstance(cause, (NodeTimeoutError, FlowTimeoutError,
+                              FlowCancelledException, SuspendNotExecutableError)):
             return False
         if isinstance(cause, NodeExecutionError):
             node_failure_seen = True
@@ -1182,13 +1188,18 @@ def _error_fields(exc: Optional[BaseException]) -> Dict[str, Any]:
 
     取值口径：
 
-    * ``code`` / ``error_type`` **优先取节点级引擎异常**（``NodeExecutionError``
-      / ``NodeTimeoutError``）：分布式路径上 ``run_distributed`` 把一切归一化成
-      ``FlowErrorException``（外部契约 code=-500，见
-      ``docs-site/docs/guide/error-handling.md``），节点身份挂在 ``__cause__``
-      上——只取外壳会把「哪种错误」也一并抹平。链上没有节点级异常时取**最深的**
-      引擎异常（``FlowExecutionException`` 子类；外壳只是归一化容器，语义在
-      ``__cause__``），再退回链首——真正终态化那次异常。
+    * 链上含具名终态失败 ``SuspendNotExecutableError`` 时身份**优先取它**
+      （plaita#337）：其 ``__cause__`` 上的挂起载体只是因果载体不是语义主体，
+      abort 包装（``NodeExecutionError``）也不是——若按「节点级异常优先/最深
+      引擎异常」会分别落成 ``node_error`` / ``flow_error``，稳定字符串
+      ``suspend_not_executable`` 在落盘面丢失，#312 认识论分流失去机判锚。
+    * ``code`` / ``error_type`` 其余情况**优先取节点级引擎异常**
+      （``NodeExecutionError`` / ``NodeTimeoutError``）：分布式路径上
+      ``run_distributed`` 把一切归一化成 ``FlowErrorException``（外部契约
+      code=-500，见 ``docs-site/docs/guide/error-handling.md``），节点身份挂在
+      ``__cause__`` 上——只取外壳会把「哪种错误」也一并抹平。链上没有节点级
+      异常时取**最深的**引擎异常（``FlowExecutionException`` 子类；外壳只是
+      归一化容器，语义在 ``__cause__``），再退回链首——真正终态化那次异常。
     * 链上没有任何 ``error_type`` 时以异常类名兜底：落盘字段必须**永远存在**
       且机器可判别，否则下游又只能回去解析文本。
     * ``details`` / ``response`` 取链上第一份（HTTP 节点把它们挂在链尾的
@@ -1203,7 +1214,10 @@ def _error_fields(exc: Optional[BaseException]) -> Dict[str, Any]:
         return {}
     identity: Optional[BaseException] = next(
         (node for node in chain
-         if isinstance(node, (NodeExecutionError, NodeTimeoutError))), None)
+         if isinstance(node, SuspendNotExecutableError)), None)
+    if identity is None:
+        identity = next((node for node in chain
+                         if isinstance(node, (NodeExecutionError, NodeTimeoutError))), None)
     if identity is None:
         engine = [node for node in chain if isinstance(node, FlowExecutionException)]
         identity = engine[-1] if engine else chain[0]
