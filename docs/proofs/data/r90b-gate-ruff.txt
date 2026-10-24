@@ -1,0 +1,296 @@
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/core/executor.py:644:20
+    |
+642 |             try:
+643 |                 return _run_async_sync(coro)
+644 |             except Exception as e:
+    |                    ^^^^^^^^^
+645 |                 _raise_distributed_error(e, flow, self.callback_manager)
+646 |         finally:
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/node/concurrent.py:349:20
+    |
+347 |             try:
+348 |                 exc = fut.exception()
+349 |             except Exception as e:  # cancelled / executor shutdown
+    |                    ^^^^^^^^^
+350 |                 logger.debug("background future.exception() unavailable: %s", _scrub_exception_text(e))
+351 |                 exc = e
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/node/concurrent.py:419:16
+    |
+417 |             with lock:
+418 |                 results[branch.name] = result
+419 |         except Exception as exc:
+    |                ^^^^^^^^^
+420 |             logger.warning("parallel branch %s raised: %s", branch.name, _scrub_exception_text(exc))
+421 |             with lock:
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/node/concurrent.py:509:24
+    |
+507 |                 try:
+508 |                     await self.exec_branch_async(branch, execution, branch_execution)
+509 |                 except Exception as exc:
+    |                        ^^^^^^^^^
+510 |                     logger.warning("async background branch %r raised: %s", branch.name, _scrub_exception_text(exc))
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/node/concurrent.py:524:24
+    |
+522 |                     result = await self.exec_branch_async(branch, execution)
+523 |                     return branch.name, result
+524 |                 except Exception as exc:
+    |                        ^^^^^^^^^
+525 |                     logger.warning("async parallel branch %s raised: %s", branch.name, _scrub_exception_text(exc))
+526 |                     return branch.name, {
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+   --> plaita/node/http.py:106:12
+    |
+104 |     try:
+105 |         return _JSON_LOADS(text)
+106 |     except Exception:
+    |            ^^^^^^^^^
+107 |         return json.loads(text)  # noqa: TRY300 - 宽松兼容层，失败由调用方处理
+    |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1191:20
+     |
+1189 |             except URLPolicyError as e:
+1190 |                 return HttpResponse(raw_request=request), e
+1191 |             except Exception as e:
+     |                    ^^^^^^^^^
+1192 |                 return HttpResponse(raw_request=request), e
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1204:24
+     |
+1202 |                     # response.text 已完成。
+1203 |                     res = _loads_lenient(data)
+1204 |                 except Exception:
+     |                        ^^^^^^^^^
+1205 |                     # JSON 解析失败时回退到原始文本——预期分支, 不必记日志。
+1206 |                     res = data
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1221:20
+     |
+1219 |                     close()
+1220 |                 return HttpResponse(raw_request=request, raw_response=response), e
+1221 |             except Exception as e:
+     |                    ^^^^^^^^^
+1222 |                 # 传输类读取失败（截断 / 连接重置 / 解码失败）：不带响应快照 →
+1223 |                 # send_request_fail() 成立，与 async 泛化分支同归 1002。
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1348:28
+     |
+1346 |                     try:
+1347 |                         res = _loads_lenient(text)
+1348 |                     except Exception:
+     |                            ^^^^^^^^^
+1349 |                         res = text
+1350 |                     raw_resp = _AiohttpResponseWrapper(
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1362:16
+     |
+1360 |         except URLPolicyError as e:
+1361 |             return HttpResponse(raw_request=raw_request), e
+1362 |         except Exception as e:
+     |                ^^^^^^^^^
+1363 |             return HttpResponse(raw_request=raw_request), e
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1658:16
+     |
+1656 |                 raise self.handle_http_node_err(err, http_rsp)
+1657 |             return self._build_response_result(http_rsp, execution)
+1658 |         except Exception as e:
+     |                ^^^^^^^^^
+1659 |             raise self.handle_http_node_err(e, http_rsp)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1675:16
+     |
+1673 |                 raise self.handle_http_node_err(err, http_rsp)
+1674 |             return self._build_response_result(http_rsp, execution)
+1675 |         except Exception as e:
+     |                ^^^^^^^^^
+1676 |             raise self.handle_http_node_err(e, http_rsp)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1776:16
+     |
+1774 |             body = evaluate(self.body, ctx)
+1775 |             return body
+1776 |         except Exception as e:
+     |                ^^^^^^^^^
+1777 |             raise Exception(f"Failed to parse body: {_scrub_url_text(str(e))}")
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1789:16
+     |
+1787 |                 return query
+1788 |             return None
+1789 |         except Exception as e:
+     |                ^^^^^^^^^
+1790 |             raise Exception(f"Failed to parse query: {_scrub_url_text(str(e))}")
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1808:16
+     |
+1806 |                         headers[key] = value
+1807 |             return headers
+1808 |         except Exception as e:
+     |                ^^^^^^^^^
+1809 |             raise Exception(f"Failed to parse headers: {_scrub_url_text(str(e))}")
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/node/http.py:1816:16
+     |
+1814 |             url_value = evaluate(self.url, ctx)
+1815 |             return str(url_value)
+1816 |         except Exception as e:
+     |                ^^^^^^^^^
+1817 |             raise Exception(f"Failed to parse URL: {_scrub_url_text(str(e))}")
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:2106:16
+     |
+2104 |         try:
+2105 |             return bool(redis_client.exists(self._cancel_flag_key(execution_id)))
+2106 |         except Exception as e:
+     |                ^^^^^^^^^
+2107 |             logger.warning(
+2108 |                 "取消标志检查失败（视为未取消，下个步界重试）: %s: %s", execution_id, _scrub_url_text(e)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:2743:24
+     |
+2741 |                 try:
+2742 |                     self.flow_storage.diagnose_missing_flow(flow_id)
+2743 |                 except Exception as exc:
+     |                        ^^^^^^^^^
+2744 |                     logger.warning("flow_storage.diagnose_missing_flow(%s) failed: %s", flow_id, _scrub_exception_text(exc))
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:2757:16
+     |
+2755 |             logger.info("成功获取流程定义: %s, 数据: %s", flow_id, flow_definition.get('name', 'unknown'))
+2756 |             flow = Flow.model_validate(flow_definition)
+2757 |         except Exception as e:
+     |                ^^^^^^^^^
+2758 |             error_msg = f"解析流程定义失败: {e}"
+2759 |             logger.error(error_msg)
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:3256:20
+     |
+3254 |                 elif callable(flusher):
+3255 |                     flusher()
+3256 |             except Exception as exc:
+     |                    ^^^^^^^^^
+3257 |                 logger.warning("观测回调终态收尾失败: %r: %s", handler, _scrub_exception_text(exc))
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:3271:24
+     |
+3269 |                 try:
+3270 |                     binder(execution)
+3271 |                 except Exception as exc:
+     |                        ^^^^^^^^^
+3272 |                     logger.warning("观测回调 bind_execution 失败: %r: %s", handler, _scrub_exception_text(exc))
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:3622:16
+     |
+3620 |             raise
+3621 |
+3622 |         except Exception as e:
+     |                ^^^^^^^^^
+3623 |             logger.error("执行流程出错: %s", _scrub_exception_text(e))
+3624 |             # 波次③步内取消：start 路径首个节点在途命中取消监听 →
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:7550:24
+     |
+7548 |                     queue.note_poison()
+7549 |                     acked = True
+7550 |                 except Exception as exc:
+     |                        ^^^^^^^^^
+7551 |                     # 兜底重投递路径（at-least-once）：不 ack，等超时回收。
+7552 |                     # 刻意放在 except ValueError 之后——存储层抛出的
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8082:16
+     |
+8080 |         try:
+8081 |             status["queue"] = self._get_task_queue().stats()
+8082 |         except Exception as exc:
+     |                ^^^^^^^^^
+8083 |             status["queue_error"] = str(exc)
+8084 |         return status
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8096:16
+     |
+8094 |         try:
+8095 |             stats = self._get_task_queue().stats()
+8096 |         except Exception as exc:
+     |                ^^^^^^^^^
+8097 |             logger.warning("读取队列 stats 失败（/metrics 仅返回 worker 指标）: %s", _scrub_url_text(exc))
+8098 |             stats = {"stream_key": self.queue_name}
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8494:16
+     |
+8492 |             register()
+8493 |             logger.info("已加载外部节点模块: %s", mod_path)
+8494 |         except Exception as e:
+     |                ^^^^^^^^^
+8495 |             logger.error("外部节点模块加载失败 %s: %s", mod_path, _scrub_exception_text(e))
+8496 |             raise SystemExit(f"外部节点模块加载失败: {mod_path}")
+     |
+
+BLE001 Do not catch blind exception: `Exception`
+    --> plaita/server/flow_worker.py:8595:12
+     |
+8593 |         worker.run()
+8594 |
+8595 |     except Exception as e:
+     |            ^^^^^^^^^
+8596 |         logger.error("流程工作器启动失败: %s", _scrub_url_text(e))
+8597 |         sys.exit(1)
+     |
+
+Found 28 errors.
