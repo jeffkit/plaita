@@ -169,7 +169,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_DISABLE_FENCING` | 裸 `RedisExecutionStorage` + `SET NX` 租约，fence 世代失效 | 每次存储操作/worker 启动 |
 | `PLAITA_DISABLE_AFFINITY` | 跳过 repo 路径检查（“领到就跑”） | 每次 claim |
 | `PLAITA_DISABLE_DISPATCH_TARGET` | 忽略消息体 `target_instance_id`，回到抢单 | 每次 claim |
-| `PLAITA_DISABLE_HOLDER_LIVENESS` | 租约冲突分支无条件 ack（含决议载体收紧回滚） | 每次租约冲突 |
+| ~~`PLAITA_DISABLE_HOLDER_LIVENESS`~~ | **已退役（plaita#322）**：注册表存活核算移除后，非决议载体的租约冲突本就无条件 ack（信号盲判据），开关无对象可旁路；设置无效果 | — |
 | `PLAITA_DISABLE_LEASE_WATCHDOG` | 不启动租约续租线程 | worker 启动 |
 | `PLAITA_DISABLE_EVENT_RECONCILE` | EventFilter 不挂载回扫器（Pub/Sub 丢通知兜底消失） | `EventFilter.start()` |
 | `PLAITA_DISABLE_CANCEL_CHECKPOINT` | 不查取消标志键（只在步界生效） | 每次步界 |

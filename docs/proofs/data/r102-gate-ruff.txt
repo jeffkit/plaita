@@ -1,0 +1,9 @@
+== CI hard gate: ruff check plaita tests --select E722
+warning: Invalid `# noqa` directive on tests/unit/test_async_utils.py:88: expected a comma-separated list of codes (e.g., `# noqa: F401, F841`).
+All checks passed!
+ruff-e722-rc=0
+== changed files (default config)
+All checks passed!
+ruff-changed-rc=0
+== BLE001 advisory changed files
+All checks passed!

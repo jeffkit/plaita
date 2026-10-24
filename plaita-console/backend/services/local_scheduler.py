@@ -128,13 +128,20 @@ def _claim_due(store, schedule: Dict[str, Any]) -> bool:
 
 
 def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optional[str]:
-    """触发一次调度：本地档直接进程内执行（不入队），记录触发历史。
+    """触发一次调度：本地档经 engine backend 起跑（C1 阶段 2，不入队），记录
+    触发历史。
+
+    执行驱动自本轮起走 ``engine_backend.start_execution``（复用集群同一个
+    ``FlowWorker`` 状态机，只换 storage——ADR-001「console local = engine
+    backend」）；入口契约（版本校验/异常类型/行建档/返回形）与旧
+    ``local_executor.start_local_execution`` 逐项对齐，等价性由
+    ``tests/console/test_engine_backend_conformance.py`` 双后端套件钉死。
 
     ``cron`` 是调度循环的到点触发：先在 SQLite 上原子推进 ``next_run_at``
     （命中者才启动执行）；``manual`` 不改排班。租户与调度行都在触发前重新
     读取——扫描快照不能越过删除/停用闸（A48-04）。
     """
-    from . import local_executor
+    from . import engine_backend
 
     schedule_id = schedule.get("schedule_id") or ""
 
@@ -159,7 +166,7 @@ def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optiona
         return None
 
     try:
-        info = local_executor.start_local_execution(
+        info = engine_backend.start_execution(
             store, fresh["flow_id"], fresh.get("version"), fresh.get("params") or {},
             tenant_id=fresh.get("tenant_id") or "",
         )

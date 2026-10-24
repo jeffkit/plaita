@@ -624,10 +624,19 @@ class TestRebuildReadModel:
         assert step_saves, "步提交必须有 running 落盘"
         for payload in step_saves:
             assert payload["progress_at"], "步提交刷新 progress_at"
+        # plaita#322 改种：step token 从「键位预留恒 None」升级为铸造的分配
+        # 决定（B1 所有权 v1）；parent_step_id=声明链锚（此处无先前 token →
+        # None）。schema 形状仍由本格钉住：三键齐全、node_id 权威。
+        declarations = [
+            p["next_step"] for p in step_saves if p.get("next_step") is not None
+        ]
         assert any(
-            p["next_step"] == {"node_id": "end", "step_id": None, "parent_step_id": None}
-            for p in step_saves
-        ), "步提交预声明 next_step=flow.next_node（step token 键位留给 #322）"
+            d["node_id"] == "end"
+            and isinstance(d["step_id"], str)
+            and d["step_id"]
+            and d["parent_step_id"] is None
+            for d in declarations
+        ), "步提交预声明 next_step=flow.next_node（step_id 为铸造 token）"
 
     def test_terminal_row_freezes_progress_and_clears_next_step(self):
         worker, storage, _fake = _worker()

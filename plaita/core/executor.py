@@ -39,6 +39,7 @@ from plaita.core.callback import (
 from plaita.core.context import ExecutionContext
 from plaita.core.executor_compat import CompatRunMixin
 from plaita.core.executor_express import ExpressNamespaceMixin
+from plaita.core.executor_ownership import OwnershipMixin
 
 logger = logging.getLogger(__name__)
 from plaita.core.runner import InvalidTimeoutError, NodeRunner
@@ -208,7 +209,7 @@ def _merge_timeout_ms(a_ms, b_ms):
     return min(a_ms, b_ms)
 
 
-class FlowExecution(ExpressNamespaceMixin, CompatRunMixin):
+class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
     """Thin facade composing ExecutionContext, NodeRunner, and strategies.
 
     Nodes receive this instance as the ``execution`` parameter.  State and
@@ -276,6 +277,13 @@ class FlowExecution(ExpressNamespaceMixin, CompatRunMixin):
     @property
     def execution_id(self) -> str:
         return self._ctx.execution_id
+
+    def get_child_execution(self):
+        # 用 child() 不传额外 handler: 子级通过 inherit_handlers 继承父级各一份,
+        # 避免把父级 handler 当"新增 handler"再传一次导致双发。
+        child = FlowExecution(self, callback_manager=self.callback_manager.child())
+        child.mode = self.mode
+        return child
 
     @property
     def event_bus(self):
@@ -384,6 +392,7 @@ class FlowExecution(ExpressNamespaceMixin, CompatRunMixin):
     def setup_flow(self, flow, args: tuple, kwargs: dict) -> None:
         return self._ctx.setup_flow(flow, args, kwargs)
 
+
     # -- sync helpers (used by tests and distributed bootstrap) --
 
     def _process_node(self, flow, node, lazy=False, max_timeout=None):
@@ -393,13 +402,6 @@ class FlowExecution(ExpressNamespaceMixin, CompatRunMixin):
     def _handle_resume_operation(self, flow, resume_type, resume_data=None):
         return _run_async_sync(self._strategies[ExecutionMode.DISTRIBUTED.value]._handle_resume(
             flow, self._ctx, self._runner, self.callback_manager, resume_type, resume_data))
-
-    def get_child_execution(self):
-        # 用 child() 不传额外 handler: 子级通过 inherit_handlers 继承父级各一份,
-        # 避免把父级 handler 当"新增 handler"再传一次导致双发。
-        child = FlowExecution(self, callback_manager=self.callback_manager.child())
-        child.mode = self.mode
-        return child
 
     @staticmethod
     def _parse_timeout(timeout) -> Optional[int]:

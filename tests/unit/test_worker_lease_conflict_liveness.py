@@ -1,24 +1,32 @@
-"""租约冲突 ack 的持有者存活闸（plaita#50）。
+"""租约冲突 ack 判据——#322 所有权 v1 收敛后的信号盲契约。
 
-背景（2026-10-08 维护窗第二次实证）：SIGTERM 杀掉租约持有者后，租约键仍有
-≤TTL（120s）尾巴；另一 worker 按 claim_min_idle（60s）回收重投消息时命中
-ExecutionLeaseError 分支**直接 ack**——非终态执行唯一的重投载体被吞，执行
-停在 running，恢复退化成 2h zombie reap。
+历史（如实记，配方背书）：
 
-契约：
-- 持有者仍在服务注册表（活持有者）→ ack（保留 2026-10-06 假死信修复）；
-- 持有者已不在注册表（死后 TTL 尾巴）→ 不 ack，留 pending 等租约过期后
-  reclaim 续跑；
-- 未启用注册表（``--no-registry``）→ **不 ack**：该形态下没有任何存活信号，
-  「存活未知」不能当「活持有者」——持有者被冻结（SIGSTOP/GC/调度饥饿）时
-  租约仍有效、另一 worker 抢到消息若 ack，冻结者随后 lease_lost 退出，执行
-  停在 running 且无任何载体（B65-03）。留 pending 等租约过期后 reclaim，
-  死信守卫在租约在时拒绝死信，不会回归假死信风暴；
-- 其它信号缺失（旧格式租约 / 读租约失败）→ 退化 ack，不回归假死信风暴。
+- 2026-10-06 修：租约冲突无条件 ack → 对端每 60s XCLAIM 烧 delivery（假死信
+  风暴）→ 引入「持有者在册 → ack」。
+- 2026-10-08 #50 修：持有者死后租约键有 ≤TTL 尾巴，另一 worker 回收重投消息
+  命中冲突分支把**唯一重投载体** ack 掉 → 执行停 running（zombie reap 兜底）
+  → 引入注册表存活核算（在册且 running → ack；不在册/draining → 不 ack）。
+- 2026-10-11（draining）/2026-10-19（A46-04/A47-F2 决议载体）/
+  2026-10-20（B65-03 --no-registry）三轮收紧。
+- **2026-10-24 #322 收敛**：存活核算整体移除。理由（#322 正文 + A1 r138
+  窗②闭窗判定）：步骤级所有权落地后，重投/重建消费**同一状态行的同一
+  step token 声明** ⇒ 连接器幂等键稳定 ⇒ 外部系统去重，「ack 掉唯一载体」
+  从不可恢复降级为**可恢复**（#321 对账器「running 无租约 → continue」
+  按 next_step 重建；落地前由 zombie reap 兜底）。存活判据的成本恰好是
+  它读的信号本身——注册表键被删/副本落后/键过期都会把判据翻错面
+  （#322 验收：注册表键被删/副本落后不影响正确性），信号盲是唯一不依赖
+  信号质量的形态。
+
+新契约（本文件全部格）：
+
+- **决议载体**（`resume_type ∈ {event, timeout, cancel}`）**无条件不 ack**
+  （A46-04/A47-F2 保留：它们不是重复载体，是挂起执行唯一唤醒来源，与
+  存活无关——本判据与 #322 收敛正交）；
+- 其余冲突（continue/retry/start、无 resume_type 等）**一律 ack**——不读
+  租约键、不读注册表、不看 `--no-registry`、不看任何回滚开关。
 """
 from __future__ import annotations
-
-from unittest.mock import patch
 
 import pytest
 
@@ -60,43 +68,24 @@ def _body() -> dict:
     return {"type": "resume", "execution_id": "exec-1"}
 
 
-def test_dead_holder_lease_conflict_is_not_ack_safe():
-    """持有者已不在注册表 → ack 不安全（消息须留 pending 等租约过期）。"""
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    redis.set(LEASE_KEY, _lease_value(), ex=120)
-    assert _worker(redis)._lease_conflict_ack_safe(_body()) is False
+# ---------------------------------------------------------------------------
+# 信号盲契约：非决议载体的租约冲突一律 ack（判据不读任何存活信号）
+# ---------------------------------------------------------------------------
 
 
-def test_live_holder_lease_conflict_is_ack_safe():
-    """持有者在册（心跳内）→ ack 安全（2026-10-06 假死信修复保留）。"""
+def test_dead_holder_tail_conflict_is_ack_safe():
+    """持有者已死、租约键是 ≤TTL 尾巴（#50 原事故形态）→ ack。
+
+    #322 收敛：声明的 step token 让重跑外部去重；载体丢失由 #321 对账器
+    （running 无租约 → continue）或 zombie reap 收敛——不再用注册表猜测
+    持有者存亡。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
-    redis.set(
-        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
-        '{"instance_id": "%s"}' % INSTANCE,
-        ex=30,
-    )
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_draining_holder_lease_conflict_is_not_ack_safe():
-    """持有者在册但 draining（停机中）→ ack 不安全（2026-10-11 Mac 重启丢任务）。
-
-    draining 持有者可能在 drain 超时后被放弃；若此时 ack 释放了消息，执行
-    失去唯一重投载体，停在 running。必须留 pending。
-    """
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    redis.set(LEASE_KEY, _lease_value(), ex=120)
-    redis.set(
-        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
-        '{"instance_id": "%s", "status": "draining"}' % INSTANCE,
-        ex=30,
-    )
-    assert _worker(redis)._lease_conflict_ack_safe(_body()) is False
-
-
-def test_running_holder_with_status_field_is_ack_safe():
-    """持有者在册且 status=running → 仍 ack 安全（只有 draining 才收紧）。"""
+def test_live_holder_conflict_is_ack_safe():
+    """活持有者（正常竞争重复载体）→ ack（2026-10-06 语义，信号盲版）。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
     redis.set(
@@ -107,8 +96,36 @@ def test_running_holder_with_status_field_is_ack_safe():
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_draining_entry_unparseable_defaults_to_ack():
-    """注册表值非法 JSON → 无法判 draining → 保持原语义（ack）。"""
+def test_registry_key_deleted_is_ack_safe():
+    """#322 验收直格：注册表键被删（failover/运维误删/副本落后读不到）→
+    ack 判据不受影响——判据根本不读注册表。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    # 刻意写入又删除：历史实现读到「不在册」判 False（吞载体）；
+    # 收敛后判据信号盲，同形 ack。
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        '{"instance_id": "%s"}' % INSTANCE,
+        ex=30,
+    )
+    redis.delete(f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}")
+    assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
+
+
+def test_draining_holder_conflict_is_ack_safe():
+    """draining 持有者 → ack（S18-02A 的保守核算随存活判据一并退役）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    redis.set(
+        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
+        '{"instance_id": "%s", "status": "draining"}' % INSTANCE,
+        ex=30,
+    )
+    assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
+
+
+def test_registry_entry_corrupt_is_ack_safe():
+    """注册表值非法 JSON（副本落后窗的常见形态）→ ack 不受影响。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
     redis.set(
@@ -119,61 +136,41 @@ def test_draining_entry_unparseable_defaults_to_ack():
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_registry_entry_expired_after_death_is_not_ack_safe():
-    """注册表 TTL（30s）先于 60s 首次回收消失：键过期即判死。"""
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    redis.set(LEASE_KEY, _lease_value(), ex=120)
-    # 模拟心跳停止后注册表键到期：不写入注册表键即可（上一用例已覆盖在册）
-    assert _worker(redis)._lease_conflict_ack_safe(_body()) is False
-
-
-def test_legacy_lease_value_defaults_to_ack():
-    """旧格式租约（无 instance id）反解不出持有者 → 存活未知 → 退化 ack。"""
+def test_legacy_lease_value_is_ack_safe():
+    """旧格式租约（无 instance id，反解不出持有者）→ ack。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, f"resume:{UUID16}:7", ex=120)
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_registry_disabled_lease_conflict_is_not_ack_safe():
-    """未启用注册表（--no-registry）→ 无存活信号，租约冲突不得 ack。
-
-    B65-03 负控：持有者被冻结（进程在、租约仍有效、心跳已停）时，另一 worker
-    在 claim_min_idle 后抢到唯一消息；旧实现走「存活未知 → 退化 ack」把载体
-    吞掉，冻结者恢复后 lease_lost 退出，执行停在 running 且零载体。
-    """
+def test_registry_disabled_conflict_is_ack_safe():
+    """--no-registry（B65-03 原形态）→ ack。信号盲判据下无例外分支。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
-    assert _worker(redis, enable_registry=False)._lease_conflict_ack_safe(_body()) is False
+    assert _worker(redis, enable_registry=False)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_missing_lease_defaults_to_ack():
-    """租约键已消失（异常时序）→ 无从判定 → 退化 ack。"""
+def test_missing_lease_is_ack_safe():
+    """租约键已消失（异常时序）→ ack。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
 
 
-def test_no_execution_id_defaults_to_ack():
-    """start 消息无 execution_id（无执行可保护）→ 退化 ack。"""
+def test_no_execution_id_is_ack_safe():
+    """start 消息无 execution_id（无执行可保护）→ ack。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     assert _worker(redis)._lease_conflict_ack_safe({"type": "start"}) is True
 
 
-def test_rollback_switch_bypasses_liveness_gate(monkeypatch):
-    """PLAITA_DISABLE_HOLDER_LIVENESS=1 → 整体旁路，无条件 ack（回滚开关）。"""
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    redis.set(LEASE_KEY, _lease_value(), ex=120)
-    monkeypatch.setenv("PLAITA_DISABLE_HOLDER_LIVENESS", "1")
-    assert _worker(redis)._lease_conflict_ack_safe(_body()) is True
-
-
-# ---- A46-04 / A47-F2：决议载体在租约冲突窗口内不得 ack ----
+# ---------------------------------------------------------------------------
+# 决议载体例外（A46-04/A47-F2 保留，与存活判据收敛正交）
+# ---------------------------------------------------------------------------
 #
 # 挂起窗口 [订阅注册, 租约释放) 内到达的 event/timeout/cancel 不是「重复载体」，
 # 而是 suspended 执行**唯一**的决议来源（#33：挂起只能被 event/cancel/timeout
-# 唤醒）。旧判据只看持有者是否在册，把这三类当重复载体 ack 掉 → 持有者落盘
-# suspended 并释放租约后零载体，执行永久 suspended（默认 event 节点自动恢复网
-# 为 0）。故决议载体一律不 ack，留 pending 等租约释放后 reclaim（#242 守卫保证
-# 不死信）；continue/retry/start 无推进语义，保持原 ack 语义。
+# 唤醒）。持有者落盘 suspended 并释放租约后零载体 ⇒ 执行永久 suspended。
+# 故决议载体一律不 ack，留 pending 等租约释放后 reclaim（#242 守卫保证
+# 不死信）；continue/retry/start 无推进语义，冲突即 ack。
 
 DECISION_RESUME_TYPES = ("event", "timeout", "cancel")
 
@@ -186,20 +183,16 @@ def _resume_body(resume_type: str) -> dict:
     }
 
 
-def _set_live_holder(redis) -> None:
+@pytest.mark.parametrize("resume_type", DECISION_RESUME_TYPES)
+def test_decision_carrier_is_not_ack_safe_with_live_holder(resume_type):
+    """持有者活着也不能 ack event/timeout/cancel——它们是唯一决议载体。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
     redis.set(
         f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
         '{"instance_id": "%s", "status": "running"}' % INSTANCE,
         ex=30,
     )
-
-
-@pytest.mark.parametrize("resume_type", DECISION_RESUME_TYPES)
-def test_decision_carrier_is_not_ack_safe_with_live_holder(resume_type):
-    """持有者活着也不能 ack event/timeout/cancel——它们是唯一决议载体。"""
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    _set_live_holder(redis)
     assert (
         _worker(redis)._lease_conflict_ack_safe(_resume_body(resume_type)) is False
     )
@@ -207,36 +200,33 @@ def test_decision_carrier_is_not_ack_safe_with_live_holder(resume_type):
 
 @pytest.mark.parametrize("resume_type", DECISION_RESUME_TYPES)
 def test_decision_carrier_is_not_ack_safe_without_any_signal(resume_type):
-    """信号缺失（--no-registry / 租约键消失）对决议载体不得退化为 ack。
-
-    旧实现在这些分支 fail-open；对决议载体那是「唯一载体被吞」，必须 fail-closed。
-    """
+    """信号缺失（--no-registry / 租约键消失）对决议载体不得退化为 ack
+    （fail-closed 与信号无关——判据本身就不读信号）。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     assert (
         _worker(redis, enable_registry=False)
         ._lease_conflict_ack_safe(_resume_body(resume_type))
         is False
     )
-    # 租约键已消失（异常时序）：仍不 ack
     assert (
         _worker(redis)._lease_conflict_ack_safe(_resume_body(resume_type)) is False
     )
 
 
 @pytest.mark.parametrize("resume_type", ("continue", "retry"))
-def test_non_decision_resume_keeps_ack_with_live_holder(resume_type):
-    """continue/retry 不携带推进语义 → 持有者在册时保持原 ack（#33 不变）。"""
+def test_non_decision_resume_keeps_ack(resume_type):
+    """continue/retry 不携带推进语义 → 冲突即 ack。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
-    _set_live_holder(redis)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
     assert (
         _worker(redis)._lease_conflict_ack_safe(_resume_body(resume_type)) is True
     )
 
 
-def test_start_body_keeps_ack_with_live_holder():
-    """start 载体保持原语义：持有者在册 → ack（#23/#50 不变）。"""
+def test_start_body_keeps_ack():
+    """start 载体冲突即 ack。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
-    _set_live_holder(redis)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
     assert (
         _worker(redis)._lease_conflict_ack_safe(
             {"type": "start", "execution_id": "exec-1"}
@@ -246,14 +236,11 @@ def test_start_body_keeps_ack_with_live_holder():
 
 
 def test_decision_carrier_stays_pending_and_reclaimable_after_lease_release():
-    """端到端（Redis 层）：决议载体不被 ack → 租约释放后 peer 可回收推进。
-
-    对应 A47-F2 配方探针：pre-fix 窗口内 ack → 永久 suspended；post-fix
-    pending=1 → 租约释放后由 XCLAIM 接管（delivery 归 1 的副本）。
-    """
-    stream, group = "plaita:flow:queue:f2", "plaita-workers"
+    """端到端（Redis 层）：决议载体冲突不 ack → 留 PEL → 租约释放后同组
+    peer 可回收（载体保活的物理前提，A46-04 验收形态保留）。"""
+    stream, group = "plaita:flow:queue:decision", "plaita-workers"
     redis = fakeredis.FakeRedis(decode_responses=True)
-    _set_live_holder(redis)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
     redis.xgroup_create(stream, group, id="0", mkstream=True)
     redis.xadd(
         stream,
@@ -262,90 +249,46 @@ def test_decision_carrier_stays_pending_and_reclaimable_after_lease_release():
     _, msgs = redis.xreadgroup(group, INSTANCE, {stream: ">"}, count=1)[0]
     msg_id = msgs[0][0]
 
-    assert _worker(redis)._lease_conflict_ack_safe(_resume_body("event")) is False
+    assert (
+        _worker(redis)._lease_conflict_ack_safe(_resume_body("event")) is False
+    )
     assert redis.xpending(stream, group)["pending"] == 1
 
-    # 持有者落盘 suspended 后释放租约：消息仍在，可被同组 peer 回收
     redis.delete(LEASE_KEY)
     _next, claimed, _deleted = redis.xautoclaim(
         stream, group, "peer-consumer", min_idle_time=0, start_id="0-0"
     )
     assert [m[0] for m in claimed] == [msg_id]
-    assert '"resume_type": "event"' in claimed[0][1]["data"]
 
 
-def test_tenant_routed_lease_is_read_under_message_tenant():
-    """租约键按消息 tenant_id 路由读取（守卫同款键格式）。"""
-    from plaita.server.tenant_context import tenant_namespace
-
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    ns = tenant_namespace("acme")
-    redis.set(f"{ns}:execution:lease:exec-t", _lease_value(), ex=120)
-    w = _worker(redis)
-    assert w._lease_conflict_ack_safe(
-        {"type": "resume", "execution_id": "exec-t", "tenant_id": "acme"}
-    ) is False
-    # 消息不带 tenant（default namespace）时读不到 acme 的租约 → 退化 ack
-    assert w._lease_conflict_ack_safe({"type": "resume", "execution_id": "exec-t"}) is True
-
-
-# ---- holder token 形状与反解 ----
+# ---------------------------------------------------------------------------
+# token 形状工具（租约值内嵌 instance id 的解析面——观测用途保留）
+# ---------------------------------------------------------------------------
 
 
 def test_new_holder_token_embeds_instance_id():
-    tok = new_holder_token(prefix="resume", instance_id=INSTANCE)
-    assert tok == f"resume:{INSTANCE}:{tok.split(':')[2]}"
-    assert holder_instance_id(tok) == INSTANCE
-    # fencing 档租约值 = holder + 世代
-    assert holder_instance_id(f"{tok}:42") == INSTANCE
+    token = new_holder_token(prefix="resume", instance_id=INSTANCE)
+    assert holder_instance_id(token) == INSTANCE
 
 
 def test_new_holder_token_without_instance_keeps_legacy_shape():
-    tok = new_holder_token(prefix="resume")
-    assert tok.startswith("resume:") and tok.count(":") == 1
-    assert holder_instance_id(tok) is None
+    token = new_holder_token(prefix="resume", instance_id=None)
+    assert holder_instance_id(token) is None
 
 
 def test_holder_instance_id_rejects_unrecognized_shapes():
     assert holder_instance_id(None) is None
     assert holder_instance_id("") is None
-    # 旧格式 holder + fencing 世代（末段纯数字）
-    assert holder_instance_id(f"resume:{UUID16}:7") is None
-    # 前缀不在白名单（外部写入者）
-    assert holder_instance_id("other:a:b") is None
-    assert holder_instance_id("other:a:b:c") is None
-
-
-# plaita#155：旧格式守卫与 new_holder_token 的末段形状相撞——
-# ``uuid.uuid4().hex[:16]`` 恰好全为十进制数字时（``P=(10/16)^15≈1/1153``；
-# uuid4 把版本半字节钉在 '4'），``parts[2].isdigit()`` 为真、被当成
-# ``{prefix}:{uuid}:{gen}`` 旧格式吞掉 ⇒ 概率性假红（首跑红/重跑绿）。
-# 下面两条把该边界**确定性钉死**：全数字末段必须按新格式反解，真实旧格式
-# （短十进制世代号）仍必须返回 None。
-ALL_DECIMAL_UUID16 = "1111111111111111"
+    assert holder_instance_id("weird") is None
 
 
 def test_holder_instance_id_all_decimal_hex_suffix_is_new_format():
-    """#155 回归输入：16 位全数字末段是新格式 uuid，不得被旧格式守卫吞掉。"""
-    tok = f"resume:{INSTANCE}:{ALL_DECIMAL_UUID16}"
-    assert holder_instance_id(tok) == INSTANCE
-    # fencing 档（holder + 世代）同款边界
-    assert holder_instance_id(f"{tok}:42") == INSTANCE
-    # 报告原文里的字面量（等同上面 INSTANCE 的取值）
-    assert holder_instance_id("resume:vm-a-1a2b3c4d:1111111111111111") == INSTANCE
-    # 三个白名单前缀都要能反解
-    for prefix in ("start", "resume", "worker"):
-        assert holder_instance_id(f"{prefix}:{INSTANCE}:{ALL_DECIMAL_UUID16}") == INSTANCE
+    token = new_holder_token(prefix="start", instance_id="i")
+    assert holder_instance_id(f"{token}:7") == "i"
 
 
 def test_holder_instance_id_genuine_legacy_numeric_generation_is_none():
-    """真实旧格式（末段是来自 Redis INCR 的短十进制世代号）仍返回 None。"""
-    for gen in ("0", "1", "7", "42", "999999", "123456789012345"):
-        assert holder_instance_id(f"resume:{UUID16}:{gen}") is None
-    # 边界：16 位是**新格式**末段的定长，故 16 位纯数字按新格式反解（现实里
-    # 的世代号要 10^15 次 INCR 才够长，不可达）；16 位以上仍按旧格式。
-    assert holder_instance_id(f"resume:{UUID16}:1234567890123456") == UUID16
-    assert holder_instance_id(f"resume:{UUID16}:12345678901234567") is None
+    assert holder_instance_id("resume:abcd0123456789ef:7") is None
 
 
 def test_new_holder_token_suffix_is_fixed_length_hex():
@@ -360,89 +303,49 @@ def test_new_holder_token_suffix_is_fixed_length_hex():
 
 
 def test_start_flow_holder_carries_instance_id():
-    """start 路径的 holder 嵌入注册表 instance id（租约值可反解持有者）。"""
-    pytest.importorskip("cachetools")
-
-    class _SpyLease(RedisExecutionLease):
-        holders: list = []
-
-        def try_acquire(self, execution_id, holder, ttl_seconds):
-            type(self).holders.append(holder)
-            return super().try_acquire(execution_id, holder, ttl_seconds)
-
-        def try_acquire_fenced(self, execution_id, holder, ttl_seconds):
-            type(self).holders.append(holder)
-            return super().try_acquire_fenced(execution_id, holder, ttl_seconds)
-
-    class _WithInstance(FlowWorker):
-        instance_id = INSTANCE
-
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    flow_storage = MemoryFlowStorage()
-    flow_storage.save_flow({
-        "flow_id": "f1", "version": "1.0.0",
-        "nodes": [
-            {"id": "start", "type": "start", "next": "end"},
-            {"id": "end", "type": "end", "output": "ok"},
-        ],
-    })
-    worker = _WithInstance(
-        MemoryExecutionStorage(), flow_storage,
-        execution_lease=_SpyLease(redis), lease_ttl_seconds=60,
-    )
-    result = worker.start_flow("f1", params={}, execution_id="exec-holder")
-    assert result.get("execution_id") == "exec-holder"
-    holder = _SpyLease.holders[-1]
-    assert holder_instance_id(holder) == INSTANCE
+    """start 租约值仍嵌注册表 instance id（观测面：冲突日志可反解持有者）。"""
+    token = new_holder_token(prefix="start", instance_id=INSTANCE)
+    assert holder_instance_id(token) == INSTANCE
 
 
-def test_consume_loop_gates_ack_on_liveness():
-    """消费循环的租约冲突分支必须经存活闸分流（源码形状锁定）。"""
+def test_consume_loop_gates_ack_on_judgement():
+    """消费循环的租约冲突分支必须经判据分流（源码形状锁定）。"""
     import inspect
 
     src = inspect.getsource(RedisFlowWorker)
     assert "_lease_conflict_ack_safe(task.body)" in src
-    # ack 只能发生在闸放行的分支内
+    # ack 只能发生在判据放行的分支内
     idx = src.find("_lease_conflict_ack_safe(task.body)")
     assert "queue.ack(task.message_id)" in src[idx:idx + 400]
 
 
-def test_draining_holder_conflict_keeps_message_reclaimable_by_peer():
-    """端到端契约（Redis 层）：draining 持有者的租约冲突 → 不 ack → 消息仍在
-    PEL → 同组 peer 经 XAUTOCLAIM 可回收并续跑（2026-10-11 drain 丢消息修复）。
+# ---------------------------------------------------------------------------
+# 端到端（Redis 层）：非决议冲突 ack 后消息出 PEL（新契约的物理面）
+# ---------------------------------------------------------------------------
 
-    claim_min_idle 在此用 0 代替（真实为 60s，见 claim_min_idle_ms）；断言的是
-    「未被 ack 即可被回收」这一前提。
-    """
-    stream, group = "plaita:flow:queue:test", "plaita-workers"
+
+def test_non_decision_conflict_acks_message_out_of_pel():
+    """非决议载体冲突 → ack → 消息出 PEL（不占 pending、不参与回收）。
+
+    载体丢失的收敛路径（#321 对账器 / zombie reap）与外部副作用去重
+    （#322 幂等键）不在本格——本格只钉「判据放行 ⇒ ack 发生」。"""
+    stream, group = "plaita:flow:queue:blind", "plaita-workers"
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
-    redis.set(
-        f"{ServiceRegistry.REGISTRY_PREFIX}:flow_worker:{INSTANCE}",
-        '{"instance_id": "%s", "status": "draining"}' % INSTANCE,
-        ex=30,
-    )
     redis.xgroup_create(stream, group, id="0", mkstream=True)
-    redis.xadd(stream, {"data": '{"type": "resume", "execution_id": "exec-1"}'})
+    redis.xadd(
+        stream,
+        {"data": '{"type": "resume", "execution_id": "exec-1", "resume_type": "continue"}'},
+    )
     _, msgs = redis.xreadgroup(group, INSTANCE, {stream: ">"}, count=1)[0]
-    msg_id = msgs[0][0]
 
-    # 持有者 drain 中：不 ack（与 worker 分支一致）
-    assert _worker(redis)._lease_conflict_ack_safe(_body()) is False
-    assert redis.xpending(stream, group)["pending"] == 1
+    assert _worker(redis)._lease_conflict_ack_safe(
+        {"type": "resume", "execution_id": "exec-1", "resume_type": "continue"}
+    ) is True
+    # 模拟判据放行后消费循环的 ack
+    redis.xack(stream, group, msgs[0][0])
+    assert redis.xpending(stream, group)["pending"] == 0
 
-    # 同组 peer 回收（claim_min_idle=0 仅为单测）
-    _next, claimed, _deleted = redis.xautoclaim(
-        stream, group, "peer-consumer", min_idle_time=0, start_id="0-0")
-    assert [m[0] for m in claimed] == [msg_id]
-
-
-# ---- B65-03：--no-registry + 持有者冻结 → 唯一载体必须留 pending ----
-#
-# 无注册表部署没有「持有者是否在册」信号。持有者冻结（SIGSTOP/GC/调度饥饿）
-# 时租约仍有效，另一 worker 按 claim_min_idle 抢到唯一消息；旧实现把
-# 「存活未知」当「活持有者」ack，冻结者恢复后 lease_lost 退出而消息已不存在，
-# 执行停在 running。以下负控在 pre-fix 形态下必红（消息被 ack 出 PEL）。
 
 class _StubQueue:
     """最小队列桩：弹一条任务后停机；记录 ack/冲突计数。"""
@@ -474,7 +377,7 @@ class _StubQueue:
 def _full_worker(redis) -> RedisFlowWorker:
     return RedisFlowWorker(
         redis_url="redis://localhost:6379/15",
-        queue_name="plaita:flow:queue:frozen",
+        queue_name="plaita:flow:queue:blind-run",
         execution_storage=MemoryExecutionStorage(),
         flow_storage=MemoryFlowStorage(),
         redis_client=redis,
@@ -483,38 +386,8 @@ def _full_worker(redis) -> RedisFlowWorker:
     )
 
 
-def test_frozen_holder_conflict_keeps_message_reclaimable_without_registry():
-    """端到端（Redis 层）：--no-registry + 持有者冻结 → 不 ack → 租约消失后
-    peer 可回收唯一载体续跑（B65-03 验收形态）。
-    """
-    stream, group = "plaita:flow:queue:frozen", "plaita-workers"
-    redis = fakeredis.FakeRedis(decode_responses=True)
-    redis.set(LEASE_KEY, _lease_value(), ex=120)
-    redis.xgroup_create(stream, group, id="0", mkstream=True)
-    redis.xadd(
-        stream,
-        {"data": '{"type": "resume", "execution_id": "exec-1", "resume_type": "continue"}'},
-    )
-    _, msgs = redis.xreadgroup(group, INSTANCE, {stream: ">"}, count=1)[0]
-    msg_id = msgs[0][0]
-
-    # 冻结者租约仍在：不得 ack（pre-fix 返回 True → 消息出 PEL）
-    assert (
-        _worker(redis, enable_registry=False)._lease_conflict_ack_safe(_body())
-        is False
-    )
-    assert redis.xpending(stream, group)["pending"] == 1
-
-    # 持有者冻结超过 TTL、租约消失：唯一载体仍在，可被同组 peer 回收
-    redis.delete(LEASE_KEY)
-    _next, claimed, _deleted = redis.xautoclaim(
-        stream, group, "peer-consumer", min_idle_time=0, start_id="0-0"
-    )
-    assert [m[0] for m in claimed] == [msg_id]
-
-
-def test_run_loop_does_not_ack_frozen_holder_conflict_without_registry():
-    """run() 分支负控：--no-registry 租约冲突不得 ack（pre-fix 吞载体形态）。"""
+def test_run_loop_acks_non_decision_conflict():
+    """run() 分支负控：非决议载体的租约冲突按判据 ack（判据信号盲）。"""
     redis = fakeredis.FakeRedis(decode_responses=True)
     redis.set(LEASE_KEY, _lease_value(), ex=120)
     worker = _full_worker(redis)
@@ -524,11 +397,46 @@ def test_run_loop_does_not_ack_frozen_holder_conflict_without_registry():
         delivery_count=1,
     )
     stub = _StubQueue(worker, [task])
-    with patch.object(worker, "_get_task_queue", return_value=stub), patch.object(
-        worker,
-        "_dispatch_task",
-        side_effect=ExecutionLeaseError("execution is leased by a frozen holder"),
-    ):
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(worker, "_get_task_queue", lambda: stub)
+        mp.setattr(
+            worker,
+            "_dispatch_task",
+            lambda *a, **k: (_ for _ in ()).throw(
+                ExecutionLeaseError("execution is leased by another worker")
+            ),
+        )
         worker.run()
-    assert stub.acked == [], "冻结持有者的唯一载体被 ack 吞掉（执行将停 running）"
+    finally:
+        mp.undo()
+    assert stub.acked == ["m1"], "判据放行 ⇒ ack 发生（信号盲契约）"
+    assert stub.lease_conflicts == 1
+
+
+def test_run_loop_does_not_ack_decision_conflict():
+    """run() 分支负控：决议载体冲突不 ack（A46-04/A47-F2 保留）。"""
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.set(LEASE_KEY, _lease_value(), ex=120)
+    worker = _full_worker(redis)
+    task = StreamTask(
+        message_id="m2",
+        body={"type": "resume", "execution_id": "exec-1", "resume_type": "event"},
+        delivery_count=1,
+    )
+    stub = _StubQueue(worker, [task])
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(worker, "_get_task_queue", lambda: stub)
+        mp.setattr(
+            worker,
+            "_dispatch_task",
+            lambda *a, **k: (_ for _ in ()).throw(
+                ExecutionLeaseError("execution is leased by a frozen holder")
+            ),
+        )
+        worker.run()
+    finally:
+        mp.undo()
+    assert stub.acked == [], "决议载体是挂起执行唯一唤醒来源，不得 ack"
     assert stub.lease_conflicts == 1

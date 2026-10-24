@@ -338,11 +338,6 @@ class TestClosedGeneration:
         assert _read(redis)["status"] == "draining"
         assert drained_at is not None
 
-    def test_missing_status_keeps_legacy_ack_semantics(self, redis):
-        worker = _skeleton(redis)
-        redis.set(KEY, json.dumps({"instance_id": "w-state"}))
-        assert worker._registry_entry_not_accepting(KEY) is False
-
     def test_flush_failure_is_counted_and_logged(self, redis, monkeypatch, caplog):
         """落盘重试仍失败：不得静默——计数器 +1，ERROR 日志。"""
         monkeypatch.setenv("PLAITA_WORKER_DRAIN_TIMEOUT", "0")
@@ -353,23 +348,3 @@ class TestClosedGeneration:
 
         assert getattr(worker, "_registry_status_flush_failures", 0) == 1
         assert any("立即落盘失败" in rec.getMessage() for rec in caplog.records)
-
-
-class TestAckSafety:
-    """A45-03/A46-04：非 running 持有者不保证收尾，不得 ack。"""
-
-    @pytest.mark.parametrize(
-        "status,expected",
-        [
-            ("running", False),
-            ("draining", True),
-            ("stopping", True),
-            ("stopped", True),
-            ("starting", True),
-            ("mystery", True),
-        ],
-    )
-    def test_only_running_is_ack_safe(self, redis, status, expected):
-        worker = _skeleton(redis)
-        redis.set(KEY, json.dumps({"status": status}))
-        assert worker._registry_entry_not_accepting(KEY) is expected

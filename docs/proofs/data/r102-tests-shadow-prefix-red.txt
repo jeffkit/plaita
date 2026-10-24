@@ -1,0 +1,449 @@
+FFFFFFFFFFFFFFFFF.F.F..                                                  [100%]
+=================================== FAILURES ===================================
+_____ TestSnapshotSchema2.test_per_execution_section_shape_and_membership ______
+
+self = <tests.unit.test_reconciler_shadow.TestSnapshotSchema2 object at 0x1074c5310>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_per_execution_section_sha0')
+
+    def test_per_execution_section_shape_and_membership(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q-msg", "queued")
+        _message(client, "q-msg")
+        _seed(client, "r-none", "running")
+        _seed(client, "done-sub", "completed")
+        _subscription(client, "s-done", "done-sub")
+        _seed(client, "done-clean", "completed")  # 无载体终态：不入段
+    
+        snap = _audit_snapshot(client, tmp_path)
+>       assert snap["schema"] == 2
+E       assert 1 == 2
+
+tests/unit/test_reconciler_shadow.py:219: AssertionError
+___________ TestLostMessage.test_queued_without_message_intent_start ___________
+
+self = <tests.unit.test_reconciler_shadow.TestLostMessage object at 0x10883bd90>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_queued_without_message_in0')
+
+    def test_queued_without_message_intent_start(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q1", "queued")
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_message": 1}
+E       AssertionError: assert {} == {'lost_message': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_message': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:243: AssertionError
+_________ TestLostMessage.test_running_without_message_intent_continue _________
+
+self = <tests.unit.test_reconciler_shadow.TestLostMessage object at 0x10883bed0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_running_without_message_i0')
+
+    def test_running_without_message_intent_continue(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "r1", "running")  # mode 1：ack 后崩溃，在途消息消失
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_message": 1}
+E       AssertionError: assert {} == {'lost_message': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_message': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:258: AssertionError
+___ TestLostMessage.test_suspended_service_without_message_intent_redispatch ___
+
+self = <tests.unit.test_reconciler_shadow.TestLostMessage object at 0x1089555b0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_suspended_service_without0')
+
+    def test_suspended_service_without_message_intent_redispatch(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "svc1", "suspended", pending=_service_pending())
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_message": 1}
+E       AssertionError: assert {} == {'lost_message': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_message': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:269: AssertionError
+_______ TestLostMessage.test_dlq_custody_is_a_carrier_never_lost_message _______
+
+self = <tests.unit.test_reconciler_shadow.TestLostMessage object at 0x108955480>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_dlq_custody_is_a_carrier_0')
+
+    def test_dlq_custody_is_a_carrier_never_lost_message(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "c1", "suspended", pending=_service_pending())
+        _dlq(client, "c1")  # 消息在 DLQ 在押：A2 规范性义务——有载体不补
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+        assert result.diffs == {}
+>       record = _assert_intent(result, "c1", diffs=[], intent="custody_replay", action_class="observe")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_reconciler_shadow.py:282: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+result = ShadowResult(generated_at='2026-10-24T20:00:00+08:00', duration_seconds=1.3167038559913635e-05, snapshot_path='/privat...intents=0, intent_counts={}, mutual={'checked': False, 'reason': 'snapshot_schema'}, check_errors=0, executions_seen=0)
+execution_id = 'c1', diffs = [], intent = 'custody_replay'
+action_class = 'observe'
+
+    def _assert_intent(result, execution_id, *, diffs, intent, action_class):
+        record = _intent(result, execution_id)
+>       assert record is not None, f"{execution_id} 应有意图记录"
+E       AssertionError: c1 应有意图记录
+E       assert None is not None
+
+tests/unit/test_reconciler_shadow.py:197: AssertionError
+_ TestLostSubscription.test_armed_event_wait_without_subscription_intent_rebuild _
+
+self = <tests.unit.test_reconciler_shadow.TestLostSubscription object at 0x10883bb10>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_armed_event_wait_without_0')
+
+    def test_armed_event_wait_without_subscription_intent_rebuild(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "e1", "suspended", pending=_event_pending("s-e1", deadline=_iso(NOW + 86400)))
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_subscription": 1}
+E       AssertionError: assert {} == {'lost_subscription': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_subscription': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:292: AssertionError
+_ TestLostSubscription.test_expired_event_wait_without_subscription_intent_finalize _
+
+self = <tests.unit.test_reconciler_shadow.TestLostSubscription object at 0x10883bc50>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_expired_event_wait_withou0')
+
+    def test_expired_event_wait_without_subscription_intent_finalize(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "e2", "suspended", pending=_event_pending("s-e2", deadline=_iso(NOW - 60)))
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_subscription": 1}
+E       AssertionError: assert {} == {'lost_subscription': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_subscription': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:306: AssertionError
+__ TestLostSubscription.test_legacy_row_effective_pending_derives_event_wait ___
+
+self = <tests.unit.test_reconciler_shadow.TestLostSubscription object at 0x108955350>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_legacy_row_effective_pend0')
+
+    def test_legacy_row_effective_pending_derives_event_wait(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        # #320 老行：无显式 pending，靠 $NODE.<$LAST_NODE>.subscription_id 惰性推导。
+        _seed(
+            client,
+            "legacy",
+            "suspended",
+            context={
+                "$LAST_NODE": "wait",
+                "$NODE": {"wait": {"subscription_id": "s-legacy", "event_type": "evt"}},
+            },
+        )
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_subscription": 1}
+E       AssertionError: assert {} == {'lost_subscription': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_subscription': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:329: AssertionError
+_______ TestLostTimer.test_armed_timer_wait_without_timer_intent_rebuild _______
+
+self = <tests.unit.test_reconciler_shadow.TestLostTimer object at 0x1089d4050>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_armed_timer_wait_without_0')
+
+    def test_armed_timer_wait_without_timer_intent_rebuild(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "t1", "suspended", pending=_timer_pending(due_at=_iso(NOW + 600)))
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_timer": 1}
+E       AssertionError: assert {} == {'lost_timer': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_timer': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:342: AssertionError
+_____ TestLostTimer.test_expired_timer_wait_without_timer_intent_finalize ______
+
+self = <tests.unit.test_reconciler_shadow.TestLostTimer object at 0x1089d4190>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_expired_timer_wait_withou0')
+
+    def test_expired_timer_wait_without_timer_intent_finalize(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "t2", "suspended", pending=_timer_pending(due_at=_iso(NOW - 5)))
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.diffs == {"lost_timer": 1}
+E       AssertionError: assert {} == {'lost_timer': 1}
+E         
+E         Right contains 1 more item:
+E         {'lost_timer': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:354: AssertionError
+____________ TestExtraCarrier.test_terminal_with_carrier_intent_gc _____________
+
+self = <tests.unit.test_reconciler_shadow.TestExtraCarrier object at 0x1089d42d0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_terminal_with_carrier_int0')
+
+    def test_terminal_with_carrier_intent_gc(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "done", "completed")
+        _subscription(client, "s-done", "done")
+    
+        snap = _audit_snapshot(client, tmp_path)
+        assert snap["violations"]["orphan_terminal"] == 1
+        result = _shadow(snap, client, tmp_path)
+>       assert result.diffs == {"extra_carrier": 1}
+E       AssertionError: assert {} == {'extra_carrier': 1}
+E         
+E         Right contains 1 more item:
+E         {'extra_carrier': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:369: AssertionError
+__ TestExtraCarrier.test_expected_carrier_missing_while_other_carrier_present __
+
+self = <tests.unit.test_reconciler_shadow.TestExtraCarrier object at 0x1089d4410>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_expected_carrier_missing_0')
+
+    def test_expected_carrier_missing_while_other_carrier_present(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        # 双视互补：event 等待的订阅丢了，但 stream 里残留一条该执行的消息——
+        # #316 存放处视角判 carrier=pel（非 missing）；shadow 期望视角仍报
+        # lost_subscription（并把残留消息报 extra_carrier）。
+        _seed(client, "mix", "suspended", pending=_event_pending("s-mix", deadline=_iso(NOW + 3600)))
+        _message(client, "mix")
+    
+        snap = _audit_snapshot(client, tmp_path)
+        assert snap["violations"]["missing"] == 0
+        result = _shadow(snap, client, tmp_path)
+>       assert result.diffs == {"lost_subscription": 1, "extra_carrier": 1}
+E       AssertionError: assert {} == {'lost_subscr...a_carrier': 1}
+E         
+E         Right contains 2 more items:
+E         {'extra_carrier': 1, 'lost_subscription': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:389: AssertionError
+___ TestZeroDiffPositive.test_healthy_world_has_no_diffs_and_mutual_all_true ___
+
+self = <tests.unit.test_reconciler_shadow.TestZeroDiffPositive object at 0x1089d4550>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_healthy_world_has_no_diff0')
+
+    def test_healthy_world_has_no_diffs_and_mutual_all_true(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q", "queued")
+        _message(client, "q")
+        _seed(client, "r", "running")
+        _message(client, "r")
+        _seed(client, "e", "suspended", pending=_event_pending("s-e", deadline=_iso(NOW + 3600)))
+        _subscription(client, "s-e", "e")
+        _seed(client, "t", "suspended", pending=_timer_pending(due_at=_iso(NOW + 60)))
+        _timer(client, "t")
+    
+        result = _shadow(_audit_snapshot(client, tmp_path), client, tmp_path)
+>       assert result.sources_failed == []
+E       AssertionError: assert ['snapshot_schema'] == []
+E         
+E         Left contains one more item: 'snapshot_schema'
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:412: AssertionError
+___ TestMutualVerification.test_mixed_world_reproduces_cells_missing_orphan ____
+
+self = <tests.unit.test_reconciler_shadow.TestMutualVerification object at 0x1089d4690>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_mixed_world_reproduces_ce0')
+
+    def test_mixed_world_reproduces_cells_missing_orphan(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q-none", "queued")  # #316 missing #1；shadow lost_message
+        _seed(client, "r-pel", "running")
+        _message(client, "r-pel")
+        _seed(client, "s-sub", "suspended", pending=_event_pending("s1", deadline=_iso(NOW + 3600)))
+        _subscription(client, "s1", "s-sub")
+        _seed(client, "s-orphan", "suspended")  # #316 missing #2；老行 orphan，shadow 不猜 expected
+        _seed(client, "done", "completed")
+        _subscription(client, "s2", "done")  # orphan_terminal
+        _seed(client, "bad", "running")
+        client.set(f"{NS_DEFAULT}:execution:bad", "{not json")  # 损坏行 → unknown cell
+        _seed(client, "acme-q", "queued", tenant="acme")  # 第二租户：cells 分租户重放
+    
+        snap = _audit_snapshot(client, tmp_path, tenants="default,acme")
+        assert snap["violations"] == {
+            "missing": 3,
+            "duplicate": 0,
+            "orphan_terminal": 1,
+            "unbound_subscription": 0,
+        }
+        assert snap["check_errors"] == 1
+    
+        result = _shadow(snap, client, tmp_path)
+>       assert result.mutual["checked"] is True
+E       assert False is True
+
+tests/unit/test_reconciler_shadow.py:456: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.scripts.carrier_audit:carrier_audit.py:344 carrier_audit 单条不可读 状态行 plaita/execution/bad: Traceback (most recent call last):
+  File "/private/tmp/plaita-b3-r102/scripts/carrier_audit.py", line 390, in _scan_tenant
+    data = json.loads(raw)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py", line 361, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+__________ TestMutualVerification.test_mutual_flags_tampered_snapshot __________
+
+self = <tests.unit.test_reconciler_shadow.TestMutualVerification object at 0x1089d47d0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_mutual_flags_tampered_sna0')
+
+    def test_mutual_flags_tampered_snapshot(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q", "queued")
+        snap = _audit_snapshot(client, tmp_path)
+        # 人为撕裂快照两视（模拟分类器分叉）：cells 说 none=2，段里只有 1 条。
+        for cell in snap["cells"]:
+            if cell["carrier"] == "none":
+                cell["count"] = 2
+        mutual = shadow.mutual_verify(snap)
+        assert mutual["cells_reproduced"] is False
+        assert mutual["mismatch_count"] == 1
+>       assert mutual["mismatches"] == ["cells[default/queued/none] snapshot=2 shadow=1"]
+E       AssertionError: assert ['cells[defau...t=2 shadow=0'] == ['cells[defau...t=2 shadow=1']
+E         
+E         At index 0 diff: 'cells[default/queued/none] snapshot=2 shadow=0' != 'cells[default/queued/none] snapshot=2 shadow=1'
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:480: AssertionError
+____________ TestDegraded.test_schema1_snapshot_is_a_failed_source _____________
+
+self = <tests.unit.test_reconciler_shadow.TestDegraded object at 0x1089d4910>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_schema1_snapshot_is_a_fai0')
+
+    def test_schema1_snapshot_is_a_failed_source(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q", "queued")
+        snap = _audit_snapshot(client, tmp_path)
+>       snap.pop("executions")
+E       KeyError: 'executions'
+
+tests/unit/test_reconciler_shadow.py:488: KeyError
+____________ TestDegraded.test_stale_snapshot_suppresses_loss_diffs ____________
+
+self = <tests.unit.test_reconciler_shadow.TestDegraded object at 0x1089d4a50>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_stale_snapshot_suppresses0')
+
+    def test_stale_snapshot_suppresses_loss_diffs(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q", "queued")
+        stale = _audit_snapshot(client, tmp_path, now=NOW - 3600)
+    
+        result = _shadow(stale, client, tmp_path)
+>       assert result.sources_failed == ["snapshot_stale"]
+E       AssertionError: assert ['snapshot_sc...apshot_stale'] == ['snapshot_stale']
+E         
+E         At index 0 diff: 'snapshot_schema' != 'snapshot_stale'
+E         Left contains one more item: 'snapshot_stale'
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:503: AssertionError
+_________ TestReadOnlyAndRender.test_shadow_round_writes_no_redis_keys _________
+
+self = <tests.unit.test_reconciler_shadow.TestReadOnlyAndRender object at 0x1089d4b90>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_shadow_round_writes_no_re0')
+
+    def test_shadow_round_writes_no_redis_keys(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "q", "queued")
+        _seed(client, "e", "suspended", pending=_event_pending("s-e", deadline=_iso(NOW - 1)))
+        _seed(client, "done", "completed")
+        _message(client, "done")
+        snap = _audit_snapshot(client, tmp_path)
+        before = {k: client.dump(k) for k in sorted(client.keys("*"))}
+    
+        result = _shadow(snap, client, tmp_path)
+>       assert result.diffs == {"lost_message": 1, "lost_subscription": 1, "extra_carrier": 1}
+E       AssertionError: assert {} == {'lost_messag...a_carrier': 1}
+E         
+E         Right contains 3 more items:
+E         {'extra_carrier': 1, 'lost_message': 1, 'lost_subscription': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:530: AssertionError
+_ TestReadOnlyAndRender.test_flush_writes_report_and_prom_with_explicit_zero_cells _
+
+self = <tests.unit.test_reconciler_shadow.TestReadOnlyAndRender object at 0x108955810>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1271/test_flush_writes_report_and_p0')
+
+    def test_flush_writes_report_and_prom_with_explicit_zero_cells(self, tmp_path):
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        _seed(client, "done", "completed")
+        _subscription(client, "s-done", "done")
+        config = _shadow_config(tmp_path)
+        result = shadow.shadow_round(
+            _audit_snapshot(client, tmp_path), carrier_audit.ReadOnlyRedis(client), config, now=NOW
+        )
+        shadow.flush(result, config)
+    
+        report = json.loads((config.output_dir / "reconciler_shadow_report.json").read_text())
+        assert report["schema"] == 1
+>       assert report["diffs"] == {
+            "lost_message": 0,
+            "lost_subscription": 0,
+            "lost_timer": 0,
+            "extra_carrier": 1,
+        }
+E       AssertionError: assert {'lost_messag...a_carrier': 0} == {'lost_messag...a_carrier': 1}
+E         
+E         Omitting 3 identical items, use -vv to show
+E         Differing items:
+E         {'extra_carrier': 0} != {'extra_carrier': 1}
+E         Use -v to get more diff
+
+tests/unit/test_reconciler_shadow.py:551: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_reconciler_shadow.py::TestSnapshotSchema2::test_per_execution_section_shape_and_membership
+FAILED tests/unit/test_reconciler_shadow.py::TestLostMessage::test_queued_without_message_intent_start
+FAILED tests/unit/test_reconciler_shadow.py::TestLostMessage::test_running_without_message_intent_continue
+FAILED tests/unit/test_reconciler_shadow.py::TestLostMessage::test_suspended_service_without_message_intent_redispatch
+FAILED tests/unit/test_reconciler_shadow.py::TestLostMessage::test_dlq_custody_is_a_carrier_never_lost_message
+FAILED tests/unit/test_reconciler_shadow.py::TestLostSubscription::test_armed_event_wait_without_subscription_intent_rebuild
+FAILED tests/unit/test_reconciler_shadow.py::TestLostSubscription::test_expired_event_wait_without_subscription_intent_finalize
+FAILED tests/unit/test_reconciler_shadow.py::TestLostSubscription::test_legacy_row_effective_pending_derives_event_wait
+FAILED tests/unit/test_reconciler_shadow.py::TestLostTimer::test_armed_timer_wait_without_timer_intent_rebuild
+FAILED tests/unit/test_reconciler_shadow.py::TestLostTimer::test_expired_timer_wait_without_timer_intent_finalize
+FAILED tests/unit/test_reconciler_shadow.py::TestExtraCarrier::test_terminal_with_carrier_intent_gc
+FAILED tests/unit/test_reconciler_shadow.py::TestExtraCarrier::test_expected_carrier_missing_while_other_carrier_present
+FAILED tests/unit/test_reconciler_shadow.py::TestZeroDiffPositive::test_healthy_world_has_no_diffs_and_mutual_all_true
+FAILED tests/unit/test_reconciler_shadow.py::TestMutualVerification::test_mixed_world_reproduces_cells_missing_orphan
+FAILED tests/unit/test_reconciler_shadow.py::TestMutualVerification::test_mutual_flags_tampered_snapshot
+FAILED tests/unit/test_reconciler_shadow.py::TestDegraded::test_schema1_snapshot_is_a_failed_source
+FAILED tests/unit/test_reconciler_shadow.py::TestDegraded::test_stale_snapshot_suppresses_loss_diffs
+FAILED tests/unit/test_reconciler_shadow.py::TestReadOnlyAndRender::test_shadow_round_writes_no_redis_keys
+FAILED tests/unit/test_reconciler_shadow.py::TestReadOnlyAndRender::test_flush_writes_report_and_prom_with_explicit_zero_cells
+19 failed, 4 passed in 0.47s

@@ -18,6 +18,7 @@ from plaita.core.parallel_executor import (
 from plaita.node import Node
 from plaita.node.decide import Branch
 from plaita.core.errors import FlowSuspendRejectedError
+from plaita.core.ownership import bind_child_step
 from plaita.core.state import _snapshot_value
 from plaita.core.strategies import ExecutionMode, flow_contains_suspending_node
 from plaita.tenant_context import mark_tenant_derived
@@ -189,6 +190,7 @@ class Parallel(Node):
         """
         if branch_execution is None:
             branch_execution = execution.get_child_execution()
+            bind_child_step(execution, branch_execution, getattr(pb, "name", None))
         lazy = execution.mode == ExecutionMode.GENERATOR
         input_value = self._resolve_branch_input(pb, execution)
         rs = branch_execution.run_compatible(pb.flow, lazy, input_value)
@@ -321,6 +323,7 @@ class Parallel(Node):
             # ``$PARENT`` 快照。后台分支不阻塞父流程，若留到分支线程里创建
             # （首读更晚），分支读到的会是父在提交之后写入的"未来态"。
             branch_execution = execution.get_child_execution()
+            bind_child_step(execution, branch_execution, getattr(branch, "name", None))
             fut = executor.submit(self.exec_branch, branch, execution, branch_execution)
             state["futures"].append(fut)
             fut.add_done_callback(
@@ -481,6 +484,7 @@ class Parallel(Node):
         """
         if branch_execution is None:
             branch_execution = execution.get_child_execution()
+            bind_child_step(execution, branch_execution, getattr(pb, "name", None))
         input_value = self._resolve_branch_input(pb, execution)
         rs = await branch_execution.arun_compatible(pb.flow, False, input_value)
         logger.debug("async branch %s executed: %s", pb.name, rs)
@@ -509,6 +513,7 @@ class Parallel(Node):
                 # plaita#72：与 sync 侧同因——后台分支不阻塞父协程，子执行必须
                 # 在调度前创建（创建即钉住 $PARENT 快照），不能留给任务首读。
                 branch_execution = execution.get_child_execution()
+                bind_child_step(execution, branch_execution, getattr(branch, "name", None))
                 asyncio.ensure_future(_bg(branch, branch_execution))
 
             # join branches: truly concurrent via gather

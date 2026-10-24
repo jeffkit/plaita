@@ -348,21 +348,18 @@ def _run_consume_until_settled(
     return queue
 
 
-@pytest.mark.parametrize("rollback", [False, True], ids=["gate-on", "rollback"])
 @pytest.mark.parametrize("concurrency", [1, 2], ids=["c1", "c2"])
 @pytest.mark.parametrize("resume_type", DECISION_TYPES)
 def test_decision_carrier_lease_conflict(
-    resume_type, concurrency, rollback, monkeypatch
+    resume_type, concurrency, monkeypatch
 ):
-    """决议载体在租约冲突窗口内不 ack；回滚开关复现旧行为（ack）。
+    """决议载体在租约冲突窗口内不 ack（A46-04/A47-F2；#322 收敛后保留）。
 
-    S18-04 要求：event/timeout/cancel × concurrency>1 × 回滚开关参数化。
-    外部事件 ``monkeypatch.setenv`` 必须在 worker 构造**之前**生效（判定函数
-    每次调用读取环境）。
+    S18-04 要求：event/timeout/cancel × concurrency>1 参数化。
+    plaita#322 改种：PLAITA_DISABLE_HOLDER_LIVENESS 回滚开关随存活核算一并
+    退役（其旁路语义 = 非决议载体的现默认），决议载体的不-ack 判据与信号
+    无关，原「rollback 复现旧行为」臂随之退役。
     """
-    if rollback:
-        monkeypatch.setenv("PLAITA_DISABLE_HOLDER_LIVENESS", "1")
-
     redis = fakeredis.FakeRedis(decode_responses=True)
     worker = _worker(redis, concurrency=concurrency, claim_min_idle_ms=60_000)
     # 只打开判定闸，避免 init_registry 的注册/心跳写入；本用例只读注册键。
@@ -387,16 +384,11 @@ def test_decision_carrier_lease_conflict(
 
     worker._dispatch_task = _lease_boom  # type: ignore[assignment]
 
-    want_pending = 0 if rollback else 1
     queue = _run_consume_until_settled(
-        worker, concurrency, want_pending, dispatched
+        worker, concurrency, 1, dispatched
     )
 
     pending = redis.xpending(STREAM, queue.group_name)["pending"]
-    if rollback:
-        assert pending == 0, "回滚开关打开 → 旧行为 ack 释放（回滚演练）"
-        return
-
     assert pending == 1, "决议载体不得 ack"
     # 可恢复：持有者释放租约后，peer 以 claim_min_idle=0 回收并推进。
     redis.delete(LEASE_KEY)

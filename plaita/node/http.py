@@ -54,6 +54,11 @@ from plaita.core.http_session import (
     get_flow_session,
     get_shared_sync_session,
 )
+from plaita.core.ownership import (
+    IDEMPOTENCY_HEADER,
+    SAFE_HTTP_METHODS as _SAFE_HTTP_METHODS,
+    connector_idempotency_key,
+)
 from plaita.io import evaluate
 
 try:
@@ -1675,6 +1680,7 @@ class HTTP(Node):
         try:
             parsed_url = self.parse_url(ctx)
             headers = self.parse_header(ctx)
+            self._attach_idempotency_key(headers, ctx)
             query = self.parse_query(ctx)
             body = self.parse_body(ctx)
             addressing_param = self.parse_addressing(ctx)
@@ -1697,6 +1703,24 @@ class HTTP(Node):
         except Exception as e:
             raise e
     
+    def _attach_idempotency_key(self, headers: Dict[str, str], ctx) -> None:
+        """副作用收据（plaita#322）：非安全方法自动带 ``Idempotency-Key``。
+
+        键 = ``f"{idempotency_key}:{self.id}"``——步段（execution 级）+
+        节点段（同一声明内多个外呼调用互不串键）。语义安全的 method
+        （GET/HEAD/OPTIONS/TRACE）不产生需去重的新副作用，**不带**收据；
+        用户显式给的 ``Idempotency-Key``（任意大小写）**不覆盖**；执行对象
+        无 step 声明（tokenless）或键读取失败一律不带头——「无声明即无
+        所有权主张」，绝不编造。所有退化路径都不抛（收据面不得打断节点）。
+        """
+        if self.method in _SAFE_HTTP_METHODS:
+            return
+        if any(str(k).lower() == "idempotency-key" for k in headers):
+            return
+        key = connector_idempotency_key(ctx, self.id)
+        if key:
+            headers[IDEMPOTENCY_HEADER] = key
+
     def parse_delegate(self, ctx):
         """解析代理参数"""
         if not self.delegate:

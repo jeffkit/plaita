@@ -23,6 +23,7 @@ from plaita.core.expression_parser import (
     freshness_scope,
     note_fresh_closure,
 )
+from plaita.core.ownership import bind_child_step
 from plaita.core.state import _LazyRootSnapshot, _snapshot_value
 
 _logger = logging.getLogger(__name__)
@@ -268,6 +269,7 @@ class Loop(BaseCollectionNode):
         index = 0
         for item in collection:
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             last_result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             if self.condition:
                 # plaita#69 r6：条件求值是**一次**逻辑求值——隔离副本的物化
@@ -291,6 +293,7 @@ class Loop(BaseCollectionNode):
         index = 0
         for item in collection:
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             last_result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
             if self.condition:
                 # r6：同 sync 路径——物化副本与条件 match 同属一次逻辑求值。
@@ -369,6 +372,7 @@ class Map(BaseCollectionNode):
 
         def run_one(triple: tuple) -> Any:
             child, item, index = triple
+            bind_child_step(execution, child, index)
             return child.run_compatible(self.child_flow, False, item=item, index=index)
 
         executor = self._build_executor()
@@ -383,6 +387,7 @@ class Map(BaseCollectionNode):
         ]
 
         async def run_one_async(child, item, index):
+            bind_child_step(execution, child, index)
             return await child.arun_compatible(self.child_flow, False, item=item, index=index)
 
         if self.concurrent:
@@ -417,6 +422,7 @@ class Filter(BaseCollectionNode):
         results = []
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             if result:
                 results.append(item)
@@ -427,6 +433,7 @@ class Filter(BaseCollectionNode):
         results = []
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
             if result:
                 results.append(item)
@@ -449,6 +456,7 @@ class Find(BaseCollectionNode):
         collection = self._eval_collection(execution)
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             result = item_execution.run_compatible(self.child_flow, False, item=item, index=index)
             if result:
                 return item
@@ -458,6 +466,7 @@ class Find(BaseCollectionNode):
         collection = self._eval_collection(execution)
         for index, item in enumerate(collection):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             result = await item_execution.arun_compatible(self.child_flow, False, item=item, index=index)
             if result:
                 return item
@@ -499,8 +508,9 @@ class Reduce(BaseCollectionNode):
         result = self._eval_initial(execution) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
         array_input = self._child_is_array_input()
-        for item in items:
+        for index, item in enumerate(items):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             if array_input:
                 # @flow DSL 编译时选择 array 输入，$INPUT[0]=first, $INPUT[1]=second
                 result = item_execution.run_compatible(self.child_flow, False, [result, item])
@@ -516,8 +526,9 @@ class Reduce(BaseCollectionNode):
         result = self._eval_initial(execution) if self.initial is not None else collection[0]
         items = collection[1:] if self.initial is None else collection
         array_input = self._child_is_array_input()
-        for item in items:
+        for index, item in enumerate(items):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             if array_input:
                 result = await item_execution.arun_compatible(self.child_flow, False, [result, item])
             else:
@@ -590,6 +601,7 @@ class While(InlineFlow):
         stopped_by_limit = False
         while index < self.max_iterations and self._should_continue(execution, index, result):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             result = item_execution.run_compatible(self.child_flow, False, item=result, index=index)
             index += 1
             stopped_by_limit = index >= self.max_iterations
@@ -605,6 +617,7 @@ class While(InlineFlow):
         stopped_by_limit = False
         while index < self.max_iterations and self._should_continue(execution, index, result):
             item_execution = execution.get_child_execution()
+            bind_child_step(execution, item_execution, index)
             result = await item_execution.arun_compatible(self.child_flow, False, item=result, index=index)
             index += 1
             stopped_by_limit = index >= self.max_iterations

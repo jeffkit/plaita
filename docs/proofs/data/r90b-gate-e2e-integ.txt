@@ -1,0 +1,33 @@
+........................................................................ [ 24%]
+........................................................................ [ 49%]
+........................................................................ [ 74%]
+..............s..s..s................................................... [ 99%]
+..                                                                       [100%]
+=============================== warnings summary ===============================
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[executor.py-FlowExecution]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: FlowExecution is 368 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[context.py-ExecutionContext]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: ExecutionContext is 373 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[runner.py-NodeRunner]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: NodeRunner is 333 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[strategies.py-DistributedStrategy]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: DistributedStrategy is 293 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_wheel_contents.py::TestWheelContents::test_no_test_files_in_wheel
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/_pytest/fixtures.py:1313: PytestRemovedIn10Warning: Class-scoped fixture defined as instance method is deprecated.
+  Instance attributes set in this fixture will NOT be visible to test methods,
+  as each test gets a new instance while the fixture runs only once per class.
+  Use @classmethod decorator and set attributes on cls instead.
+  See https://docs.pytest.org/en/stable/deprecations.html#class-scoped-fixture-as-instance-method
+    fixturefunc = resolve_fixture_function(fixturedef, request)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+287 passed, 4 skipped, 5 warnings in 35.57s
+rc=0
