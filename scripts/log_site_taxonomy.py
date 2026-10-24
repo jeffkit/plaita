@@ -197,6 +197,29 @@ B_RULES = [
      r"|\bcheckout\b|\broot\b|\bparent\b|\bpath\b|\bfuture\b|\bhandler\b|\bowner\b"
      r"|event_bus\b",
      "基础设施标量/文件系统路径/对象句柄"),
+    # --- plaita#332 裁定轮新增判据（B2 r98）：只追加在列表末尾，不前插——
+    # 保证既有行首匹配 tuple 不变（零扰动），新判据只兜原本未匹配的表达式。---
+    (r"exc_name|\betype\b|code_suffix",
+     "异常投影标量（异常类名/结构化错误码投影——#151 卫生注释祝福的先落局部"
+     "再进 logger 模式，非异常文本）"),
+    (r"generation",
+     "fencing 代数计数（租户世代/fence 标量）"),
+    (r"removed|trimmed|examined|pruned|\berrors\b|\bcleaned\b|\bskipped\b"
+     r"|dropped_\w+|unattributed|orphans|\bdefers\b|\brounds\b|full_current"
+     r"|full_cap|quota_current|\bdesired\b|platform_n|quarantine_n|platform_total"
+     r"|quarantine_streams|\bbatch_size\b|\blength\b",
+     "计数/集合规模（清收/裁剪/纠偏/配额水位计量）"),
+    (r"_reason\b|\bviolation\b|target_status|key_type|\bsurface\b|\blanguage\b"
+     r"|\bpolicy\b|message_type|\ballowed\b|\benv\b",
+     "状态/枚举/组件选择器/引擎具名原因/环境变量名（名字非值）"),
+    (r"_ok\b",
+     "布尔判定（步骤成败旗标）"),
+    (r"\bage\b|due_at|default_timestamp|deleted_at|\bparked_at\b|\bcursor\b",
+     "耗时/时间戳/游标推进元数据"),
+    (r"\bcap\b",
+     "上限/配额容量"),
+    (r"\bkey_file\b|\bmode\b",
+     "基础设施标量（凭据密钥文件路径/权限位）"),
 ]
 
 # ---------------------------------------------------------------------------
