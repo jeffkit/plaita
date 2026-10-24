@@ -1,0 +1,5 @@
+# r98 零扰动对账（origin/main 规则 vs 本轮新规则，同树逐表达式分类，B2 第九十八轮）
+# 方法：对全仓插值表达式分别用 origin/main 版与本轮版 classify_expr 判类；
+# main 可判定的表达式两者类别必须逐一相同（新判据只追加在列表末尾，不前插）。
+RESULT: main-rules classified=1750 newly-covered=167 MISMATCH=0
+VERDICT: ZERO-PERTURBATION PASS

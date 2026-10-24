@@ -61,6 +61,86 @@ OVERRIDES: dict[tuple[str, str], tuple[str, str]] = {
     ("plaita/core/_error_normalization.py:114", "presented.to_dict()"): (
         "A", "SuspendNotExecutableError 结构化错误体：node_id/flow_id/frame_path"
              "（流程实体标识）+ fix（引擎构造文案），无异常文本/凭据/env 投影"),
+    # --- plaita#332 裁定轮（B2 r98，154 条背账第一批；逐条实读代码上下文）---
+    # asyncio Task 句柄（沿 redis.py:2869/2883/2943 既有先例同 rationale）：
+    ("plaita/event/memory.py:379", "task"): (
+        "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
+    ("plaita/event/redis.py:3803", "task"): (
+        "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
+    ("plaita/event/redis.py:3817", "task"): (
+        "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
+    ("plaita/event/redis.py:3877", "task"): (
+        "B", "asyncio Task 句柄 repr（引擎对象句柄，非队列载荷）"),
+    # 内联常量名占位（实参位置是名字标签，非数据）：
+    ("plaita/redis_client.py:69", "\"显式超时参数\""): (
+        "B", "调用点内联常量名占位（_resolve_timeout 参数名标签，非数据）"),
+    # _scrub_url_text(e) 产物经局部变量中转：语义等同 C 规则 2「清洗 helper
+    # 的产物」，保持构造面已掩约束（赋值点 detail = _scrub_url_text(e)）：
+    ("plaita/server/flow_worker.py:770", "detail"): (
+        "C", "异常文本取出/清洗 helper 的产物（detail=_scrub_url_text(e) 赋值"
+             "中转）：保持构造面已掩约束"),
+    ("plaita/server/flow_worker.py:793", "detail"): (
+        "C", "异常文本取出/清洗 helper 的产物（detail=_scrub_url_text(e) 赋值"
+             "中转）：保持构造面已掩约束"),
+    ("plaita/server/flow_worker.py:793", "str(_code_subprocess_fallback_allowed()).lower()"): (
+        "B", "降级开关布尔判定字符串投影（\"true\"/\"false\"，引擎配置旗标）"),
+    ("plaita/server/flow_worker.py:2474", "message"): (
+        "B", "引擎构造错误文案（f-string 拼自 flow_id/version 流程实体标识，"
+             "非异常对象文本）"),
+    ("plaita/server/flow_worker.py:3463", "\"有\" if existing_state.context else \"空\""): (
+        "B", "checkpoint 存在性布尔判定的具名投影（有/空，无载荷内容）"),
+    ("plaita/server/flow_worker.py:3919", "\"（已补派未投递的挂起服务任务）\" if compensated else \"\""): (
+        "B", "补派发生与否布尔判定的具名投影（引擎构造固定文案）"),
+    # source = 引擎构造的调用路径标签（f"resume:{resume_type}" 等）：
+    ("plaita/server/flow_worker.py:5110", "source"): (
+        "B", "调用方来源路径标签（引擎构造，如 resume:{resume_type}）"),
+    ("plaita/server/flow_worker.py:5162", "source"): (
+        "B", "调用方来源路径标签（引擎构造，如 resume:{resume_type}）"),
+    ("plaita/server/flow_worker.py:5190", "source"): (
+        "B", "调用方来源路径标签（引擎构造，如 resume:{resume_type}）"),
+    ("plaita/server/flow_worker.py:5201", "source"): (
+        "B", "调用方来源路径标签（引擎构造，如 resume:{resume_type}）"),
+    # note = report_progress 进度文案（plaita#322：仅内置连接器可调，code 节点
+    # 无此面 ⇒ 作者数据不可达，引擎/内置节点构造）：
+    ("plaita/server/flow_worker.py:5074", "note"): (
+        "B", "report_progress 进度文案（内置连接器引擎构造；NodeContext 明文"
+             "不给 code 节点，作者数据不可达）"),
+    # 配置预检警告项（preflight 引擎构造的降级文案，B2R31-03 补打面）：
+    ("plaita/server/flow_worker.py:8573", "warning"): (
+        "B", "配置预检警告项（preflight 引擎构造的配置降级文案）"),
+    ("plaita/server/services/__main__.py:71", "warning"): (
+        "B", "配置预检警告项（preflight 引擎构造的配置降级文案）"),
+    # schedule 配置声明的运行时队列名（队列实体名，A 面）：
+    ("plaita/server/services/schedule_service.py:103", "runtime"): (
+        "A", "schedule 配置声明的运行时队列名（队列实体标识）"),
+    # 部署纪元标识（expected_epoch/redis_epoch，部署身份标签非值面）：
+    ("plaita/server/tenant_status.py:74", "expected"): (
+        "B", "部署纪元标识（expected_epoch，引擎身份元数据）"),
+    ("plaita/server/tenant_status.py:74", "actual if actual is not None else \"<missing>\""): (
+        "B", "实际纪元标识（redis_epoch，缺失时具名 <missing>，身份元数据）"),
+    # 租户写探针（观测原语）：site=写调用点标签；current_tenant()=当前租户标识：
+    ("plaita/tenant_context.py:188", "site"): (
+        "B", "写调用点标签（引擎内部站点名，如 redis.save_flow）"),
+    ("plaita/tenant_context.py:188", "current_tenant()"): (
+        "A", "当前租户标识（跨日志可回查实体标识）"),
+    # 掩码器调用点标签（字面量枚举：safe_render/relative_url_ref/
+    # absolute_url_ref/scrub_budget，全引擎内部站点名）：
+    ("plaita/core/url_redaction.py:103", "where"): (
+        "B", "掩码器调用点标签（引擎内部字面量站点名，非数据）"),
+    # 生效墓碑 TTL 秒数（配置解析标量，同函数 4 站点）：
+    ("plaita/storage/redis.py:240", "effective"): (
+        "B", "生效墓碑 TTL 秒数（execution_tombstone_ttl_seconds() 配置标量）"),
+    ("plaita/storage/redis.py:247", "effective"): (
+        "B", "生效墓碑 TTL 秒数（execution_tombstone_ttl_seconds() 配置标量）"),
+    ("plaita/storage/redis.py:253", "effective"): (
+        "B", "生效墓碑 TTL 秒数（execution_tombstone_ttl_seconds() 配置标量）"),
+    ("plaita/storage/redis.py:259", "effective"): (
+        "B", "生效墓碑 TTL 秒数（execution_tombstone_ttl_seconds() 配置标量）"),
+    # 裸 current（bare 名有站点内精确来源）：
+    ("plaita/server/event_reconcile.py:327", "current"): (
+        "B", "已存游标当前值（单调守卫的比较对象，推进位置标量）"),
+    ("plaita/server/tenant_dlq_quota.py:395", "current"): (
+        "B", "当前计数（纠偏前值，配额计量标量）"),
 }
 
 # ---------------------------------------------------------------------------
@@ -117,6 +197,29 @@ B_RULES = [
      r"|\bcheckout\b|\broot\b|\bparent\b|\bpath\b|\bfuture\b|\bhandler\b|\bowner\b"
      r"|event_bus\b",
      "基础设施标量/文件系统路径/对象句柄"),
+    # --- plaita#332 裁定轮新增判据（B2 r98）：只追加在列表末尾，不前插——
+    # 保证既有行首匹配 tuple 不变（零扰动），新判据只兜原本未匹配的表达式。---
+    (r"exc_name|\betype\b|code_suffix",
+     "异常投影标量（异常类名/结构化错误码投影——#151 卫生注释祝福的先落局部"
+     "再进 logger 模式，非异常文本）"),
+    (r"generation",
+     "fencing 代数计数（租户世代/fence 标量）"),
+    (r"removed|trimmed|examined|pruned|\berrors\b|\bcleaned\b|\bskipped\b"
+     r"|dropped_\w+|unattributed|orphans|\bdefers\b|\brounds\b|full_current"
+     r"|full_cap|quota_current|\bdesired\b|platform_n|quarantine_n|platform_total"
+     r"|quarantine_streams|\bbatch_size\b|\blength\b",
+     "计数/集合规模（清收/裁剪/纠偏/配额水位计量）"),
+    (r"_reason\b|\bviolation\b|target_status|key_type|\bsurface\b|\blanguage\b"
+     r"|\bpolicy\b|message_type|\ballowed\b|\benv\b",
+     "状态/枚举/组件选择器/引擎具名原因/环境变量名（名字非值）"),
+    (r"_ok\b",
+     "布尔判定（步骤成败旗标）"),
+    (r"\bage\b|due_at|default_timestamp|deleted_at|\bparked_at\b|\bcursor\b",
+     "耗时/时间戳/游标推进元数据"),
+    (r"\bcap\b",
+     "上限/配额容量"),
+    (r"\bkey_file\b|\bmode\b",
+     "基础设施标量（凭据密钥文件路径/权限位）"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -143,6 +246,14 @@ A_RULES = [
      r"|ast\.unparse|\bdata\b|\bmember\b|final_decision|event_filter|service_config"
      r"|\binstance\b",
      "数据面内容（求值结果/消息载荷/流程配置内容/决议值）"),
+    # --- plaita#332 裁定轮新增判据（B2 r98）：同上，只追加在列表末尾零扰动。---
+    (r"_tenant\b|\bmapped\b|unknown_ids",
+     "运行实体标识（租户 / dedup 映射的 execution_id / 实例 id 集合）"),
+    (r"\btenant\b",
+     "租户标识（裸 tenant 变量或墓碑租户字段，跨日志可回查）"),
+    (r"type_key|index_key|key_prefix|state_key|quarantine_key|key_text|sub_key"
+     r"|\bbucket\b",
+     "存储/索引实体键（定位数据实体）"),
 ]
 
 CLASS_ORDER = ("C", "A", "B")  # 站点级取最严：任一 C ⇒ C；否则含 A ⇒ A；否则 B
