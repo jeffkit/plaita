@@ -1,0 +1,384 @@
+FFFFFFFFFFFFFFFFFFFFF                                                    [100%]
+=================================== FAILURES ===================================
+__________________ test_lease_ttl_default_is_below_retry_base __________________
+
+    def test_lease_ttl_default_is_below_retry_base():
+>       assert engine_outbox.DEFAULT_LEASE_TTL_SECONDS > 0
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'DEFAULT_LEASE_TTL_SECONDS'. Did you mean: 'DEFAULT_POLL_SECONDS'?
+
+tests/console/test_issue324_outbox_row_lease.py:106: AttributeError
+____________________ test_lease_ttl_env_valid_value_honored ____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107a943e0>
+
+    def test_lease_ttl_env_valid_value_honored(monkeypatch):
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, "0.5")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:112: AttributeError
+____________ test_lease_ttl_env_invalid_falls_back_with_warning[0] _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x104d7c9d0>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x10797dd30>, raw = '0'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+____________ test_lease_ttl_env_invalid_falls_back_with_warning[-1] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1079a6f90>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x1079c6ad0>, raw = '-1'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+___________ test_lease_ttl_env_invalid_falls_back_with_warning[2.0] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107a77240>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x104dac910>, raw = '2.0'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+____________ test_lease_ttl_env_invalid_falls_back_with_warning[10] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107a76cf0>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x107a95350>, raw = '10'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+___________ test_lease_ttl_env_invalid_falls_back_with_warning[inf] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107a5de50>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x107a955b0>, raw = 'inf'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+___________ test_lease_ttl_env_invalid_falls_back_with_warning[nan] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107a5e350>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x107a92690>, raw = 'nan'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+___________ test_lease_ttl_env_invalid_falls_back_with_warning[abc] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107a4aa80>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x107add150>, raw = 'abc'
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "2.0", "10", "inf", "nan", "abc"])
+    def test_lease_ttl_env_invalid_falls_back_with_warning(monkeypatch, caplog, raw):
+        import logging
+    
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, raw)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:120: AttributeError
+__________________ test_lease_key_shape_uses_tenant_namespace __________________
+
+    def test_lease_key_shape_uses_tenant_namespace():
+>       assert engine_outbox._outbox_lease_key("t1", 7) == "plaita:t1:outbox:lease:7"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute '_outbox_lease_key'
+
+tests/console/test_issue324_outbox_row_lease.py:128: AttributeError
+_____________________ test_lease_acquire_release_roundtrip _____________________
+
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=b97539342558466ebec8be35ea4746fd,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_lease_acquire_release_roundtrip(target_redis: FakeRedis):
+>       lease = engine_outbox.acquire_row_lease(target_redis, "", 7)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'acquire_row_lease'
+
+tests/console/test_issue324_outbox_row_lease.py:136: AttributeError
+_________________ test_lease_exclusive_among_replicas_per_row __________________
+
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=e979883bd9b04544b3bb415097df17a8,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_lease_exclusive_among_replicas_per_row(target_redis: FakeRedis):
+>       first = engine_outbox.acquire_row_lease(target_redis, "", 7)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'acquire_row_lease'
+
+tests/console/test_issue324_outbox_row_lease.py:146: AttributeError
+_________________________ test_lease_ttl_applied_as_px _________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107b107d0>
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=49a6599c085e49ee8711c9fb5413b291,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_lease_ttl_applied_as_px(monkeypatch, target_redis: FakeRedis):
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, "0.5")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:154: AttributeError
+_______________ test_stale_release_does_not_delete_foreign_lease _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107b25d30>
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=cc317ff027cb425eacfa3ecf66948ccc,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_stale_release_does_not_delete_foreign_lease(
+            monkeypatch, target_redis: FakeRedis):
+        """TTL 过期后迟到释放（token 不符）不得误删他副本租约。"""
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, "0.05")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:164: AttributeError
+_____________ test_lease_acquire_unreachable_returns_open_sentinel _____________
+
+env_enabled = None
+caplog = <_pytest.logging.LogCaptureFixture object at 0x107b34160>
+
+    def test_lease_acquire_unreachable_returns_open_sentinel(
+            env_enabled, caplog):
+        """租约面不可达 → LEASE_UNAVAILABLE 哨兵（fail-open，照常行动），
+        且释放为 no-op（无 client 不炸）。"""
+        import logging
+    
+        with caplog.at_level(logging.WARNING):
+>           lease = engine_outbox.acquire_row_lease(Unreachable(), "", 7)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: module 'services.engine_outbox' has no attribute 'acquire_row_lease'
+
+tests/console/test_issue324_outbox_row_lease.py:184: AttributeError
+______ test_delivery_unreachable_target_fail_open_keeps_retry_accounting _______
+
+store = <services.flow_store.FlowStore object at 0x10797dd30>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1320/test_delivery_unreachable_targ0/lease.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+
+    def test_delivery_unreachable_target_fail_open_keeps_retry_accounting(
+            store: FlowStore, sessions, env_enabled):
+        """目标不可达：租约 fail-open 行动，重试记账与单副本时代一致
+        （attempts/退避/DLQ 链不受租约面改写）——#299 语义守恒格。"""
+        _publish_two(store)
+        stats = engine_outbox.run_delivery_cycle(Unreachable(), sessions)
+>       assert stats["lease_open"] == 2 and stats["lease_skipped"] == 0
+               ^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'lease_open'
+
+tests/console/test_issue324_outbox_row_lease.py:196: KeyError
+------------------------------ Captured log call -------------------------------
+ERROR    plaita:redis.py:987 Failed to save flow definition: connection refused
+ERROR    services.engine_sync:engine_sync.py:119 同步流程 a@1.0.0 到引擎存储失败（租户 ）
+WARNING  services.engine_outbox:engine_outbox.py:798 outbox 投递失败（将退避重试）：a@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: connection refused
+ERROR    plaita:redis.py:987 Failed to save flow definition: connection refused
+ERROR    services.engine_sync:engine_sync.py:119 同步流程 b@1.0.0 到引擎存储失败（租户 ）
+WARNING  services.engine_outbox:engine_outbox.py:798 outbox 投递失败（将退避重试）：b@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: connection refused
+________________ test_delivery_skips_row_held_by_other_replica _________________
+
+store = <services.flow_store.FlowStore object at 0x107efc190>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1320/test_delivery_skips_row_held_b0/lease.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=b3d16de3b76f45b599a9c764ab125d77,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_delivery_skips_row_held_by_other_replica(
+            store: FlowStore, sessions, env_enabled, target_redis: FakeRedis):
+        _publish_two(store)
+        rows = _rows(sessions)
+>       held = engine_outbox.acquire_row_lease(target_redis, "", rows[0].id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'acquire_row_lease'
+
+tests/console/test_issue324_outbox_row_lease.py:210: AttributeError
+__________________ test_stale_lease_expires_retry_not_blocked __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107eab4d0>
+store = <services.flow_store.FlowStore object at 0x107efd1d0>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1320/test_stale_lease_expires_retry0/lease.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=577a483bd8c243609b7917362672aafa,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_stale_lease_expires_retry_not_blocked(
+            monkeypatch, store: FlowStore, sessions, env_enabled,
+            target_redis: FakeRedis):
+        """持有者崩溃（无释放）：TTL 过期后到期重试照常（TTL 短于重试间隔）。"""
+>       monkeypatch.setenv(engine_outbox.LEASE_TTL_ENV, "0.05")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'LEASE_TTL_ENV'
+
+tests/console/test_issue324_outbox_row_lease.py:235: AttributeError
+______________ test_failed_delivery_releases_lease_backoff_intact ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107f25230>
+store = <services.flow_store.FlowStore object at 0x107ba6190>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1320/test_failed_delivery_releases_0/lease.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=da17c2933760457082d7e618d695a13e,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_failed_delivery_releases_lease_backoff_intact(
+            monkeypatch, store: FlowStore, sessions, env_enabled,
+            target_redis: FakeRedis):
+        """失败行：租约即放、退避表与单副本一致（attempts/next_attempt_at），
+        退避到期后他副本可正常重投。"""
+        calls = {"n": 0}
+        from services.engine_sync import sync_flow_to_engine as real_sync
+    
+        def flaky_sync(client, flow_id, version, definition, tenant_id=""):
+            calls["n"] += 1
+            if calls["n"] <= 2:  # 每行首次尝试各失败一次
+                raise ConnectionError("boom once")
+            return real_sync(client, flow_id, version, definition,
+                             tenant_id=tenant_id)
+    
+        monkeypatch.setattr(engine_outbox, "sync_flow_to_engine", flaky_sync)
+        _publish_two(store)
+        now = datetime.utcnow()
+    
+        first = engine_outbox.run_delivery_cycle(target_redis, sessions, now=now)
+        assert first["retried"] == 2 and first["delivered"] == 0
+        row_a = _rows(sessions, flow_id="a")[0]
+        assert row_a.status == "pending" and row_a.attempts == 1
+        assert row_a.next_attempt_at is not None
+        delta = (row_a.next_attempt_at - now).total_seconds()
+        assert delta == pytest.approx(
+            engine_outbox._RETRY_BACKOFF_BASE_SECONDS, abs=0.1)
+    
+        # 退避期内：未到期不投；他副本可抢到租约（失败即放、无残留）
+>       probe = engine_outbox.acquire_row_lease(target_redis, "", row_a.id)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'acquire_row_lease'
+
+tests/console/test_issue324_outbox_row_lease.py:279: AttributeError
+------------------------------ Captured log call -------------------------------
+WARNING  services.engine_outbox:engine_outbox.py:798 outbox 投递失败（将退避重试）：a@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: boom once
+WARNING  services.engine_outbox:engine_outbox.py:798 outbox 投递失败（将退避重试）：b@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: boom once
+________________ test_reconcile_skips_row_held_by_other_replica ________________
+
+store = <services.flow_store.FlowStore object at 0x107ba6ea0>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1320/test_reconcile_skips_row_held_0/lease.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=6b4e7503704945c98c78402cc1c84ff8,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_reconcile_skips_row_held_by_other_replica(
+            store: FlowStore, sessions, env_enabled, target_redis: FakeRedis):
+        _publish_two(store)
+        assert engine_outbox.run_delivery_cycle(target_redis, sessions)[
+            "delivered"] == 2
+        rows = _rows(sessions)
+>       held = engine_outbox.acquire_row_lease(target_redis, "", rows[0].id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'services.engine_outbox' has no attribute 'acquire_row_lease'
+
+tests/console/test_issue324_outbox_row_lease.py:305: AttributeError
+____________________ test_reconcile_requeue_releases_lease _____________________
+
+store = <services.flow_store.FlowStore object at 0x104e21b50>
+sessions = sessionmaker(class_='Session', bind=Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1320/test_reconcile_requeue_release0/lease.db), autoflush=True, expire_on_commit=False)
+env_enabled = None
+target_redis = <fakeredis._clients._sync.FakeRedis(<redis.connection.ConnectionPool(<fakeredis._clients._sync.FakeRedisConnection(ver...type=None),orig_host_address=b2d0c0c72a3a43cfacf8f1b84884b28b,orig_socket_timeout=5,orig_socket_connect_timeout=5)>)>)>
+
+    def test_reconcile_requeue_releases_lease(
+            store: FlowStore, sessions, env_enabled, target_redis: FakeRedis):
+        _publish_two(store)
+        assert engine_outbox.run_delivery_cycle(target_redis, sessions)[
+            "delivered"] == 2
+        target_redis.delete("plaita:flow:a:1.0.0")  # 目标缺 key → 应重投
+    
+        stats = engine_outbox.run_reconcile_cycle(target_redis, sessions)
+>       assert stats["requeued"] == 1 and stats["lease_skipped"] == 0
+                                          ^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'lease_skipped'
+
+tests/console/test_issue324_outbox_row_lease.py:328: KeyError
+------------------------------ Captured log call -------------------------------
+WARNING  services.engine_outbox:engine_outbox.py:899 outbox 对账重投：a@1.0.0（租户 default）目标 缺 key
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py: 40 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py: 10 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:823: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py: 30 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py: 10 warnings
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/flow_store.py:1009: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py::test_delivery_unreachable_target_fail_open_keeps_retry_accounting
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py::test_reconcile_skips_row_held_by_other_replica
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py::test_reconcile_requeue_releases_lease
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/engine_outbox.py:741: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py::test_failed_delivery_releases_lease_backoff_intact
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py:267: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue324_outbox_row_lease.py::test_reconcile_requeue_releases_lease
+  /Users/kong/projects/infra4agent/plaita-wt2/plaita-console/backend/services/engine_outbox.py:932: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_default_is_below_retry_base
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_valid_value_honored
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[0]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[-1]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[2.0]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[10]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[inf]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[nan]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_env_invalid_falls_back_with_warning[abc]
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_key_shape_uses_tenant_namespace
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_acquire_release_roundtrip
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_exclusive_among_replicas_per_row
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_ttl_applied_as_px
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_stale_release_does_not_delete_foreign_lease
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_lease_acquire_unreachable_returns_open_sentinel
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_delivery_unreachable_target_fail_open_keeps_retry_accounting
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_delivery_skips_row_held_by_other_replica
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_stale_lease_expires_retry_not_blocked
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_failed_delivery_releases_lease_backoff_intact
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_reconcile_skips_row_held_by_other_replica
+FAILED tests/console/test_issue324_outbox_row_lease.py::test_reconcile_requeue_releases_lease
+21 failed, 95 warnings in 2.23s

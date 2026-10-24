@@ -63,11 +63,23 @@ Redis**；console 与 FlowWorker 不同机/不同 Redis 时，「发布成功、
   删除协议标记 tombstone 与出口的状态写竞争时，锁内重读现态必见
   ``deleting``/已删，按既有 409/404 语义拒——出口不再可能盖掉
   tombstone 或抢在删除事务前删行（删除失败回滚后行不可自愈的幽灵链）。
+- **按行租约（#324，解除单副本约束）**：投递/对账的**逐行动作**前先抢
+  ``{ns}:outbox:lease:{行id}``（SET NX PX，TTL 短于最小重试退避）——
+  多副本共享同一数据库 + 目标 Redis 时**谁抢到谁投**；他副本持有中则
+  本轮跳过该行、不动行态，``attempts``/退避/DLQ 记账只由持有者写
+  （单副本时代的互覆盖失效）。租约面不可达 = fail-open 照常行动（投递
+  自身对死目标具名失败，记账语义不变）。TTL 过期自愈持有者崩溃，正常
+  路径动作完成即显式释放（token 比对防误删他副本租约）。
 
-**单副本约定（b117-03）**：投递/对账线程无 claim/leader 机制，按**单
-console 副本**设计；多副本并发会重复投递（同内容覆盖写、幂等无害）但
-``attempts`` 计数可能互相覆盖（退避/DLQ 计数失真）——部署上不要起多个
-console 副本共享同一数据库 + 目标 Redis 跑 outbox。
+**多副本约定（#324，取代 b117-03 单副本约定）**：投递/对账经按行租约
+支持多 console 副本并发（不做全局 leader，#324 边界）；残余重复投递窗 =
+持有者在 TTL 内崩溃且目标写入已生效，或租约面瞬断走 fail-open——读回
+校验 + 幂等覆盖写兜底，至少一次语义不变。**删除协议（``deleting_guard``）
+仍为进程内互斥**：
+:data:`OUTBOX_DELETE_LOCK` 不跨进程，多副本**同时删除**同一流程/版本与
+他副本投递之间存在小窗（投递锁内重读早于删除标记提交的陈旧读）——部署
+上避免多副本并发删除同一流程/版本；将删除协议纳入跨副本互斥超出 #324
+边界（不做全局 leader、不改 outbox 表结构），如需另立单。
 
 多租户：键空间与引擎侧同一映射（``tenant_namespace``）；投递线程对每行
 以**行内租户**显式声明上下文后过 ``guard_tenant_write``（#239 phase 2
@@ -81,12 +93,14 @@ import logging
 import math
 import os
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from redis import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import func, select, delete as sa_delete
 from sqlalchemy.exc import IntegrityError
@@ -125,12 +139,17 @@ RECONCILE_ENV = "PLAITA_CONSOLE_ENGINE_OUTBOX_RECONCILE_SECONDS"
 MAX_ATTEMPTS_ENV = "PLAITA_CONSOLE_ENGINE_OUTBOX_MAX_ATTEMPTS"
 BATCH_ENV = "PLAITA_CONSOLE_ENGINE_OUTBOX_BATCH"
 FAILED_REQUEUE_ENV = "PLAITA_CONSOLE_ENGINE_OUTBOX_FAILED_REQUEUE_SECONDS"
+LEASE_TTL_ENV = "PLAITA_CONSOLE_ENGINE_OUTBOX_LEASE_TTL_SECONDS"
 
 DEFAULT_POLL_SECONDS = 2.0
 DEFAULT_RECONCILE_SECONDS = 300.0
 DEFAULT_MAX_ATTEMPTS = 8
 DEFAULT_BATCH = 200
 DEFAULT_FAILED_REQUEUE_SECONDS = 300.0
+#: 按行租约 TTL（#324）：必须短于最小重试退避（``_RETRY_BACKOFF_BASE_SECONDS``
+#: 2s）——持有者崩溃后租约至多滞留 TTL，绝不阻塞到期重试（正文验收口径
+#: 「TTL 短于重试间隔」）。
+DEFAULT_LEASE_TTL_SECONDS = 1.5
 
 #: 快速重试退避：``base * 2^(n-1)``，封顶 120s。
 _RETRY_BACKOFF_BASE_SECONDS = 2.0
@@ -149,12 +168,12 @@ STATUS_RESOLVED = "resolved"
 STATUS_DELETING = "deleting"
 
 #: 删除协议与投递/对账/人工出口的进程内互斥锁（#303；A2R50-02 收口）。
-#: 「单副本约定」（b117-03）的延伸：投递/对账线程本就按单 console 副本
-#: 设计，删除与两线程同进程，进程内锁即完整覆盖；删除守卫全程持锁，
-#: 投递/对账/人工出口（resolve/discard）在**行动粒度**上持锁并重读
-#: 行现态——各面在单行动作上串行，删除窗口内不可能有投递写出 key、
-#: 也不可能有人工出口盖掉 tombstone。持锁段均为单行动作（毫秒级），
-#: 等待方最多让出一个行动位，不饿死。
+#: #324 后投递/对账的**跨副本**互斥由按行租约承担，本锁仍是进程内串行面：
+#: 删除守卫全程持锁，投递/对账/人工出口（resolve/discard）在**行动粒度**
+#: 上持锁并重读行现态——同进程各面在单行动作上串行，删除窗口内不可能有
+#: 投递写出 key、也不可能有人工出口盖掉 tombstone。跨副本「同时删除」
+#: 与他副本投递的残留小窗见模块文档串「多副本约定」。持锁段均为单行动作
+#: （毫秒级），等待方最多让出一个行动位，不饿死。
 OUTBOX_DELETE_LOCK = threading.RLock()
 
 last_error_truncate = 300
@@ -235,6 +254,25 @@ def batch_size() -> int:
 
 def failed_requeue_seconds() -> float:
     return _env_float(FAILED_REQUEUE_ENV, DEFAULT_FAILED_REQUEUE_SECONDS, minimum=0.0)
+
+
+def lease_ttl_seconds() -> float:
+    """按行租约 TTL（秒，#324）。合法域 ``0 < ttl < 快速重试基线``。
+
+    上界=「TTL 短于重试间隔」的规格口径：TTL ≥ 最小退避（2s）时，崩溃
+    持有者的滞留租约会顶掉到期重试的首轮扫描（饿死一个 poll 周期以上）
+    ——非法（≤0 / ≥2s / inf/nan，:func:`_env_float` 已拒后两类）一律
+    WARNING + 回退默认，绝不静默。
+    """
+    value = _env_float(LEASE_TTL_ENV, DEFAULT_LEASE_TTL_SECONDS, minimum=0.0)
+    if value <= 0 or value >= _RETRY_BACKOFF_BASE_SECONDS:
+        logger.warning(
+            "%s=%s 非法（需 0 < ttl < %s 秒，短于最小重试退避），使用默认 %r",
+            LEASE_TTL_ENV, _redact_env_value(os.environ.get(LEASE_TTL_ENV)),
+            _RETRY_BACKOFF_BASE_SECONDS, DEFAULT_LEASE_TTL_SECONDS,
+        )
+        return DEFAULT_LEASE_TTL_SECONDS
+    return value
 
 
 def connect_target(url: Optional[str] = None) -> Redis:
@@ -645,6 +683,87 @@ def _reload_row(session: Session, row_id: int) -> Optional[FlowPublishOutbox]:
     return row
 
 
+# ---- 按行租约（#324：多副本谁抢到谁投，解除单副本约束） ----
+
+
+def _outbox_lease_key(tenant_id: str, row_id: int) -> str:
+    """按行租约键：``{ns}:outbox:lease:{行id}``（租户命名空间与投递键同源）。"""
+    return f"{tenant_namespace(tenant_id or '')}:outbox:lease:{int(row_id)}"
+
+
+_LEASE_RELEASE_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+class _RowLease:
+    """持有中的按行租约句柄。仅持有者可释放，且 token 不符时不删。"""
+
+    __slots__ = ("_client", "_key", "_token")
+
+    def __init__(self, client: Optional[Redis], key: str, token: str) -> None:
+        self._client = client
+        self._key = key
+        self._token = token
+
+    def release(self) -> None:
+        """显式释放（Lua 比对 token 才删）。
+
+        token 比对防误删：本租约 TTL 过期后被他副本抢走时，迟到的释放
+        不得删掉他副本的租约（否则第三副本可再抢入，重复投递窗扩大）。
+        连接级失败静默（debug 留痕）：TTL 兜底至多滞留一个 TTL（短于
+        最小重试退避，不阻塞到期重试），且该行动作的成败已由投递/对账
+        自身的失败路径具名记录，释放失败不改变任何行态。
+        """
+        if self._client is None:
+            return
+        try:
+            self._client.eval(_LEASE_RELEASE_LUA, 1, self._key, self._token)
+        except (RedisError, OSError) as e:
+            logger.debug(
+                "outbox 租约释放失败（TTL 兜底，不阻塞记账路径）key=%s: %s",
+                self._key, e,
+            )
+
+
+#: 租约面不可达的 fail-open 哨兵（no-op 租约）：调用方照常行动——投递/
+#: 对账自身会对不可达目标具名失败（redis_unavailable → attempts/退避/DLQ
+#: 记账与单副本时代一致），绝不因租约面把「不可达重试记账」改写成「静默
+#: 跳过」（否则目标 Redis 宕机期间行永不入账、#299 的退避/DLQ 语义失真）。
+#: 健康目标上的互斥不受影响；fail-open 窗口内的最坏情形 = 两副本并发
+#: 同内容覆盖写（读回校验兜底，规格明言幂等无害）。
+LEASE_UNAVAILABLE = _RowLease(None, "", "")
+
+
+def acquire_row_lease(
+    client: Redis, tenant_id: str, row_id: int
+) -> Optional[_RowLease]:
+    """抢按行租约（#324）：``SET NX PX``——抢到 = 本副本独占该行的本次
+    投递/对账动作。
+
+    返回三态：:class:`_RowLease` = 抢到（谁抢到谁投）；``None`` = 他副本
+    持有中（调用方本轮跳过该行、**不动行态**——attempts/退避/DLQ 记账只
+    由持有者写，单副本时代的计数互覆盖〔b117-03〕就此失效）；
+    :data:`LEASE_UNAVAILABLE` 哨兵 = 租约面不可达（fail-open，照常行动）。
+    TTL 短于最小重试退避（:func:`lease_ttl_seconds`）：持有者崩溃后至多
+    滞留一个 TTL，绝不阻塞到期重试。
+    """
+    key = _outbox_lease_key(tenant_id, row_id)
+    token = uuid.uuid4().hex
+    ttl_ms = max(1, int(round(lease_ttl_seconds() * 1000)))
+    try:
+        acquired = client.set(key, token, nx=True, px=ttl_ms)
+    except (RedisError, OSError) as e:
+        logger.warning(
+            "outbox 租约面不可达（fail-open 行动，行 %s）: %s", row_id, e,
+        )
+        return LEASE_UNAVAILABLE
+    if not acquired:
+        return None
+    return _RowLease(client, key, token)
+
+
 # ---- 投递 ----
 
 
@@ -732,78 +851,91 @@ def run_delivery_cycle(
 ) -> Dict[str, Any]:
     """一轮投递：pending/failed(到期) 行逐条送达目标 Redis，逐行提交。
 
-    返回统计（``scanned/delivered/retried/to_dlq/errors/skipped``）。任何
-    意外都被计入 errors 而不抛出——投递线程按 poll 节奏自愈。逐行动作前
-    持 :data:`OUTBOX_DELETE_LOCK` 重读行现态（#303）：删除协议标记的
-    deleting 行、以及已删行（陈旧读命中）一律跳过——清目标 key 之后
-    不可能再被本循环写回。
+    返回统计（``scanned/delivered/retried/to_dlq/errors/skipped/
+    lease_skipped/lease_open``）。任何意外都被计入 errors 而不抛出——
+    投递线程按 poll 节奏自愈。逐行动作前先抢**按行租约**（#324，跨副本
+    谁抢到谁投；他副本持有 → ``lease_skipped``，不动行态；租约面不可达 →
+    fail-open 行动并计 ``lease_open``），再持 :data:`OUTBOX_DELETE_LOCK`
+    重读行现态（#303）：删除协议标记的 deleting 行、以及已删行（陈旧读
+    命中）一律跳过——清目标 key 之后不可能再被本循环写回。
     """
     now = now or datetime.utcnow()
     limit = limit or batch_size()
     attempts_cap = attempts_cap or max_attempts()
     stats: Dict[str, Any] = {
         "scanned": 0, "delivered": 0, "retried": 0, "to_dlq": 0, "errors": 0,
-        "skipped": 0,
+        "skipped": 0, "lease_skipped": 0, "lease_open": 0,
     }
     try:
         with session_local() as session:
             rows = _iter_due_rows(session, limit, now)
             for row in rows:
                 stats["scanned"] += 1
-                with OUTBOX_DELETE_LOCK:
-                    current = _reload_row(session, row.id)
-                    if current is None or current.status not in (
-                            STATUS_PENDING, STATUS_FAILED):
-                        stats["skipped"] += 1
-                        continue
-                    reason = _deliver_one(target, current, now)
-                    current.attempts = (current.attempts or 0) + 1
-                    if reason is None:
-                        current.status = STATUS_DELIVERED
-                        current.delivered_at = now
-                        current.next_attempt_at = None
-                        current.last_error = ""
-                        stats["delivered"] += 1
-                        logger.info(
-                            "outbox 已投递 %s@%s（租户 %s，attempts=%s）",
-                            current.flow_id, current.version,
-                            current.tenant_id or "default",
-                            current.attempts,
-                        )
-                    else:
-                        current.last_error = reason[:last_error_truncate]
-                        if current.attempts >= attempts_cap:
-                            current.status = STATUS_FAILED
-                            # DLQ 档仍按慢速重排自动补投（封顶 30min），不丢定义。
-                            current.next_attempt_at = now + timedelta(seconds=min(
-                                _failed_requeue_backoff(current.attempts),
-                                _FAILED_REQUEUE_MAX_SECONDS,
-                            ))
-                            stats["to_dlq"] += 1
-                            logger.error(
-                                "outbox 投递转 DLQ：%s@%s（租户 %s）attempts=%s "
-                                "reason=%s；将按慢速重排自动补投，/health."
-                                "engine_outbox 可观测",
+                # #324：先抢按行租约（跨副本互斥，Redis 面不该持进程内锁
+                # 做往返）；他副本持有 → 跳过，租约面不可达 → fail-open。
+                lease = acquire_row_lease(target, row.tenant_id or "", row.id)
+                if lease is None:
+                    stats["lease_skipped"] += 1
+                    continue
+                if lease is LEASE_UNAVAILABLE:
+                    stats["lease_open"] += 1
+                try:
+                    with OUTBOX_DELETE_LOCK:
+                        current = _reload_row(session, row.id)
+                        if current is None or current.status not in (
+                                STATUS_PENDING, STATUS_FAILED):
+                            stats["skipped"] += 1
+                            continue
+                        reason = _deliver_one(target, current, now)
+                        current.attempts = (current.attempts or 0) + 1
+                        if reason is None:
+                            current.status = STATUS_DELIVERED
+                            current.delivered_at = now
+                            current.next_attempt_at = None
+                            current.last_error = ""
+                            stats["delivered"] += 1
+                            logger.info(
+                                "outbox 已投递 %s@%s（租户 %s，attempts=%s）",
                                 current.flow_id, current.version,
                                 current.tenant_id or "default",
-                                current.attempts, reason,
+                                current.attempts,
                             )
                         else:
-                            current.next_attempt_at = now + timedelta(seconds=min(
-                                _RETRY_BACKOFF_BASE_SECONDS
-                                * (2 ** (current.attempts - 1)),
-                                _RETRY_BACKOFF_MAX_SECONDS,
-                            ))
-                            stats["retried"] += 1
-                            logger.warning(
-                                "outbox 投递失败（将退避重试）：%s@%s（租户 %s）"
-                                "attempts=%s/%s reason=%s",
-                                current.flow_id, current.version,
-                                current.tenant_id or "default",
-                                current.attempts, attempts_cap, reason,
-                            )
-                        stats["errors"] += 1
-                    session.commit()
+                            current.last_error = reason[:last_error_truncate]
+                            if current.attempts >= attempts_cap:
+                                current.status = STATUS_FAILED
+                                # DLQ 档仍按慢速重排自动补投（封顶 30min），不丢定义。
+                                current.next_attempt_at = now + timedelta(seconds=min(
+                                    _failed_requeue_backoff(current.attempts),
+                                    _FAILED_REQUEUE_MAX_SECONDS,
+                                ))
+                                stats["to_dlq"] += 1
+                                logger.error(
+                                    "outbox 投递转 DLQ：%s@%s（租户 %s）attempts=%s "
+                                    "reason=%s；将按慢速重排自动补投，/health."
+                                    "engine_outbox 可观测",
+                                    current.flow_id, current.version,
+                                    current.tenant_id or "default",
+                                    current.attempts, reason,
+                                )
+                            else:
+                                current.next_attempt_at = now + timedelta(seconds=min(
+                                    _RETRY_BACKOFF_BASE_SECONDS
+                                    * (2 ** (current.attempts - 1)),
+                                    _RETRY_BACKOFF_MAX_SECONDS,
+                                ))
+                                stats["retried"] += 1
+                                logger.warning(
+                                    "outbox 投递失败（将退避重试）：%s@%s（租户 %s）"
+                                    "attempts=%s/%s reason=%s",
+                                    current.flow_id, current.version,
+                                    current.tenant_id or "default",
+                                    current.attempts, attempts_cap, reason,
+                                )
+                            stats["errors"] += 1
+                        session.commit()
+                finally:
+                    lease.release()
     except Exception as e:  # noqa: BLE001 — 读库/会话级失败：下轮重试
         stats["errors"] += 1
         logger.warning("outbox 投递轮次失败（下轮重试）: %s", e, exc_info=True)
@@ -820,14 +952,22 @@ def _failed_requeue_backoff(attempts: int) -> float:
 # ---- 对账 ----
 
 
-def _iter_delivered_ids(session: Session, max_rows: int) -> Iterable[int]:
-    """delivered 行 id（id 序、有界）；整行只在锁内动作时重读（``_reload_row``）。"""
-    return session.scalars(
-        select(FlowPublishOutbox.id)
-        .where(FlowPublishOutbox.status == STATUS_DELIVERED)
-        .order_by(FlowPublishOutbox.id.asc())
-        .limit(max_rows)
-    ).all()
+def _iter_delivered_ids(session: Session, max_rows: int) -> List[Tuple[int, str]]:
+    """delivered 行 ``(id, tenant_id)``（id 序、有界）；整行只在锁内动作时
+    重读（``_reload_row``）。
+
+    租户随行带出：按行租约键（#324）须在进程内删除锁**之外**、重读之前
+    先抢——跨副本互斥是 Redis 往返，不该持进程内锁做网络 I/O。
+    """
+    return [
+        (int(rid), tenant or "")
+        for rid, tenant in session.execute(
+            select(FlowPublishOutbox.id, FlowPublishOutbox.tenant_id)
+            .where(FlowPublishOutbox.status == STATUS_DELIVERED)
+            .order_by(FlowPublishOutbox.id.asc())
+            .limit(max_rows)
+        ).all()
+    ]
 
 
 def _reconcile_one(
@@ -925,30 +1065,43 @@ def run_reconcile_cycle(
        hash 不符 → 打回 pending 重投。
 
     有界（``max_rows``，默认 batch_size）；行多时按 id 序分轮消化。逐行
-    动作前持 :data:`OUTBOX_DELETE_LOCK` 重读行现态（#303）：已进删除协议
-    （deleting）或已被删的行一律跳过——对账不得复活删除中的版本。逐行
-    提交（原为轮末一次提交）。
+    动作前先抢**按行租约**（#324，跨副本谁抢到谁对账；他副本持有 →
+    ``lease_skipped``，不动行态；租约面不可达 → fail-open 行动并计
+    ``lease_open``），再持 :data:`OUTBOX_DELETE_LOCK` 重读行现态（#303）：
+    已进删除协议（deleting）或已被删的行一律跳过——对账不得复活删除中的
+    版本。逐行提交（原为轮末一次提交）。
     """
     now = now or datetime.utcnow()
     max_rows = max_rows or batch_size()
     stats: Dict[str, Any] = {
         "checked": 0, "requeued": 0, "errors": 0,
         "drifted": 0, "source_missing": 0, "skipped": 0,
+        "lease_skipped": 0, "lease_open": 0,
     }
     try:
         with session_local() as session:
             ns_cache: Dict[str, str] = {}
-            for rid in _iter_delivered_ids(session, max_rows):
+            for rid, tenant in _iter_delivered_ids(session, max_rows):
                 stats["checked"] += 1
-                with OUTBOX_DELETE_LOCK:
-                    row = _reload_row(session, rid)
-                    if row is None or row.status != STATUS_DELIVERED:
-                        stats["skipped"] += 1
-                        continue
-                    if not _reconcile_one(target, session, row, ns_cache,
-                                          now, stats):
-                        break
-                    session.commit()
+                # #324：先抢按行租约（同投递面，跨副本互斥在锁外）。
+                lease = acquire_row_lease(target, tenant, rid)
+                if lease is None:
+                    stats["lease_skipped"] += 1
+                    continue
+                if lease is LEASE_UNAVAILABLE:
+                    stats["lease_open"] += 1
+                try:
+                    with OUTBOX_DELETE_LOCK:
+                        row = _reload_row(session, rid)
+                        if row is None or row.status != STATUS_DELIVERED:
+                            stats["skipped"] += 1
+                            continue
+                        if not _reconcile_one(target, session, row, ns_cache,
+                                              now, stats):
+                            break
+                        session.commit()
+                finally:
+                    lease.release()
     except Exception as e:  # noqa: BLE001 — 读库失败：下轮重试
         stats["errors"] += 1
         logger.warning("outbox 对账轮次失败（下轮重试）: %s", e, exc_info=True)

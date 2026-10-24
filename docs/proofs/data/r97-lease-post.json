@@ -1,0 +1,44 @@
+{
+ "tree": "/Users/kong/projects/infra4agent/plaita-wt2",
+ "run_seconds": 6.0,
+ "children": [
+  {
+   "pid": 74876,
+   "cycles": 106,
+   "deliveries": {
+    "f1": 1,
+    "f3": 1,
+    "f5": 1
+   },
+   "lease_skipped": 4,
+   "fatal": null
+  },
+  {
+   "pid": 74877,
+   "cycles": 103,
+   "deliveries": {
+    "f2": 1,
+    "f4": 1,
+    "flaky": 1
+   },
+   "lease_skipped": 3,
+   "fatal": null
+  }
+ ],
+ "totals": {
+  "f1": 1,
+  "f3": 1,
+  "f5": 1,
+  "f2": 1,
+  "f4": 1,
+  "flaky": 1
+ },
+ "duplicates": {},
+ "missing": [],
+ "fatals": [],
+ "child_rc": [
+  0,
+  0
+ ],
+ "verdict": "ZERO-DUPLICATE-GREEN"
+}

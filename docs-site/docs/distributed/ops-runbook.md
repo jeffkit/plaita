@@ -229,6 +229,7 @@ ops 开关；AI/copilot、plaita-nodes 业务节点、内部 marker（`PLAITA_TE
 | `PLAITA_CONSOLE_ENGINE_OUTBOX_MAX_ATTEMPTS` | `8` | 每轮投递 | 连续失败转 `failed`（DLQ 档）的次数上限 | 非法 → WARNING + 回退默认 |
 | `PLAITA_CONSOLE_ENGINE_OUTBOX_BATCH` | `200` | 每轮投递/对账 | 单轮处理的 outbox 行数上限 | 非法 → WARNING + 回退默认 |
 | `PLAITA_CONSOLE_ENGINE_OUTBOX_FAILED_REQUEUE_SECONDS` | `300.0` | 每轮投递 | DLQ 行慢速重排的基础间隔（翻倍封顶 30min） | 非法 → WARNING + 回退默认 |
+| `PLAITA_CONSOLE_ENGINE_OUTBOX_LEASE_TTL_SECONDS` | `1.5` | 每轮投递/对账 | 按行租约 TTL（#324 多副本「谁抢到谁投」；键 `{ns}:outbox:lease:{行id}`，SET NX PX） | 须 `0 < ttl < 2`（TTL 短于最小重试退避 2s——持有者崩溃后至多滞留一个 TTL，不阻塞到期重试）；≤0/≥2s/非法/inf/nan → WARNING + 回退默认 |
 | `PLAITA_CONSOLE_DB_URL` | `sqlite:///./plaita_console.db` | `startup`（`init_engine` 一次） | 流程/版本/执行历史 SQLAlchemy URL | 凭据文件/密钥目录由它推导；**相对 URL 按各进程 cwd 解析**，PG/未设置/内存库回退 cwd 并打 WARNING（A67-04）；官方 compose 默认无持久卷 |
 | `PLAITA_CONSOLE_ENV` | `dev` | `request` / 每次发布 | 环境标识；仅精确 `prod` 时删除需 admin | 其他值（test/staging）无额外语义 |
 | `PLAITA_CONSOLE_ADMIN_API_KEY` | `""` | `request`（`get_settings`） | 管理面 API Key | 空且未 `ALLOW_INSECURE_ADMIN` → 管理 API 503 |
@@ -298,7 +299,7 @@ busy timeout 而拒绝启动（B67-03），编排层应串行重启或放宽超�
 |---|---|
 | **启动/导入期 fail-fast**（聚合后一次退出） | `PLAITA_LOG_LEVEL`、`PLAITA_HTTP_BLOCK_PRIVATE`（未知布尔）、`PLAITA_SANDBOX_MEMORY_MB`（负/非数字）、`PLAITA_SANDBOX_DOCKER_CPUS`（非有限正数）、`PLAITA_CONSOLE_LANGFUSE`（非 auto/true/false）、`PLAITA_TENANT_MAX_RUNNING`（负/非数字）、`PLAITA_CONSOLE_ALLOW_INSECURE_ADMIN`（未知布尔）、`PLAITA_EVENT_RECONCILE_INTERVAL` / `PLAITA_CHECK_INTERVAL`（0/负/非数字）、`PLAITA_MAX_DELIVERIES` / `PLAITA_LEASE_TTL_SECONDS` / `PLAITA_DLQ_MAX_LEN`（≤0/非数字）、`PLAITA_SANDBOX_TIMEOUT`、`PLAITA_SANDBOX_DOCKER_TIMEOUT`、`PLAITA_BG_*`、`PLAITA_CONSOLE_PORT`、`PLAITA_SANDBOX_ALLOWED_LANGUAGES/_BACKENDS`、`PLAITA_CODE_BACKEND`（worker 路径未知值） |
 | **空串 identity/routing fail-fast** | `PLAITA_QUEUE_NAME`、`QUEUE_NAME`、`PLAITA_CONSOLE_TASK_QUEUE`、`PLAITA_CONSUMER_GROUP`、`PLAITA_DLQ_KEY`、`PLAITA_REDIS_URL`、`REDIS_URL`、`PLAITA_CONSOLE_REDIS_URL`、`PLAITA_INSTANCE_ID`、`PLAITA_DELAY_QUEUE`、`PLAITA_DEPLOYMENT_EPOCH` |
-| **WARNING + 回退默认（绝不静默）** | `PLAITA_HTTP_MAX_RESPONSE_BYTES`、`PLAITA_HTTP_DNS_TTL`（拒绝 nan/inf）、`PLAITA_HTTP_CONNECTOR_LIMIT`、`PLAITA_HTTP_COOKIES`、`PLAITA_CONSOLE_DEBUG`、`PLAITA_DLQ_MAX_LEN`（≤0 钳 1）、`PLAITA_EXECUTION_STATE_TTL_DAYS`、`PLAITA_CAPACITY_STALE_SECONDS`、`PLAITA_EXECUTION_TIMELINE_MAX`、`PLAITA_WORKER_DRAIN_TIMEOUT`、`PLAITA_WORKER_MIN_FREE_DISK_GIB`、`PLAITA_EXPR_*`、`PLAITA_EXECUTION_DEADLINE_SECONDS`、`PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`、`PLAITA_TASK_MAX_AGE_SECONDS`、`PLAITA_EVENT_TTL_SECONDS`、`PLAITA_EVENT_INDEX_SWEEP_INTERVAL/_BUDGET`、`PLAITA_CONSOLE_RECONCILE_ORPHANS`、`PLAITA_TENANT_MAX_RUNNING`（运行期负/非法按不限）、`PLAITA_TENANT_RUNNING_TTL_SECONDS`、`PLAITA_TENANT_QUOTA_DEFER_MAX`、`PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS`（≤0/inf/nan 非法，b117-04）/`_RECONCILE_SECONDS`（同）/`_MAX_ATTEMPTS`/`_BATCH`/`_FAILED_REQUEUE_SECONDS` |
+| **WARNING + 回退默认（绝不静默）** | `PLAITA_HTTP_MAX_RESPONSE_BYTES`、`PLAITA_HTTP_DNS_TTL`（拒绝 nan/inf）、`PLAITA_HTTP_CONNECTOR_LIMIT`、`PLAITA_HTTP_COOKIES`、`PLAITA_CONSOLE_DEBUG`、`PLAITA_DLQ_MAX_LEN`（≤0 钳 1）、`PLAITA_EXECUTION_STATE_TTL_DAYS`、`PLAITA_CAPACITY_STALE_SECONDS`、`PLAITA_EXECUTION_TIMELINE_MAX`、`PLAITA_WORKER_DRAIN_TIMEOUT`、`PLAITA_WORKER_MIN_FREE_DISK_GIB`、`PLAITA_EXPR_*`、`PLAITA_EXECUTION_DEADLINE_SECONDS`、`PLAITA_EXECUTION_TOMBSTONE_TTL_SECONDS`、`PLAITA_TASK_MAX_AGE_SECONDS`、`PLAITA_EVENT_TTL_SECONDS`、`PLAITA_EVENT_INDEX_SWEEP_INTERVAL/_BUDGET`、`PLAITA_CONSOLE_RECONCILE_ORPHANS`、`PLAITA_TENANT_MAX_RUNNING`（运行期负/非法按不限）、`PLAITA_TENANT_RUNNING_TTL_SECONDS`、`PLAITA_TENANT_QUOTA_DEFER_MAX`、`PLAITA_CONSOLE_ENGINE_OUTBOX_POLL_SECONDS`（≤0/inf/nan 非法，b117-04）/`_RECONCILE_SECONDS`（同）/`_MAX_ATTEMPTS`/`_BATCH`/`_FAILED_REQUEUE_SECONDS`/`_LEASE_TTL_SECONDS`（0<ttl<2s 域外回退，#324） |
 | **运行期/执行期才失败** | `PLAITA_SANDBOX_DOCKER_MEMORY_MB`（0/负传给 docker）、`PLAITA_SANDBOX_NODE_BIN`（缺失）、`PLAITA_BG_*_WORKERS=0/负`（首次建池）、`PLAITA_CODE_BACKEND`（直接 `register_code_node` 不传白名单） |
 | **接受任意值/仅特定值特殊** | `PLAITA_CONSOLE_ENV`、`PLAITA_SANDBOX_LIFECYCLE`/`PLAITA_EXECUTION_EVENTS_PUBLISH`/`PLAITA_WORKER_LANGFUSE`（legacy 精确 0/1）、`PLAITA_DISABLE_*`（strip 后等于 1） |
 
@@ -730,6 +731,15 @@ worker 不同机/不同 Redis 时，人工在目标机跑 `sync_published_to_eng
   写目标 Redis 的 `{ns}:flow:{flow_id}:{version}` 后**读回校验**
   `flow-definition-json-sortkeys-v2` 指纹一致才记 delivered（至少一次；
   重复写是同内容覆盖，天然幂等）；
+- **按行租约（#324，多副本）**：投递/对账逐行动作前抢
+  `{ns}:outbox:lease:{行id}`（SET NX PX，TTL 默认 1.5s、短于最小重试退避
+  2s）——多 console 副本共享同一数据库 + 目标 Redis 时**谁抢到谁投**
+  （不做全局 leader）；他副本持有中则本轮跳过该行（统计 `lease_skipped`），
+  `attempts`/退避/DLQ 记账只由持有者写。持有者崩溃 → 租约至多滞留一个
+  TTL 自动失效，不阻塞到期重试；租约面不可达 → fail-open 照常行动
+  （统计 `lease_open`，投递自身对死目标具名失败，#299 重试记账语义不变）；
+  最坏残余重复窗 = 同内容覆盖写（读回校验兜底）。删除协议（#303 守卫）
+  仍为进程内互斥：避免多副本**同时删除**同一流程/版本；
 - 失败按指数退避重试（2s 起封顶 120s）；连续
   `PLAITA_CONSOLE_ENGINE_OUTBOX_MAX_ATTEMPTS`（默认 8）次失败转 `failed`
   （DLQ 档）并 ERROR 告警，DLQ 行按
