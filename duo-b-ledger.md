@@ -1101,6 +1101,8 @@
 - 守恒：#320/#322 家族 **82P rc=0**（43+39 与 r90 台账吻合，咽喉 E 组/retry_wakeup C 组原样绿）；#151 卫生定向 14P；ruff 改动三文件全检零新增（flow_worker 11 条 BLE001=r93 台账既有同数，advisory）+ E722 CI 口径 rc=0。
 - 门禁（无管道直录，串行独跑零并行负载）：unit 独跑 **9160P/13S/3501 subtests rc=0**（757.2s；=r93 基线 9147+13 新格精确对账）/console 后端门 **1637P/14S rc=0**（=r93 同数零增量）/integ+e2e **287P/4S rc=0**（家族同数）/mkdocs --strict rc=0（`PYENV_VERSION=system` 绕 shim）/landing_gate 推前核验。
 - 证据：`docs/proofs/r94-i336-retry-token-stability.md` + `docs/proofs/data/r94-tests336-{red,green}.txt`、`r94-family-320-322.txt`、`r94-hygiene-151.txt`。交付=主 clone 直落 main（逐路径 add，A1 台账未跟踪文件不碰）；回评附 #336 一行。
+- **并树补记（同日）**：门禁期 origin/main 前移 2 提交（B2 r99 #337 SNE 接线，`flow_worker.py`/台账双交集合流）——`cd3ac1bc` 先落、合并 `ad6d43ea` 成 `00a1b2f5`（台账冲突=双方各追加一轮条目，双块保持；flow_worker 自动并成，咽喉/retry_wakeup 与 SNE 元组/`_error_fields` 不同区域）。**并树复门**（串行独跑）：定向四家族 127P（13+32+43+39 精确对账）/unit 独跑 **9169P/13S/3501 subtests rc=0**（751.8s；=9156+13 精确对账）/console **1637P/14S rc=0**/integ+e2e **287P/4S rc=0**/mkdocs --strict rc=0/landing_gate **rc=0**（main CI + Console E2E success @ ad6d43e）。并树证据 `docs/proofs/data/r94-{unit-union,console-union,integ-e2e-union,union-targeted}.txt`。
+
 ## 第九十九轮 · plaita#337（SuspendNotExecutableError「终态不重试」零接线——两层判据 + 终态落盘身份，P1，2026-10-24，B2 修复席）
 
 - 基线：`origin/main` `3271ba89`（issue 基线 5637548c 之后 main 已前进）。**开工对账修正 issue 反证有效集**：#331 W2（`3b9f6b32`）的 `NodeRunner._execute_with_retry` 逃逸分支（通用 except 之前原样上抛 carrier/SNE）已把反证一「retryTimes 烧穿」关掉——修前探针实证：节点循环 1 次执行+SNE 身份原样（P2 绿）、嵌套 eager 集成场景同（P5 绿）、worker 直连链不可重投系「链上无 NodeExecutionError」缺省侥幸（W2 绿，非按类型）。issue 提报于逃逸分支落地之前，属**部分过期反证**；本轮交付=契约判据接线与机器可判身份，非行为翻面。
