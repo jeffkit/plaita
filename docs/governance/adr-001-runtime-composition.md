@@ -127,3 +127,13 @@ plaita 生态现存三引擎：Python 本仓（reference）、plaita-go（Golang
 - 本篇只做裁定与写实，零产品代码；实施按 §8 单独立项。
 - §3 为点时快照，事实漂移不改写本篇；治理账本与各仓 AGENTS 是活源。
 - 裁定变更须立新 ADR，或经 #325 评审轮（A1/A2 规格评审）修订本篇并留痕。
+
+## 修订记录
+
+修订以追加节形态留痕，正文（§1–§9）历史不改写。
+
+### R1（2026-10-24，#325 评审轮 A1 r138 两注记吸收；纯文档零代码）
+
+- **注记①——§4「全链保留」语义钉死：保留 = 可拉起，非承诺常驻活性。** §4 的「全链保留，并作为 oracle 对拍通道维持」中，「保留」指能力面接线完整、**按需可拉起**（外部驱动方启动 rust worker 即可消费 `plaita:flow:queue:rust`、走 registry/读穿透全链）；**不承诺任何常驻活性**——oracle 通道无内建驱动方，没有任何常驻组件负责拉起 rust worker 或维持队列消费；diffcheck 对拍不经队列，以进程直跑（`tools/diffcheck.py` 直接驱动 Go 参照与 Rust 候选）。推论：rust 队列无消费者/积压不构成 oracle 通道的不健康信号；活性保障与监控义务不在本篇范围（§4 正交性结论不变）。
+- **注记②——§5 迁移注记 4 rust 臂钉死：改指对拍链路，不退役。** 「随收敛退役或改指对拍链路」两案钉死为**改指**：console rust 池识别面（`ENGINES` / `ENGINE_TO_RUNTIME` 的 rust 臂、capability_gate rust 池矩阵、issue300 测试族）保留不删，语义从「生产可路由池」改指「oracle 对拍通道在场」的协议面标识。r138 评审指认的缝随之闭合——capability_gate 对 rust worker 注册的处置 = **照常受理**：registry 五键闸本体保留（§4 已定），`collect_pool_manifests` 继续按 rust 池键收集在册清单；E1 收敛后变化只在消费方，发布/调度路径仅对 python 池求值（`VALID_RUNTIMES=("python",)` fail-closed），rust 清单不进发布路由、仅供对拍链路语义下的在场观测消费。「退役」臂废弃理由：退役识别面会连坐 registry 五键闸与读穿透协议面，破坏注记①的可拉起性，使 oracle 通道退化为 diffcheck 直跑单腿。
+- 修订时点基线（§3 快照基线之后的主线推进，快照不改写）：plaita `fe64f773` · plaita-go `ec0f2ed` · plaita-rs `4a2ca27`（2026-10-24 各自 origin/main）。
