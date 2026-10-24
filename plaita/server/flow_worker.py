@@ -132,6 +132,11 @@ from plaita.server.tenant_context import (
     set_current_tenant,
     tenant_namespace,
 )
+from plaita.core.context import _safe_environment
+from plaita.server.tenant_dlq_quota import (
+    reconcile_tenant_dlq_counts,
+    tenant_dlq_reconcile_interval_seconds,
+)
 from plaita.tenant_context import (
     DEFAULT_TENANT_ID,
     TENANT_SOURCE_EXPLICIT,
@@ -2374,6 +2379,16 @@ class FlowWorker:
             # 沙箱回收挂在同一收口（覆盖 start/步进/挂起/终态所有路径）：
             # 非终态是 no-op，终态按上下文快照释放实例
             self._release_sandboxes(execution_id, state)
+            # plaita#326 E1：checkpoint 不落 $ENV 快照（owner 裁决④：值与
+            # allowlist 键名都不落——键名泄露技术栈，同源脱敏）。在持久化
+            # 咽喉点机械化（与 #320 写序同款：不靠每个写点自觉）。strip 落在
+            # **重绑的持久化副本**上，引擎在飞的 context 字典不动——在飞节点
+            # 仍按进程内 $ENV 求值；恢复路径由 ``_reinject_env_for_resume``
+            # 按当前 worker env 重注（值漂移 owner 裁决①接受）。
+            if isinstance(state.context, dict) and "$ENV" in state.context:
+                state.context = {
+                    k: v for k, v in state.context.items() if k != "$ENV"
+                }
             saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
@@ -3917,6 +3932,35 @@ class FlowWorker:
 
         return state, None
 
+    def _reinject_env_for_resume(self, flow: Flow, state: Any) -> None:
+        """恢复/重投路径按当前 worker 进程 env 重注 ``$ENV``（plaita#326）。
+
+        checkpoint 已不落 ``$ENV`` 快照（``_persist_state_or_raise`` 咽喉点
+        strip），而引擎恢复是 ``context.context = saved_context`` **整体替换**
+        （``DistributedStrategy.execute``，不重建 ``$ENV``）——不重注则重入
+        节点的 ``$ENV.XXX`` 静默为空。owner 裁决①②：值漂移**接受**（凭据
+        轮换后重跑节点拿当前值，先前节点结果仍基于旧值，执行内非确定性
+        不抵「凭据冻结在 Redis」违反 T0 本意），重注时具名 WARNING 声明。
+        """
+        context = getattr(state, "context", None)
+        if not isinstance(context, dict):
+            return
+        allowlist = list(getattr(flow, "expose_env", None) or [])
+        if not allowlist:
+            return
+        env_snapshot = _safe_environment(allowlist)
+        if not env_snapshot:
+            return
+        context["$ENV"] = env_snapshot
+        logger.warning(
+            "event=tenant_env.reinject 执行 %s 恢复/重投重注 $ENV（%d 个变量）"
+            "——checkpoint 不落 $ENV 快照（plaita#326），求值来源为当前 worker"
+            "进程 env；若凭据已轮换，重跑节点值与首次执行不同（值漂移，"
+            "owner 裁决接受），先前节点结果仍基于旧值",
+            getattr(state, "execution_id", "?"),
+            len(env_snapshot),
+        )
+
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,
                     data: Optional[Dict[str, Any]] = None,
                     delivery_count: Optional[int] = None,
@@ -4295,6 +4339,11 @@ class FlowWorker:
             # 铸的声明）；挂起/老行无声明 ⇒ tokenless（见
             # ``_bind_step_ownership``）。重投读同一行 ⇒ 同 token。
             self._bind_step_ownership(execution, state)
+            # plaita#326 E1（owner 裁决①②）：checkpoint 已不落 $ENV 快照，
+            # 恢复/重投路径的 ``$ENV.XXX`` 求值来源 = **重注后的进程 env**——
+            # 按 flow expose_env allowlist 从当前 worker 进程 env 重注；
+            # 不重注则表达式静默为空（0.5.0 语义），违「降级必须可观测」红线。
+            self._reinject_env_for_resume(flow, state)
             result = execution.run_distributed(
                 flow,
                 params=params,
@@ -4466,16 +4515,8 @@ class FlowWorker:
         """
 
         # 初始化状态
-        # 凭据可见性（升级演练 P2-1 + MIGRATION 轮换提醒）：expose_env 白名单
-        # 命中的变量会随 checkpoint 持久化到 Redis——每个执行只告警一次。
-        context_for_warn = result.get("context") or {}
-        env_snapshot = context_for_warn.get("$ENV") if isinstance(context_for_warn, dict) else None
-        if env_snapshot:
-            logger.warning(
-                "执行 %s 的 checkpoint 包含 $ENV 快照（%d 个变量，可能含密钥）。"
-                "这些值会在 Redis 中存活至 TTL/删除——请在升级/退役窗口轮换凭据。",
-                state.execution_id if state is not None else "?", len(env_snapshot),
-            )
+        # plaita#326 E1：checkpoint 已不落 $ENV 快照（持久化咽喉点 strip +
+        # 恢复路径重注），此前的「每执行一次」$ENV 告警随之回收（不留死代码）。
         # id 以「被加载记录的 execution_id」为准（升级演练 P2-2）：老 checkpoint
         # 的 context 可能缺 $EXECUTION_ID，信任 result 会把终态写到
         # plaita:execution: 空键，原记录永久停留 suspended。
@@ -5424,6 +5465,13 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         )
         self._last_residue_sweep: Optional[float] = None
         self._residue_sweep_lock = threading.Lock()
+
+        # per-tenant DLQ 配额扫描对账（plaita#327 wave 2，owner 裁决③）：
+        # 闸门=写路径计数，观测=周期扫描纠偏——与残留回收同形制（到期才扫、
+        # 非阻塞锁防并发），复用消费循环线程，不新增进程。
+        self._dlq_reconcile_interval_seconds = tenant_dlq_reconcile_interval_seconds()
+        self._last_dlq_reconcile: Optional[float] = None
+        self._dlq_reconcile_lock = threading.Lock()
         
         # 服务注册
         self._enable_registry = enable_registry
@@ -7198,6 +7246,8 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
 
         # 队列残留回收（#43）：启动时先扫一次，之后由消费循环按间隔兜底
         self._sweep_residue_if_due(queue)
+        # DLQ 配额扫描对账（#327 wave 2）：同样启动先扫一轮，消费循环按间隔兜底
+        self._reconcile_dlq_quota_if_due(queue)
 
         # 租约看门狗（波次②）：持租约执行每 TTL/3 续租，防长步被 XCLAIM 抢占
         self._start_lease_watchdog()
@@ -7276,6 +7326,53 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         finally:
             self._residue_sweep_lock.release()
 
+    def _reconcile_dlq_quota_if_due(self, queue: RedisStreamTaskQueue) -> None:
+        """按间隔做 per-tenant DLQ 配额扫描对账纠偏（plaita#327 wave 2）。
+
+        计数分工（owner 裁决③）：闸门用写路径计数（HINCRBY 原子），本方法
+        是观测半边——周期扫描两流真实水位，纠偏写路径 HASH 的漂移（虚高不
+        纠，满格留 pending 的载体永无「水位回落」可等）。与残留回收同形制：
+        消费循环同线程、到期才扫、非阻塞锁防并发；**观测路径绝不打断消费**
+        ——任何异常降级 WARNING，下轮再试。注入/子类化的异构队列缺属性时
+        静默跳过（向后兼容，同 _sweep_residue_if_due 纪律）。
+        """
+        interval = getattr(self, "_dlq_reconcile_interval_seconds", 0.0) or 0.0
+        if interval <= 0:
+            return
+        client = getattr(queue, "redis", None)
+        dlq_key = getattr(queue, "dlq_key", None)
+        if client is None or not dlq_key:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_last_dlq_reconcile", None)
+        if last is not None and now - last < interval:
+            return
+        if not self._dlq_reconcile_lock.acquire(blocking=False):
+            return
+        try:
+            self._last_dlq_reconcile = time.monotonic()
+            report = reconcile_tenant_dlq_counts(
+                client,
+                dlq_key,
+                dlq_max_len=getattr(queue, "dlq_max_len", None),
+                cap=getattr(queue, "tenant_dlq_max_entries", None),
+            )
+            if report.get("corrections"):
+                logger.info(
+                    "DLQ 配额扫描对账完成：纠偏 %d 个租户计数（platform=%d, "
+                    "quarantine_streams=%d）",
+                    len(report["corrections"]),
+                    report["platform_total"],
+                    report["quarantine_streams"],
+                )
+        except Exception as exc:  # noqa: BLE001 — 观测路径不得打断消费
+            logger.warning(
+                "DLQ 配额扫描对账失败（忽略，下轮再试）: %s",
+                _scrub_exception_text(exc),
+            )
+        finally:
+            self._dlq_reconcile_lock.release()
+
     def _disk_guard_blocks_claim(self) -> bool:
         """claim 前的本机盘预检（#49）：True = 本机盘低于守线，本轮不领任务。
 
@@ -7348,6 +7445,12 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     self._wait_disk_guard()
                     continue
                 self._sweep_residue_if_due(queue)
+                # DLQ 配额扫描对账（#327 wave 2）：与残留回收同节奏到期兜底。
+                # getattr 防御（r90 纪律）：_consume_loop 被测试替身鸭子型
+                # 直驱（无 __init__/缺新方法），替身没 stub 不得炸循环。
+                _reconcile = getattr(self, "_reconcile_dlq_quota_if_due", None)
+                if callable(_reconcile):
+                    _reconcile(queue)
                 # 分片阻塞读取（2026-09 分布式评审 P2-2）：XREADGROUP 的
                 # BLOCK 无法被信号中断出循环，整块 10s 会让 SIGTERM 后的
                 # worker 继续抢任务最长 10s。切成 ≤1s 的窗口，停机延迟
