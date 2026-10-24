@@ -3383,9 +3383,13 @@ class FlowWorker:
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
             # plaita#322：进度上报回调（report_progress → last_report_at 单点写）。
-            execution.bind_progress_reporter(
-                lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
-            )
+            _reporter_binder = getattr(execution, "bind_progress_reporter", None)
+            if callable(_reporter_binder):
+                # 替身执行对象（console conformance StubExecution 等）缺绑定时
+                # 静默跳过——上报是观测面，绝不打断执行（d61a038a CI 红教训）。
+                _reporter_binder(
+                    lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+                )
 
             # start 幂等键（波次二任务③，与 G1 预铸 id 组合）：在先行落行
             # 之前认领，映射值=预铸或就地铸造的 execution_id——重投/双开
@@ -4257,9 +4261,13 @@ class FlowWorker:
             self._bind_observers(execution)
             # plaita#322：进度上报回调（同 start 路径——report_progress 的
             # worker 面）。
-            execution.bind_progress_reporter(
-                lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
-            )
+            _reporter_binder = getattr(execution, "bind_progress_reporter", None)
+            if callable(_reporter_binder):
+                # 替身执行对象（console conformance StubExecution 等）缺绑定时
+                # 静默跳过——上报是观测面，绝不打断执行（d61a038a CI 红教训）。
+                _reporter_binder(
+                    lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+                )
             # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
             # 被 XCLAIM 抢占双跑（fence 世代随登记带上，心跳写要过世代 CAS）
             self._register_lease_watch(
@@ -4484,9 +4492,13 @@ class FlowWorker:
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
             # plaita#322：向后兼容的按需创建路径同样挂进度上报回调。
-            execution.bind_progress_reporter(
-                lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
-            )
+            _reporter_binder = getattr(execution, "bind_progress_reporter", None)
+            if callable(_reporter_binder):
+                # 替身执行对象（console conformance StubExecution 等）缺绑定时
+                # 静默跳过——上报是观测面，绝不打断执行（d61a038a CI 红教训）。
+                _reporter_binder(
+                    lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+                )
 
         steps_since_persist = 0
         # plaita#322：本消息已消费的 step token（声明链锚——step_persist 的
