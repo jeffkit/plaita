@@ -1112,3 +1112,4 @@
 - 门禁（无管道直录）：unit 全量 **9156P/13S/3501 subtests rc=0**（12:43，触引擎面纪律）；ruff 改动两源文件 BLE001 12=基线 12 零新增+测试文件全绿；mkdocs 未跑（未触 docs-site/）；landing_gate ci **绿**（main CI success + Console E2E success @ 97859f2）。
 - 残面：`_error_fields` SNE 优先仅落 worker 落盘面（normal 根异常对象本体 #330 已定）；worker nofail 确定性失败记账对 SNE 生效（W3 修后路径，观测面可见反复 SNE 执行）。
 - 证据：`docs/proofs/r99-issue337-sne-terminal.md` + `docs/proofs/data/r99-*`。交付=分支 `fix/issue337-sne-terminal` 待主控验收合并；landing_gate 推前核验；回评附 #337 一行。
+- **CI 终态补记（同日）**：推送 `ad6d43ea..89bf1c0b` 三提交（cd3ac1bc 修复 + 00a1b2f5 合并 #337 + 89bf1c0b 并树补记）四腿终判全绿 @89bf1c0——**CI success / slow lane success / Console E2E success / Deploy docs success**。#336 回评已发（issuecomment-6385971293）；单留 open 待提报方验收。
