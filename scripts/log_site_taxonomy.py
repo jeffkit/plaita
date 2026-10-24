@@ -246,6 +246,14 @@ A_RULES = [
      r"|ast\.unparse|\bdata\b|\bmember\b|final_decision|event_filter|service_config"
      r"|\binstance\b",
      "数据面内容（求值结果/消息载荷/流程配置内容/决议值）"),
+    # --- plaita#332 裁定轮新增判据（B2 r98）：同上，只追加在列表末尾零扰动。---
+    (r"_tenant\b|\bmapped\b|unknown_ids",
+     "运行实体标识（租户 / dedup 映射的 execution_id / 实例 id 集合）"),
+    (r"\btenant\b",
+     "租户标识（裸 tenant 变量或墓碑租户字段，跨日志可回查）"),
+    (r"type_key|index_key|key_prefix|state_key|quarantine_key|key_text|sub_key"
+     r"|\bbucket\b",
+     "存储/索引实体键（定位数据实体）"),
 ]
 
 CLASS_ORDER = ("C", "A", "B")  # 站点级取最严：任一 C ⇒ C；否则含 A ⇒ A；否则 B
