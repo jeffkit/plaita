@@ -1,0 +1,9 @@
+outbox 投递失败（将退避重试）：flaky@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: chaos: target rejecting
+== r97 跨进程 2 副本驱动（tree=/Users/kong/projects/infra4agent/plaita-wt2，run=6.0s）==
+child0: pid=74876 cycles=106 deliveries={'f1': 1, 'f3': 1, 'f5': 1} lease_skipped=4 fatal=None
+child1: pid=74877 cycles=103 deliveries={'f2': 1, 'f4': 1, 'flaky': 1} lease_skipped=3 fatal=None
+per-flow totals: {'f1': 1, 'f3': 1, 'f5': 1, 'f2': 1, 'f4': 1, 'flaky': 1}
+missing(未投递): []
+duplicates(重复投递): {}
+child fatals: []; child rc: [0, 0]
+VERDICT: ZERO-DUPLICATE-GREEN

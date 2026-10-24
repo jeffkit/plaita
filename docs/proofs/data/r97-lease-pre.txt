@@ -1,0 +1,10 @@
+outbox 投递失败（将退避重试）：flaky@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: chaos: target rejecting
+outbox 投递失败（将退避重试）：flaky@1.0.0（租户 default）attempts=1/8 reason=redis_unavailable: chaos: target rejecting
+== r97 跨进程 2 副本驱动（tree=/tmp/r97-base，run=6.0s）==
+child0: pid=71590 cycles=105 deliveries={'f1': 1, 'f2': 1, 'f3': 1, 'f4': 1, 'f5': 1} lease_skipped=0 fatal=None
+child1: pid=71591 cycles=104 deliveries={'f1': 1, 'f2': 1, 'f3': 1, 'f4': 1, 'f5': 1, 'flaky': 1} lease_skipped=0 fatal=None
+per-flow totals: {'f1': 2, 'f2': 2, 'f3': 2, 'f4': 2, 'f5': 2, 'flaky': 1}
+missing(未投递): []
+duplicates(重复投递): {'f1': 2, 'f2': 2, 'f3': 2, 'f4': 2, 'f5': 2}
+child fatals: []; child rc: [0, 0]
+VERDICT: RED
