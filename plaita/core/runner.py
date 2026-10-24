@@ -171,6 +171,11 @@ def is_retryable_error(exc: BaseException) -> bool:
       裁决 2026-10-22：Python 采纳完整集，Go 不放松）。但节点输出校验钩子
       抛出的异常除外（#219 契约：校验异常仍走 retryTimes），豁免对整个
       确定性家族一致生效。
+    - 具名终态失败 ``SuspendNotExecutableError``（plaita#337）：挂起节点在当前
+      宿主不可执行的确定性失败，**不重试**——重试只会重烧子流程挂起点之前的
+      全部副作用。#219 校验豁免对它不适用（校验钩子不产 SNE）；节点循环的
+      逃逸分支（#331）已让 SNE 不进重试，本分支接线的是分类判据本身，
+      供 worker 层与包装链复用（单一来源）。
     - 其余异常（``RuntimeError``、节点自身 ``TimeoutError`` 等）：保持历史行为。
 
     A50-03：公开导出。worker 层的重投判据必须复用同一份分类，否则
@@ -189,6 +194,14 @@ def is_retryable_error(exc: BaseException) -> bool:
         return False
     if isinstance(exc, _DETERMINISTIC_ERROR_CLASSES):
         return is_output_validation_retryable(exc)
+    if isinstance(exc, SuspendNotExecutableError):
+        # plaita#337：具名终态失败（挂起节点在当前宿主不可执行，errors.py 类
+        # docstring 契约「worker / 上层按类型判终态不重试」）。确定性失败，
+        # 重试只会重烧子流程挂起点之前的全部副作用；先于 #219 校验豁免语义
+        # （校验钩子不产 SNE，终态身份不随调用面漂移）。节点循环的逃逸分支
+        # （#331）让 SNE 不进本函数，这里接线的是分类判据本身——worker 层
+        # 与任何包装链（abort/归一化）都复用本函数作单一来源。
+        return False
     return True
 
 

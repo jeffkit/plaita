@@ -1090,3 +1090,13 @@
 - 残面：#339 代码级关闭候 #335 落地（验收格已绿、依赖其 `engine_backend.resume_execution`）；本席不代收官。
 - 证据：`docs/proofs/r93-i338-nested-env-faces.md` + `docs/proofs/data/r93-probe-nested-env-postfix.txt`。交付=主 clone 直落 main（主 clone 席位口径；逐路径 add，邻席 #335 WIP 不暂存）；landing_gate 推前核验；回评附 #338/#339 各一行。
 - **CI 终态补记（同日）**：本轮两推 `9343910b`（代码+proofs+台账）+ `5bcb4084`（探针归档）在途 run 被后继推送取代 cancelled（非红判据）；终判=后继 run `97859f20`（B1 r93 #338，含本轮提交祖先）四腿 **CI success / slow lane success / Console E2E success / Deploy docs success**。回评 #319/#335 已发；两单留 open 待提报方验收。
+
+## 第九十九轮 · plaita#337（SuspendNotExecutableError「终态不重试」零接线——两层判据 + 终态落盘身份，P1，2026-10-24，B2 修复席）
+
+- 基线：`origin/main` `3271ba89`（issue 基线 5637548c 之后 main 已前进）。**开工对账修正 issue 反证有效集**：#331 W2（`3b9f6b32`）的 `NodeRunner._execute_with_retry` 逃逸分支（通用 except 之前原样上抛 carrier/SNE）已把反证一「retryTimes 烧穿」关掉——修前探针实证：节点循环 1 次执行+SNE 身份原样（P2 绿）、嵌套 eager 集成场景同（P5 绿）、worker 直连链不可重投系「链上无 NodeExecutionError」缺省侥幸（W2 绿，非按类型）。issue 提报于逃逸分支落地之前，属**部分过期反证**；本轮交付=契约判据接线与机器可判身份，非行为翻面。
+- 修法三处：①`runner.is_retryable_error` 尾部补 `isinstance(SuspendNotExecutableError)→False`（分类单一来源对具名终态失败成立；`_DETERMINISTIC_ERROR_CLASSES` 四类不动=与 Go pyDeterministicEnvelopeTypes 逐字对齐面不掺 SNE；先于 #219 豁免语义——校验钩子不产 SNE）；②`flow_worker._is_retryable_node_failure` 不重试家族元组补 SNE（与超时/取消同形：任意链位直接 False，防病态包装链——节点函数吞 SNE 再抛普通异常时 `__cause__` 深处仍按类型判终态）；③`_error_fields` 身份判定链上 SNE **最优先**（原「节点级→最深引擎异常」分别落 node_error/flow_error——runtime 呈现的 SNE 带 `__cause__`=carrier（FLOW_ERROR），abort 包装在场时取 NodeExecutionError——稳定字符串 `suspend_not_executable` 双路丢失，#312 分流无机判锚）。
+- 先红后绿（`test_issue330_suspend_not_executable.py::TestTerminalNoRetryWiring` 9 格）：修前 **6F/3P**（R1/R1b 分类面、W1 包装链可重投、W3 resume_flow 走重投异常+预算键写、E1/E2 终态身份被顶）→ **9P**（`docs/proofs/data/r99-prefix-pytest.txt` rc=1→新类 rc=0）；独立探针 7 格 rc=1→0 全 PASS（`docs/proofs/data/r99-prefix-probe.txt`）。W1 的 abort 包装链形当前引擎已不可产出（逃逸分支拦截），格钉 A50-03「分类经包装层必须保真」契约面+病态链防御。
+- 守恒：目标家族套件（issue330 全文件/issue331/nested_suspend/issue33/r50/node_f2/r75/issue297/issue73/issue123）**203P/1S**（skip=存量 mark）；呈现面文案/`DETERMINISTIC_ERROR_TYPES`/#219 标记面/strategies 决策面零改动（#317 对拍锚无 Python 侧触碰）。
+- 门禁（无管道直录）：unit 全量 **9156P/13S/3501 subtests rc=0**（12:43，触引擎面纪律）；ruff 改动两源文件 BLE001 12=基线 12 零新增+测试文件全绿；mkdocs 未跑（未触 docs-site/）；landing_gate ci **绿**（main CI success + Console E2E success @ 97859f2）。
+- 残面：`_error_fields` SNE 优先仅落 worker 落盘面（normal 根异常对象本体 #330 已定）；worker nofail 确定性失败记账对 SNE 生效（W3 修后路径，观测面可见反复 SNE 执行）。
+- 证据：`docs/proofs/r99-issue337-sne-terminal.md` + `docs/proofs/data/r99-*`。交付=分支 `fix/issue337-sne-terminal` 待主控验收合并；landing_gate 推前核验；回评附 #337 一行。
