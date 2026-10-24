@@ -48,6 +48,8 @@ pytest.importorskip("redis")
 
 import fakeredis
 
+from plaita.core.executor import FlowExecution
+from plaita.core.flow import Flow
 from plaita.server.flow_worker import RedisFlowWorker
 from plaita.storage.base import ExecutionState
 from plaita.storage.memory import MemoryExecutionStorage, MemoryFlowStorage
@@ -322,3 +324,322 @@ class TestPurgeScript:
         result = fake.eval(purge._CAS_LUA, 1, key, stale, '{"context":{}}', "0")
         assert int(result) == 0
         assert fake.get(key) == fresh
+
+
+# ---------------------------------------------------------------------------
+# plaita#338：嵌套挂起帧面（$SUSPEND_FRAMES[*].context[.$PARENT]）同源扩展
+# ---------------------------------------------------------------------------
+
+def _frame(flow_id, node_id, context):
+    """NS-M3 帧 schema（strategies._carrier_frame_dicts 同形）。"""
+    return {"node_id": node_id, "flow_id": flow_id, "context": context}
+
+
+#: 真引擎四面格的根 flow（根声明 allowlist + child 内 event 挂起 + 内层求值面）。
+NESTED_REAL_ROOT_FLOW = {
+    "flow_id": "root1", "version": "1", "runtime": "python",
+    "expose_env": ["P326_NESTED_SECRET"],
+    "nodes": [
+        {"type": "start", "id": "start", "next": "call"},
+        {"type": "child", "id": "call", "childFlow": {
+            "flow_id": "child1", "version": "1", "runtime": "python",
+            "nodes": [
+                {"type": "start", "id": "cstart", "next": "wait"},
+                {"type": "event", "id": "wait", "event_type": "approval",
+                 "next": "cap"},
+                {"type": "assignment", "id": "cap",
+                 "result": "$ENV.P326_NESTED_SECRET", "next": "cend"},
+                {"type": "end", "id": "cend",
+                 "output": {"seen": "$ENV.P326_NESTED_SECRET"}},
+            ],
+        }, "next": "end"},
+        {"type": "end", "id": "end", "output": "root-done"},
+    ],
+}
+
+
+def _nested_env_checkpoint(frame_secret="frame-snapshot", parent_secret="parent-snapshot",
+                           root_secret="root-snapshot"):
+    """嵌套挂起形状：根面 + 帧面双面带 $ENV 明文（legacy 行完整形态）。"""
+    return {
+        "$LAST_NODE": "call",
+        "$INPUT": {"k": 1},
+        "$ENV": {"P326_SECRET": root_secret, "P326_BASE": "https://x"},
+        "$SUSPEND_FRAMES": [
+            _frame("child1", "wait", {
+                "$FLOW_ID": "child1",
+                "$INPUT": {"x": 1},
+                "$ENV": {"P326_SECRET": frame_secret, "P326_BASE": "https://y"},
+                "$PARENT": {
+                    "$FLOW_ID": "f1",
+                    "$ENV": {"P326_SECRET": parent_secret, "P326_BASE": "https://x"},
+                },
+            }),
+            _frame("f1", "call", None),
+        ],
+    }
+
+
+class TestNestedFrameStrip:
+    def test_persist_strips_env_from_frames_and_parent_chain(self):
+        """#338 [B]：咽喉点 strip 覆盖帧面——帧 context 与帧内 $PARENT 的
+        $ENV（值与键名）都不落盘；其余帧字段原样；引擎在飞对象不动。"""
+        worker, storage, _fake = _worker()
+        inflight = _nested_env_checkpoint()
+        state = ExecutionState(
+            execution_id=EXEC,
+            flow_id="f1",
+            flow_version="1",
+            status="suspended",
+            context=inflight,
+        )
+        worker._persist_state_or_raise(EXEC, state, "suspended")
+        reloaded = storage.load_execution_state(EXEC)
+        dumped = json.dumps(reloaded.model_dump())
+        assert "$ENV" not in reloaded.context, "根面 strip（wave 2 守恒）"
+        assert '"$ENV"' not in dumped, "帧面键名也不落盘（owner 裁决④）"
+        assert "frame-snapshot" not in dumped and "parent-snapshot" not in dumped, (
+            "帧面值不落盘"
+        )
+        assert "root-snapshot" not in dumped, "根面值不落盘"
+        fc = reloaded.context["$SUSPEND_FRAMES"][0]["context"]
+        assert fc["$INPUT"] == {"x": 1}, "帧 context 其余键原样"
+        assert fc["$PARENT"]["$FLOW_ID"] == "f1", "$PARENT 面除 $ENV 外原样"
+        # 引擎在飞对象不动（重绑副本语义的嵌套延伸；ExecutionState 浅拷贝
+        # context 顶层，帧内嵌套容器与在飞对象共享引用）
+        assert inflight["$SUSPEND_FRAMES"][0]["context"]["$ENV"]["P326_SECRET"] == (
+            "frame-snapshot"
+        )
+        assert inflight["$SUSPEND_FRAMES"][0]["context"]["$PARENT"]["$ENV"][
+            "P326_SECRET"
+        ] == "parent-snapshot"
+        assert inflight["$ENV"]["P326_SECRET"] == "root-snapshot", "根面在飞字典原样"
+
+    def test_strip_noop_row_returned_unchanged_shape(self):
+        """无 $ENV 面（新管线已净行）strip 后形状逐键不变（守恒负控）。"""
+        from plaita.core.env_checkpoint import strip_env_snapshot
+
+        clean = _nested_env_checkpoint()
+        clean.pop("$ENV")
+        clean["$SUSPEND_FRAMES"][0]["context"].pop("$ENV")
+        clean["$SUSPEND_FRAMES"][0]["context"]["$PARENT"].pop("$ENV")
+        snapshot = json.dumps(clean, sort_keys=True)
+        out = strip_env_snapshot(clean)
+        assert json.dumps(out, sort_keys=True) == snapshot, "净行零字节变化"
+
+
+class TestNestedFrameReinjection:
+    def test_frame_own_expose_env_wins_root_undeclared_no_empty_face(
+        self, monkeypatch, caplog
+    ):
+        """#338 [D] 前置：帧面按**该帧生效 allowlist**重注——内层 flow 自声明
+        优先（setup_flow 同判据）；根 flow 未声明时根面与父面不造空 $ENV。"""
+        monkeypatch.setenv("P326_SECRET", "root-rotated")
+        monkeypatch.setenv("P326_CHILD_ONLY", "child-rotated")
+        root = Flow.model_validate({
+            "flow_id": "f1", "version": "1",
+            "nodes": [
+                {"type": "start", "id": "start", "next": "call"},
+                {"type": "child", "id": "call", "childFlow": {
+                    "flow_id": "child1", "version": "1",
+                    "expose_env": ["P326_CHILD_ONLY"],
+                    "nodes": [
+                        {"type": "start", "id": "cs", "next": "w"},
+                        {"type": "event", "id": "w", "event_type": "approval",
+                         "next": "ce"},
+                        {"type": "end", "id": "ce", "output": "ok"},
+                    ],
+                }, "next": "end"},
+                {"type": "end", "id": "end", "output": "ok"},
+            ],
+        })
+        worker, _storage, _fake = _worker()
+        ctx = {
+            "$INPUT": {},
+            "$SUSPEND_FRAMES": [
+                _frame("child1", "w", {
+                    "$FLOW_ID": "child1",
+                    "$PARENT": {"$FLOW_ID": "f1"},
+                }),
+                _frame("f1", "call", None),
+            ],
+        }
+        state = ExecutionState(
+            execution_id=EXEC, flow_id="f1", flow_version="1",
+            status="suspended", context=ctx,
+        )
+        with caplog.at_level(logging.WARNING, logger="plaita.server.flow_worker"):
+            worker._reinject_env_for_resume(root, state)
+        # ExecutionState 浅拷贝 context 顶层——重注面一律从 state.context 读。
+        rectx = state.context
+        fc = rectx["$SUSPEND_FRAMES"][0]["context"]
+        assert fc["$ENV"] == {"P326_CHILD_ONLY": "child-rotated"}, (
+            "帧面=内层 flow 自声明 allowlist 的当前进程值"
+        )
+        assert "$ENV" not in fc["$PARENT"], "父面 allowlist 为空 → 不造空 $ENV 面"
+        assert "$ENV" not in rectx, "根面 allowlist 为空 → 根面不动"
+        assert "tenant_env.reinject" in caplog.text and "值漂移" in caplog.text, (
+            "具名 WARNING 语义保留（帧面重注同样声明）"
+        )
+
+    def test_frame_inherits_root_allowlist_and_overwrites_stale(
+        self, monkeypatch
+    ):
+        """内层 flow 未声明 expose_env → 继承根 allowlist（构造期继承语义）；
+        legacy 帧面旧快照被当前 env 覆盖（不吃旧值，owner 裁决①）。"""
+        monkeypatch.setenv("P326_SECRET", "root-rotated-current")
+        root = Flow.model_validate({
+            "flow_id": "f1", "version": "1", "expose_env": ["P326_SECRET"],
+            "nodes": [
+                {"type": "start", "id": "start", "next": "call"},
+                {"type": "child", "id": "call", "childFlow": {
+                    "flow_id": "child1", "version": "1",
+                    "nodes": [
+                        {"type": "start", "id": "cs", "next": "w"},
+                        {"type": "event", "id": "w", "event_type": "approval",
+                         "next": "ce"},
+                        {"type": "end", "id": "ce", "output": "ok"},
+                    ],
+                }, "next": "end"},
+                {"type": "end", "id": "end", "output": "ok"},
+            ],
+        })
+        worker, _storage, _fake = _worker()
+        ctx = _nested_env_checkpoint(frame_secret="stale-frame", parent_secret="stale-parent")
+        state = ExecutionState(
+            execution_id=EXEC, flow_id="f1", flow_version="1",
+            status="suspended", context=ctx,
+        )
+        worker._reinject_env_for_resume(root, state)
+        # ExecutionState 浅拷贝 context 顶层——重注面一律从 state.context 读。
+        rectx = state.context
+        assert rectx["$ENV"] == {"P326_SECRET": "root-rotated-current"}, (
+            "根面重注且 legacy 旧快照被当前值覆盖（不吃旧值）"
+        )
+        fc = rectx["$SUSPEND_FRAMES"][0]["context"]
+        assert fc["$ENV"] == {"P326_SECRET": "root-rotated-current"}, (
+            "帧面继承根 allowlist 且不吃旧快照"
+        )
+        assert fc["$PARENT"]["$ENV"] == {"P326_SECRET": "root-rotated-current"}, (
+            "帧内 $PARENT 面同源重注"
+        )
+
+
+class TestPurgeScriptNested:
+    def test_dry_run_and_apply_reach_nested_frames(self):
+        """#338 [C]：顶层无 $ENV 但帧面有的存量行——purge 不再 kept 短路；
+        干跑不写字节，实清拔净三面（值与键名）且帧结构原样。"""
+        purge = _load_script("purge_env_from_checkpoints")
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        key = "plaita:execution:e-nested"
+        row = {
+            "execution_id": "e-nested",
+            "flow_id": "f1",
+            "status": "suspended",
+            "context": _nested_env_checkpoint(),
+        }
+        fake.set(key, json.dumps(row))
+        before = fake.get(key)
+
+        assert purge.purge_one(fake, key, apply=False) == "purged", (
+            "干跑即报告嵌套命中"
+        )
+        assert fake.get(key) == before, "干跑不写"
+
+        assert purge.purge_one(fake, key, apply=True) == "purged"
+        raw = fake.get(key)
+        assert '"$ENV"' not in raw, "帧面键名拔除"
+        assert "frame-snapshot" not in raw and "parent-snapshot" not in raw, (
+            "帧面值拔除"
+        )
+        after = json.loads(raw)["context"]
+        fc = after["$SUSPEND_FRAMES"][0]["context"]
+        assert fc["$INPUT"] == {"x": 1} and fc["$FLOW_ID"] == "child1"
+        assert fc["$PARENT"]["$FLOW_ID"] == "f1"
+        assert after["$SUSPEND_FRAMES"][1] == {"node_id": "call", "flow_id": "f1",
+                                              "context": None}, "根帧原样"
+        # 已净行二次跑 = kept（no-op 幂等）
+        assert purge.purge_one(fake, key, apply=True) == "kept"
+
+
+class _NestedRecordingBus:
+    """最小事件总线替身：登记/注销订阅（A1 r140 探针同款）。"""
+
+    def __init__(self):
+        self.subscriptions = {}
+        self._seq = 0
+
+    async def register_subscription(self, event_type=None, correlation_id=None,
+                                    flow_id=None, node_id=None, **kw):
+        self._seq += 1
+        sid = f"sub-{self._seq}"
+        self.subscriptions[sid] = {
+            "event_type": event_type, "correlation_id": correlation_id,
+        }
+        return sid
+
+    def unregister_subscription(self, subscription_id):
+        return self.subscriptions.pop(subscription_id, None)
+
+
+class TestNestedRealEngineFourGrid:
+    def test_real_engine_nested_suspend_strip_purge_reinject_resume(
+        self, monkeypatch, caplog
+    ):
+        """#338 真引擎四面格（A1 r140 探针 /tmp/a1r140 复跑等价）：
+        [A] 平铺 strip（既有格家族守恒）→ [B] 嵌套帧面落盘无 $ENV（值与键名）
+        → [C] purge 对净行 no-op → [D] 轮换 env 后重注达帧面，嵌套恢复内层
+        求值 = 当前进程值（不静默为空、不吃旧快照）。"""
+        monkeypatch.setenv("P326_NESTED_SECRET", "old-snapshot-value")
+        flow = Flow.model_validate(NESTED_REAL_ROOT_FLOW)
+        bus = _NestedRecordingBus()
+        ex = FlowExecution(event_bus=bus)
+        ex.mode = "distributed"
+        r1 = ex.run_distributed(flow, {})
+        assert r1.get("is_suspend"), "嵌套挂起应成立（NS-M3 正路）"
+        frames = r1["context"].get("$SUSPEND_FRAMES")
+        assert isinstance(frames, list) and frames, "帧路径应随挂起落 context"
+        sid = next(iter(bus.subscriptions))
+
+        worker, storage, fake = _worker(flow=dict(NESTED_REAL_ROOT_FLOW))
+        state = ExecutionState(
+            execution_id=EXEC, flow_id="root1", flow_version="1",
+            status="suspended", context=r1["context"],
+        )
+        worker._persist_state_or_raise(EXEC, state, "suspended")
+        loaded = storage.load_execution_state(EXEC)
+
+        # [A]+[B]：根面与帧面都无 $ENV（值与键名）
+        dumped = json.dumps(loaded.model_dump())
+        assert "$ENV" not in (loaded.context or {})
+        assert '"$ENV"' not in dumped
+        assert "old-snapshot-value" not in dumped
+
+        # [C] purge 对已净行 no-op（字节预滤+解析后递归双面守恒）
+        purge = _load_script("purge_env_from_checkpoints")
+        key = f"plaita:execution:{EXEC}"
+        fake.set(key, json.dumps({"execution_id": EXEC, "context": loaded.context}))
+        assert purge.purge_one(fake, key, apply=True) == "kept"
+
+        # [D] 轮换 env → 重注达根面与帧面 → 嵌套恢复内层求值新值
+        monkeypatch.setenv("P326_NESTED_SECRET", "new-rotated-value")
+        with caplog.at_level(logging.WARNING, logger="plaita.server.flow_worker"):
+            worker._reinject_env_for_resume(flow, loaded)
+        assert "tenant_env.reinject" in caplog.text
+        fc = loaded.context["$SUSPEND_FRAMES"][0]["context"]
+        assert loaded.context["$ENV"] == {
+            "P326_NESTED_SECRET": "new-rotated-value"
+        }
+        assert fc["$ENV"] == {"P326_NESTED_SECRET": "new-rotated-value"}
+        assert fc["$PARENT"]["$ENV"] == {"P326_NESTED_SECRET": "new-rotated-value"}
+
+        ex2 = FlowExecution(event_bus=bus)
+        ex2.mode = "distributed"
+        r2 = ex2.run_distributed(
+            flow, saved_context=loaded.context, resume_type="event",
+            resume_data={"subscription_id": sid, "event_type": "approval"})
+        assert not r2.get("is_suspend"), "恢复后不应再挂起"
+        cap_out = (r2.get("context") or {}).get("$NODE", {}).get("call")
+        assert isinstance(cap_out, dict) and cap_out.get("seen") == (
+            "new-rotated-value"
+        ), f"[D] 内层帧 $ENV 求值应为当前进程值，实际 {cap_out!r}"

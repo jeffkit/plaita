@@ -1,0 +1,16 @@
+[engine] is_suspend=True id=call
+[engine] 帧路径: [('child1', 'wait'), ('root1', 'call')]
+
+[A] 顶层 $ENV 已 strip: True
+
+[B] 帧内快照（落盘行实测）:
+  frame0.flow=child1: {"ctx.$ENV": {"A1R140_SECRET": "sk-a1r140-OLD-snapshot-value"}, "ctx.$PARENT.$ENV": {"A1R140_SECRET": "sk-a1r140-OLD-snapshot-value"}}
+  ⇒ 密钥明文命中面: ['frame0.flow=child1.ctx.$ENV', 'frame0.flow=child1.ctx.$PARENT.$ENV']
+
+[C] purge_one(apply=True) = 'kept'；purge 后帧内 $ENV 仍在: 无
+
+[D] 根面重注后顶层 $ENV = {'A1R140_SECRET': 'sk-a1r140-NEW-rotated-value'}
+[D] 恢复推进: id=call is_end=False is_suspend=False
+[D] 回填 $NODE.call（child end output）= {'done': True, 'seen': 'sk-a1r140-NEW-rotated-value'}
+[D] 内层帧 $ENV.A1R140_SECRET 求值 = 'sk-a1r140-NEW-rotated-value'
+[D] 判定: 新值

@@ -132,7 +132,7 @@ from plaita.server.tenant_context import (
     set_current_tenant,
     tenant_namespace,
 )
-from plaita.core.context import _safe_environment
+from plaita.core.env_checkpoint import reinject_env_snapshots, strip_env_snapshot
 from plaita.server.tenant_dlq_quota import (
     reconcile_tenant_dlq_counts,
     tenant_dlq_reconcile_interval_seconds,
@@ -2385,10 +2385,10 @@ class FlowWorker:
             # **重绑的持久化副本**上，引擎在飞的 context 字典不动——在飞节点
             # 仍按进程内 $ENV 求值；恢复路径由 ``_reinject_env_for_resume``
             # 按当前 worker env 重注（值漂移 owner 裁决①接受）。
-            if isinstance(state.context, dict) and "$ENV" in state.context:
-                state.context = {
-                    k: v for k, v in state.context.items() if k != "$ENV"
-                }
+            # plaita#338：strip 面从顶层键扩到嵌套挂起帧
+            # （$SUSPEND_FRAMES[*].context 及帧内 $PARENT 链，同源 helper）。
+            if isinstance(state.context, dict):
+                state.context = strip_env_snapshot(state.context)
             saved = self.execution_storage.save_execution_state(execution_id, state)
         if not saved:
             logger.error(
@@ -3933,32 +3933,33 @@ class FlowWorker:
         return state, None
 
     def _reinject_env_for_resume(self, flow: Flow, state: Any) -> None:
-        """恢复/重投路径按当前 worker 进程 env 重注 ``$ENV``（plaita#326）。
+        """恢复/重投路径按当前 worker 进程 env 重注 ``$ENV``（plaita#326/#338）。
 
         checkpoint 已不落 ``$ENV`` 快照（``_persist_state_or_raise`` 咽喉点
-        strip），而引擎恢复是 ``context.context = saved_context`` **整体替换**
-        （``DistributedStrategy.execute``，不重建 ``$ENV``）——不重注则重入
-        节点的 ``$ENV.XXX`` 静默为空。owner 裁决①②：值漂移**接受**（凭据
-        轮换后重跑节点拿当前值，先前节点结果仍基于旧值，执行内非确定性
-        不抵「凭据冻结在 Redis」违反 T0 本意），重注时具名 WARNING 声明。
+        strip，#338 起含嵌套挂起帧面），而引擎恢复是 ``context.context =
+        saved_context`` **整体替换**（``DistributedStrategy.execute``，不重建
+        ``$ENV``）——不重注则重入节点的 ``$ENV.XXX`` 静默为空。owner 裁决①②：
+        值漂移**接受**（凭据轮换后重跑节点拿当前值，先前节点结果仍基于旧值，
+        执行内非确定性不抵「凭据冻结在 Redis」违反 T0 本意），重注时具名
+        WARNING 声明。根面与嵌套帧面的 allowlist 解析同源在
+        ``plaita.core.env_checkpoint.reinject_env_snapshots``。
         """
         context = getattr(state, "context", None)
         if not isinstance(context, dict):
             return
-        allowlist = list(getattr(flow, "expose_env", None) or [])
-        if not allowlist:
+        info = reinject_env_snapshots(context, flow)
+        if not (info["root"] or info["frames"]):
             return
-        env_snapshot = _safe_environment(allowlist)
-        if not env_snapshot:
-            return
-        context["$ENV"] = env_snapshot
         logger.warning(
-            "event=tenant_env.reinject 执行 %s 恢复/重投重注 $ENV（%d 个变量）"
-            "——checkpoint 不落 $ENV 快照（plaita#326），求值来源为当前 worker"
-            "进程 env；若凭据已轮换，重跑节点值与首次执行不同（值漂移，"
-            "owner 裁决接受），先前节点结果仍基于旧值",
+            "event=tenant_env.reinject 执行 %s 恢复/重投重注 $ENV"
+            "（根面 %s，嵌套帧面 %d 处，%d 个变量）——checkpoint 不落 $ENV "
+            "快照（plaita#326/#338），求值来源为当前 worker 进程 env；若凭据"
+            "已轮换，重跑节点值与首次执行不同（值漂移，owner 裁决接受），"
+            "先前节点结果仍基于旧值",
             getattr(state, "execution_id", "?"),
-            len(env_snapshot),
+            "是" if info["root"] else "否",
+            info["frames"],
+            info["variables"],
         )
 
     def resume_flow(self, flow_id: str, execution_id: str, resume_type: str,

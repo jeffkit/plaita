@@ -2653,11 +2653,13 @@ FlowWorker / EventFilter CLI 的 `--event-bus-type` / `--subscription-storage-ty
    EventFilter 按解析后的类型检索查不到。手动 `resume_flow` 兜底可用；0.5.x 起
    EventFilter 对同 flow 孤儿订阅会打 warning 提示。
 4. **凭据不再落 checkpoint（plaita#326 起）**：checkpoint **不落 `$ENV`
-   快照**（值与 `expose_env` 键名都不落）；`$ENV` 仅在进程内存中用于表达式
+   快照**（值与 `expose_env` 键名都不落；plaita#338 起含嵌套挂起帧
+   `$SUSPEND_FRAMES[*].context` 及帧内 `$PARENT` 链面）；`$ENV` 仅在进程内存中用于表达式
    求值，恢复/重投路径按当前 worker 进程 env 重注（具名 WARNING，凭据轮换
    后重跑节点值漂移为**明示接受**行为）。升级前的存量 state 仍可能携带旧版
    快照——用 `scripts/purge_env_from_checkpoints.py`（干跑默认，`--apply`
-   实清，CAS 原子不与 worker 竞态回滚）一次性清除。
+   实清，CAS 原子不与 worker 竞态回滚；plaita#338 起嵌套帧面残留同清）
+   一次性清除。
 
 
 ---

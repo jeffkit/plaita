@@ -5,6 +5,10 @@
 TTL 30 天内、非终态行不过期——context 里还带着旧快照（值与 allowlist 键名，
 owner 裁决④：键名泄露技术栈，同源脱敏）。本脚本一次性清掉。
 
+#338：清除面从顶层键扩到嵌套挂起帧——``$SUSPEND_FRAMES[*].context`` 及帧内
+``$PARENT`` 链的 ``$ENV`` 与 worker 咽喉 strip 同源（``plaita.core.env_checkpoint.
+strip_env_snapshot``）；顶层无 ``$ENV`` 但帧面有的存量行不再 ``kept`` 短路。
+
 对账器顺带面定位（owner 裁决③「可挂对账器顺带面」）：与 #316
 ``carrier_audit`` / #321 ``reconciler_shadow`` 同族（scripts/ 对账家族），
 单发运行（systemd oneshot / 手动），**不新增常驻进程**；验收按降级口径
@@ -40,8 +44,15 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 logger = logging.getLogger("purge_env_from_checkpoints")
+
+# #338：strip 与 worker 咽喉/恢复重注同源（plaita.core.env_checkpoint）——
+# 脚本以仓内路径运行（对账家族 carrier_audit 同款 import plaita 形制）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from plaita.core.env_checkpoint import strip_env_snapshot  # noqa: E402
 
 #: Redis 连接 env（与对账家族同款：URL 显式，不做隐式默认连接）。
 REDIS_URL_ENV = "PLAITA_PURGE_ENV_REDIS_URL"
@@ -98,6 +109,7 @@ def purge_one(client, key: str, *, apply: bool) -> str:
     else:
         raw_t = raw
     # 字节预滤：绝大多数行（新执行/已清）不命中，零解析开销跳过。
+    # （#338 起命中面含嵌套帧——帧内 $ENV 同样带 `"$ENV"` 字节。）
     if '"$ENV"' not in raw_t:
         return "kept"
     try:
@@ -106,9 +118,15 @@ def purge_one(client, key: str, *, apply: bool) -> str:
         logger.warning("键 %s 反序列化失败（跳过，不动损坏行）", key)
         return "kept"
     context = state.get("context") if isinstance(state, dict) else None
-    if not isinstance(context, dict) or "$ENV" not in context:
+    if not isinstance(context, dict):
         return "kept"
-    context.pop("$ENV", None)
+    # #338：解析后递归嵌套帧面（$SUSPEND_FRAMES[*].context 及帧内 $PARENT
+    # 链，与 worker 咽喉 strip 同源 helper）——顶层无 $ENV 但帧面有的行
+    # 不再 kept 短路；strip 未命中（净行）原对象返回即 kept。
+    stripped = strip_env_snapshot(context)
+    if stripped is context:
+        return "kept"
+    state["context"] = stripped
     if not apply:
         return "purged"
     try:
