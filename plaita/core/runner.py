@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 import isodate
 from concurrent.futures import ThreadPoolExecutor
 
+from plaita.core.capabilities import assert_node_executable
 from plaita.core.errors import (
     DEFAULT_NODE_ABORT_CODE,
     DETERMINISTIC_ERROR_TYPES,
@@ -38,6 +39,7 @@ from plaita.core.errors import (
     NodeException,
     NodeExecutionError,
     NodeTimeoutError,
+    SuspendNotExecutableError,
     is_output_validation_retryable,
     mark_output_validation_retryable,
 )
@@ -615,6 +617,12 @@ class NodeRunner:
             logger.info("node %s rejected: execution cancellation requested", node.id)
             raise err
 
+        # plaita#331 兜底面（A2 r61 评审 §3 分层）：suspending 节点 execute 前断言
+        # 宿主契约（宿主身份取执行链的根，含子流程）。与入口共用同一判定函数；
+        # 正常流不应触达——触达即入口漏了（静态闭包看不见的复合节点、绕过
+        # strategies 直接驱动 runner 的旁路）：具名错误 + WARNING，不静默。
+        assert_node_executable(node, self.node_execution, flow=flow)
+
         total_timeout_ms: Optional[int] = None
         # plaita#138：0 是**合法的最严预算**，必须用 ``is not None`` 判定；
         # 旧的 ``if config_timeout:`` / ``elif max_timeout_ms:`` 把 0 当 falsy
@@ -679,12 +687,15 @@ class NodeRunner:
                     err.source_line = _node_source_loc(node)
                     raise err
                 return _handle_timeout(flow, node.timeout_handler, node, time_limit_by_flow)
-            except FlowSuspendedCarrier:
+            except (FlowSuspendedCarrier, SuspendNotExecutableError):
                 # plaita#311 NS-M3：嵌套挂起载体与取消同待遇——先于重试分类与
                 # errorHandler 原样上抛（挂起不是节点失败；与上方
                 # _raise_if_cancel_requested 的逃逸先例同形）。不提前逃逸的话，
                 # 载体会被通用 except 包成节点错误：被重试 retryTimes 次、再被
                 # errorHandler continue 吞掉（rs 验证报告 Q1 的 stringify 同病）。
+                # plaita#331：``SuspendNotExecutableError`` 同待遇——宿主能力
+                # 拒绝是确定性终态（子流程内 runner 兜底触发时穿出 child 节点的
+                # execute，不得被外层重试/errorHandler 吞掉或改写身份）。
                 raise
             except (Exception, NodeException) as e:
                 # 取消优先于任何节点错误/重试分类：节点在取消后抛出的普通异常

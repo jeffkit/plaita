@@ -456,6 +456,10 @@ def _run_flow(
             handlers.append(langfuse_callback)
         execution = FlowExecution(callback_handlers=handlers)
         execution.mode = ExecutionMode.DISTRIBUTED
+        # plaita#331：宿主身份 = local 后端（进程内事件总线可挂起/恢复，**无**
+        # 持久队列+延迟排程）——引擎入口闸按 local 档判，delay 族在此具名拒
+        # （与 API 层 start/publish 闸同一判定函数，进程内旁路同样有闸）。
+        execution.execution_profile = "local"
         # 让回调能拿到 execution：fresh start 的 on_flow_start（clean 之后触发）
         # 会把 $EXECUTION_ID 覆写为 console 的 execution_id，保持两边一致。
         trace_callback.bind_execution(execution)

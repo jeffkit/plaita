@@ -27,30 +27,23 @@ entry_points 插件发现（违规记 ``_load_errors`` 失败现场，不炸整�
 （试跑安全三态，plaita#190）的关系裁决见
 ``docs/governance/execution-capabilities.md``：同一问题（「节点需要什么才能跑」）
 的两个投影，本单不收编、后续单推导化。
+
+plaita#331 后半：词表本体迁入 :mod:`plaita.core.capabilities`（执行入口 / NodeRunner
+在 core 消费，core 不反向 import node 层）；本模块**再导出同一对象**（公开 import 路径
+守恒），并承担注册期不变量与矩阵导出（:func:`shipped_capability_matrix`）。
 """
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Dict, List, Tuple
 
+from plaita.core.capabilities import (  # noqa: F401  (再导出：公开路径守恒)
+    EXECUTION_CAPABILITY_TOKENS,
+    SUSPEND_CAPABILITY_TOKENS,
+)
 from plaita.core.errors import suspend_guard_mode
 
 logger = logging.getLogger("plaita.node.capabilities")
-
-#: 合法能力 token 全集（词表封闭：新 token = 运行时能力面变更，须改这里+治理文档）。
-EXECUTION_CAPABILITY_TOKENS = frozenset(
-    {
-        "suspend:root",
-        "suspend:nested",
-        "event_bus",
-        "queue",
-        "sandbox",
-        "network",
-    }
-)
-
-#: suspend 家族（is_suspending 节点的最低声明要求）。
-SUSPEND_CAPABILITY_TOKENS = frozenset({"suspend:root", "suspend:nested"})
 
 
 class ExecutionContractError(ValueError):
@@ -96,3 +89,27 @@ def validate_execution_contract(node_cls, *, context: str = "register") -> None:
 def declared_requirements(node_cls) -> Tuple[str, ...]:
     """读取节点类的执行能力声明（统一鸭子兜底：未声明返回空元组）。"""
     return tuple(getattr(node_cls, "execution_requirements", ()) or ())
+
+
+def shipped_capability_matrix() -> Dict[str, List[str]]:
+    """plaita 自带注册面的能力矩阵（plaita#331 ⑤，治理账本 ``gov.capability_matrix`` 的生成源）。
+
+    注册面 = 内置节点 + **本仓** ``pyproject.toml`` 声明的 ``plaita.nodes`` entry points
+    （按 dist 名过滤为 ``plaita``，第三方插件如 plaita-nodes 的 22 节点归其自家账本）+
+    opt-in 的 ``code`` 节点。空声明的节点同样入矩阵——差分断言靠此捕获「新增 node_type
+    而矩阵未变」。
+    """
+    from importlib.metadata import entry_points
+
+    from plaita.node import NodeRegistry
+    from plaita.node.code import CodeNode
+
+    reg = NodeRegistry()
+    for ep in entry_points(group="plaita.nodes"):
+        dist = getattr(ep, "dist", None)
+        dist_name = (dist.metadata["Name"] if dist is not None else "") or ""
+        if dist_name.lower() != "plaita":
+            continue
+        reg.register(ep.load())
+    reg.register(CodeNode)
+    return reg.capability_matrix()

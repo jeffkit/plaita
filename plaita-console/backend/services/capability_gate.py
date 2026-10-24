@@ -1,6 +1,10 @@
 """runtime 能力门（plaita#300）：publish/start 前把 flow 节点集合对照目标
 runtime pool 的 worker 能力清单。
 
+plaita#331 追加执行要求闸（:func:`gate_flow_execution_profile`）：同一发布面
+的第二个输入——#300 按池判「节点集支持性」（case/池维度），#331 按 profile 判
+「执行要求满足性」（flow 维度），两门并列、错误信封并列。
+
 ## 门语义
 
 - 目标池内**存在**带 ``capability_manifest`` 的 worker → 严格校验：flow 节点
@@ -212,12 +216,86 @@ def gate_flow_nodes(
         raise UnsupportedNodeTypesError(detail)
 
 
+class ExecutionProfileUnsatisfiedError(Exception):
+    """flow 的执行要求闭包不被目标执行 profile 满足（plaita#331 拒绝面）。
+
+    ``detail``：``{"error", "profile", "required", "missing", "flow_id",
+    "version"}`` + suspend 族缺失时的 ``node_id/node_type/frame_path``——
+    调用方映射 422 结构化错误。与 #300 门是同一发布面的两个输入：
+    本门 = 执行要求满足性（flow 维度），#300 = 节点集支持性（池维度）。
+    """
+
+    def __init__(self, detail: Dict[str, Any]):
+        super().__init__(
+            f"execution_requirements_unmet: profile={detail.get('profile')} "
+            f"missing={detail.get('missing')}"
+        )
+        self.detail = detail
+
+
+def gate_flow_execution_profile(
+    definition: Any,
+    *,
+    profile: str,
+    flow_id: str = "",
+    version: str = "",
+) -> None:
+    """plaita#331 执行要求闸（publish/start 共用）：递归闭包 required ×
+    目标 profile token 集，缺失即抛 :class:`ExecutionProfileUnsatisfiedError`。
+
+    与引擎执行入口（``plaita.core.capabilities.validate_for_profile``）共用
+    同一判定函数（A2 r61 评审 §3：两层勿写两套判定）；``stage="publish"``
+    落进错误体供消费方辨面。``definition`` 解析/建图失败时跳过并打
+    WARNING——定义合法性归保存路径的 ``Flow.model_validate`` 闸（与
+    :func:`flow_node_types` 同口径），跳过必须可观测（降级留痕红线）。
+    """
+    from plaita.core.capabilities import validate_for_profile
+    from plaita.core.errors import ExecutionProfileError, SuspendNotExecutableError
+    from plaita.core.flow import Flow
+
+    try:
+        data = (
+            json.loads(definition) if isinstance(definition, (str, bytes)) else definition
+        )
+        flow = Flow.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 — 定义合法性由定义闸具名，此处只留痕
+        logger.warning(
+            "执行要求闸跳过：flow=%s@%s definition 不可解析（%s），"
+            "合法性由定义校验闸负责",
+            flow_id or "?", version or "?", type(exc).__name__,
+        )
+        return
+    try:
+        validate_for_profile(flow, profile, stage="publish")
+        return
+    except (SuspendNotExecutableError, ExecutionProfileError) as e:
+        body = e.to_dict()
+        detail: Dict[str, Any] = {
+            "error": body["error_type"],
+            "profile": body.get("profile"),
+            "required": body.get("required") or [],
+            "missing": body.get("missing") or [],
+            "flow_id": flow_id or None,
+            "version": version or None,
+        }
+        for key in ("node_id", "node_type", "frame_path", "sites"):
+            if body.get(key) is not None:
+                detail[key] = body[key]
+        logger.warning(
+            "执行要求闸拒绝：flow=%s@%s profile=%s 缺少 %s",
+            flow_id or "?", version or "?", detail["profile"], detail["missing"],
+        )
+        raise ExecutionProfileUnsatisfiedError(detail) from e
+
+
 __all__ = [
     "POOL_MANIFEST_MISSING_WARNING",
+    "ExecutionProfileUnsatisfiedError",
     "UnsupportedNodeTypesError",
     "check_node_support",
     "collect_pool_manifests",
     "flow_node_types",
+    "gate_flow_execution_profile",
     "gate_flow_nodes",
     "ENGINE_TO_RUNTIME",
 ]

@@ -68,12 +68,19 @@ except ImportError:
 # A126-02：扫描 503 文案按瞬态/持久分流（持久 = 坏行具名，重试无效）
 from plaita.storage.redis import ExecutionStateCorruptError
 
-try:  # plaita#300：runtime 能力门 + 池路由取值域
-    from ..services.capability_gate import UnsupportedNodeTypesError, gate_flow_nodes
+try:  # plaita#300：runtime 能力门 + 池路由取值域；#331：执行要求闸
+    from ..services.capability_gate import (
+        ExecutionProfileUnsatisfiedError,
+        UnsupportedNodeTypesError,
+        gate_flow_execution_profile,
+        gate_flow_nodes,
+    )
     from ..services.runtime_pools import DEFAULT_RUNTIME, normalize_runtime
 except ImportError:
     from services.capability_gate import (  # type: ignore
+        ExecutionProfileUnsatisfiedError,
         UnsupportedNodeTypesError,
+        gate_flow_execution_profile,
         gate_flow_nodes,
     )
     from services.runtime_pools import (  # type: ignore
@@ -266,14 +273,47 @@ def _gate_definition_encodable(row) -> None:
         ) from e
 
 
+def _gate_execution_profile(redis: Optional[Redis], row, *, where: str) -> None:
+    """执行要求闸（plaita#331）：闭包 token × 目标档 profile → 422 结构化拒绝。
+
+    落点在 `_publish_gates` 共享函数（A2 r61 评审 §2.1）：publish 与
+    import-version 两端点自动同闸。目标档：本地单机档（``redis=None``，进程内
+    执行、无持久队列+延迟排程）按 ``local`` 判——delay 族在此档发布即具名拒；
+    集群档发布面向 worker 池（``distributed``，全集）——本闸对内置词表恒过，
+    池维度节点支持性由 #300 门负责（同一发布面的两个输入）。
+    """
+    profile = "local" if redis is None else "distributed"
+    try:
+        gate_flow_execution_profile(
+            row.definition, profile=profile,
+            flow_id=row.flow_id, version=row.version,
+        )
+    except ExecutionProfileUnsatisfiedError as e:
+        detail = dict(e.detail)
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                str(detail.get("error") or "execution_requirements_unmet"),
+                (
+                    f"流程 {row.flow_id}@{row.version} 的执行要求 "
+                    f"{detail.get('required')} 不被目标执行档 "
+                    f"{detail.get('profile')} 满足，缺少 {detail.get('missing')}"
+                    f"（{where}）；版本保持 draft。"
+                ),
+                **detail,
+            ),
+        ) from e
+
+
 def _publish_gates(redis: Optional[Redis], row, *, where: str) -> None:
     """发布前置闸合集：状态翻转前与事务内 fresh 行复核（A2R54）共用同一组。
 
     编码闸（卡 A-1，定义自身判据、零 Redis 往返）先于能力门（#300，
-    查 worker 注册清单）。
+    查 worker 注册清单）与执行要求闸（#331，闭包 × profile）。
     """
     _gate_definition_encodable(row)
     _gate_runtime_capability(redis, row, where=where)
+    _gate_execution_profile(redis, row, where=where)
 
 
 def _validate_definition(definition: str) -> None:

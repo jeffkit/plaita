@@ -125,13 +125,18 @@ class TestRootNormalPresentation:
         assert "'wait'" in str(ei.value)
 
     def test_conversion_preserves_carrier_as_cause(self):
-        """转换是呈现层身份转换：闸点抛的原 carrier 挂在 ``__cause__``。"""
+        """plaita#331 起入口静态闸先行：静态闭包看得见的挂起节点在任何节点执行
+        前即被拒（``stage="entry"``），不经运行期载体——``__cause__`` 为空、
+        挂起点之前节点零执行。运行期根出口呈现降级为兜底（静态闭包看不见的
+        复合节点 / ``PLAITA_SUSPEND_GUARD=warn`` 降级路径，呈现转换与
+        ``__cause__`` carrier 钉见 test_issue331_execution_profile 的 warn 格）。"""
         flow = _event_root_flow()
         ex = FlowExecution()
         ex.mode = "normal"
         with pytest.raises(SuspendNotExecutableError) as ei:
             ex.run_compatible(flow, False)
-        assert isinstance(ei.value.__cause__, FlowSuspendedCarrier)
+        assert ei.value.stage == "entry"
+        assert ei.value.__cause__ is None
 
     @pytest.mark.parametrize(
         "extra,node_type",

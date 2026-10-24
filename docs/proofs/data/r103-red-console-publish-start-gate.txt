@@ -1,0 +1,87 @@
+FF.                                                                      [100%]
+=================================== FAILURES ===================================
+__________________ test_local_publish_delay_flow_rejected_422 __________________
+
+app = <fastapi.applications.FastAPI object at 0x11050c440>
+client = <starlette.testclient.TestClient object at 0x11050c980>
+
+    def test_local_publish_delay_flow_rejected_422(app, client):
+        """publish 格：local 档缺 ``queue``——delay flow 发布即结构化拒，版本保持
+        draft（改动前：本地档发布放行，start 后 delay 挂起永不唤醒）。"""
+        store = flow_store.get_flow_store()
+        store.ensure_flow("delayed", tenant_id="default")
+        store.save_flow_definition("delayed", "1.0.0", _delay_def(), status="draft",
+                                   tenant_id="default")
+        r = client.post("/api/flows/delayed/publish", json={"version": "1.0.0"})
+>       assert r.status_code == 422, r.text
+E       AssertionError: {"flow_id":"delayed","version":"1.0.0","status":"published","definition":"{\"flow_id\": \"delayed\", \"nodes\": [{\"type\": \"start\", \"id\": \"start\", \"next\": \"d\"}, {\"type\": \"delay\", \"id\": \"d\", \"delay_seconds\": 30, \"next\": \"end\"}, {\"type\": \"end\", \"id\": \"end\", \"output\": \"x\"}]}","layout":"","runtime":"python","created_at":"2026-10-24T08:07:58.216618","published_at":"2026-10-24T08:07:58.232530","created_by":"","updated_at":"2026-10-24T08:07:58.232530","tenant_id":"default"}
+E       assert 200 == 422
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_issue331_execution_profile_gate.py:92: AssertionError
+__________ test_local_start_delay_flow_rejected_422_no_execution_row ___________
+
+app = <fastapi.applications.FastAPI object at 0x1105e7890>
+client = <starlette.testclient.TestClient object at 0x1105e74d0>
+
+    def test_local_start_delay_flow_rejected_422_no_execution_row(app, client):
+        """start 格：直置 published（隔离 publish 闸）后本地 start → 422，且不产生
+        执行行/后台线程（改动前：start 受理，suspended 行永不唤醒）。"""
+        store = flow_store.get_flow_store()
+        store.ensure_flow("delayed", tenant_id="default")
+        store.save_flow_definition("delayed", "1.0.0", _delay_def(), status="published",
+                                   tenant_id="default")
+        r = client.post("/api/executions", json={"flow_id": "delayed"})
+>       assert r.status_code == 422, r.text
+E       AssertionError: {"status":"running","flow_id":"delayed","execution_id":"def21b182c4c4dd7","message":"本地模式：流程已在 console 进程内启动"}
+E       assert 200 == 422
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/console/test_issue331_execution_profile_gate.py:111: AssertionError
+=============================== warnings summary ===============================
+config.py:18
+  /private/tmp/r103-base/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py: 23 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_delay_flow_rejected_422_no_execution_row
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+  /private/tmp/r103-base/plaita-console/backend/services/flow_store.py:823: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_delay_flow_rejected_422_no_execution_row
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+  /private/tmp/r103-base/plaita-console/backend/services/flow_store.py:1009: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+  /private/tmp/r103-base/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+plaita-console/backend/tests/console/test_issue331_execution_profile_gate.py::test_local_start_approval_flow_suspends_positive_control
+  /private/tmp/r103-base/plaita-console/backend/services/local_executor.py:225: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().isoformat()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_issue331_execution_profile_gate.py::test_local_publish_delay_flow_rejected_422
+FAILED tests/console/test_issue331_execution_profile_gate.py::test_local_start_delay_flow_rejected_422_no_execution_row
+2 failed, 1 passed, 42 warnings in 1.19s

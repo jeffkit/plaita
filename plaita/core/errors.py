@@ -88,7 +88,13 @@ class FlowErrorType(Enum):
     CALLBACK_TIMEOUT = "callback_timeout"
     # plaita#330：挂起节点在 normal/generator 根出口的具名终态（对外稳定字符串
     # ``suspend_not_executable``，flow_run / SDK 按 `ok=false` + 该类型判终态不重试）。
+    # plaita#331 起同一字符串也覆盖执行入口的静态拒绝（park/resume 族 token 不被
+    # 目标 profile 满足）——#317 对拍锚「normal/debug + 挂起 → 具名拒绝」的机器判据不变。
     SUSPEND_NOT_EXECUTABLE = "suspend_not_executable"
+    # plaita#331：flow 执行要求闭包里**非挂起族** token（network/sandbox）不被目标
+    # profile 满足。内置 normal/generator/distributed 三 profile 均含这两 token，
+    # 本类型只在自定义 profile（console 池 profile 等）上出现。
+    EXECUTION_PROFILE_UNSATISFIED = "execution_profile_unsatisfied"
 
 
 class ResumeType(Enum):
@@ -341,7 +347,10 @@ class FlowSuspendRejectedError(FlowExecutionException):
 #: 回滚旋钮（plaita#330 §7，A2 评审 §5 收窄形态）：
 #: ``PLAITA_SUSPEND_GUARD=warn`` 只作用于 **#330 新增两半边**——①normal/generator
 #: 根出口的呈现转换（保 NS-M3 原样裸 carrier + WARNING）；②注册期能力契约不变量
-#: （拒绝降 WARNING 放行）。**关不掉 NS-M3 的运行期 carrier 闸**。到期删除：
+#: （拒绝降 WARNING 放行）——以及 **#331 的两道静态闸**（③执行入口
+#: ``validate_for_profile`` 拒绝、④NodeRunner execute 前兜底断言，均降 WARNING 放行，
+#: 交回运行期闸/呈现；见 plaita.core.capabilities）。
+#: **关不掉 NS-M3 的运行期 carrier 闸**。到期删除：
 #: 2026-11-30（docs/governance/execution-capabilities.md 记档防孤儿旋钮）。
 SUSPEND_GUARD_ENV = "PLAITA_SUSPEND_GUARD"
 
@@ -366,23 +375,33 @@ def suspend_guard_mode() -> str:
 
 
 class SuspendNotExecutableError(FlowExecutionException):
-    """挂起节点在 normal/generator 模式根出口的具名终态失败（plaita#330）。
+    """挂起节点在当前宿主不可执行的具名终态失败（plaita#330 / #331）。
 
-    **呈现层身份转换，不是新抛点**：闸点（``_advance_one``）维持抛
-    :class:`FlowSuspendedCarrier`（NS-M3 传播载体不动）；仅当载体穿出
-    normal/generator **模式根**（无父执行）时，由根出口把它包装成本类——
-    子执行里 carrier 原样上抛（分布式父执行靠它把挂起送到步边界）。
+    两个抛出面共用同一类与同一 ``error_type`` 字符串（#317 对拍锚不变）：
+
+    - **入口静态拒绝**（plaita#331，``stage="entry"``）：执行入口按
+      ``required_capabilities(flow, recursive=True)`` × 目标 profile 能力集判定，
+      park/resume 族 token 缺失即在**任何节点执行前**拒绝；错误体多出稀疏键
+      ``profile / required / missing``。NodeRunner 的 execute 前兜底断言
+      （``stage="runner"``）同形——它本不应触达，触达即入口漏了（WARNING）。
+    - **运行期根出口呈现**（plaita#330，``stage="runtime"``）：闸点
+      （``_advance_one``）维持抛 :class:`FlowSuspendedCarrier`（NS-M3 传播载体
+      不动）；仅当载体穿出 normal/generator **模式根**（无父执行）时，由根出口把
+      它包装成本类——子执行里 carrier 原样上抛（分布式父执行靠它把挂起送到步
+      边界）。静态闭包看不见的复合节点（自定义属性持有子流程）走这条兜底。
 
     独立异常类（非 carrier 子类）：worker / 上层按类型判**终态不重试**
     （同 ``FlowTimeoutError`` 家族先例）；若继承 carrier，任何
     ``except FlowSuspendedCarrier`` 都会把它误当可挂起载体。
 
     错误体（:meth:`to_dict`）：``{error_type, node_id, node_type, source_line,
-    flow_id, cause, fix, frame_path, message}``；``message`` 首行写死
-    「这不是源码缺陷，不要删除/替换该节点」。``cause`` 阶段口径（A2 评审 §1）：
-    运行期只见 ``environment``（profile 不满足）与过渡期 ``undeclared``
-    （注册不变量被旋钮降级放行的节点）；``unregistered`` 是加载期事实，
-    不经本类呈现。
+    flow_id, cause, fix, frame_path, stage, message}``（入口/兜底面另有
+    ``profile, required, missing``）；``message`` 首行写死
+    「这不是源码缺陷，不要删除/替换该节点」；``fix.call`` 给出可原样执行的
+    分布式驱动调用（restructure 时为 ``None`` = 明确告知不可本地执行）。
+    ``cause`` 阶段口径（A2 评审 §1）：``environment``（profile 不满足）与过渡期
+    ``undeclared``（注册不变量被旋钮降级放行的节点）；``unregistered`` 是加载期
+    事实，不经本类呈现。
     """
 
     code = -500
@@ -400,6 +419,10 @@ class SuspendNotExecutableError(FlowExecutionException):
         cause: str = "environment",
         fix: Optional[dict] = None,
         frame_path: Optional[list] = None,
+        stage: str = "runtime",
+        profile: Optional[str] = None,
+        required: Optional[list] = None,
+        missing: Optional[list] = None,
     ) -> None:
         super().__init__(self.code, message, self.error_type, node,
                          source_line=source_line)
@@ -409,10 +432,18 @@ class SuspendNotExecutableError(FlowExecutionException):
         self.cause = cause
         self.fix = dict(fix or {})
         self.frame_path = list(frame_path or [])
+        self.stage = stage
+        self.profile = profile
+        self.required = list(required) if required is not None else None
+        self.missing = list(missing) if missing is not None else None
 
     def to_dict(self) -> dict:
-        """结构化错误体（flow_run ``error_detail`` / 日志 WARNING 共用形状）。"""
-        return {
+        """结构化错误体（flow_run ``error_detail`` / 日志 WARNING 共用形状）。
+
+        ``profile/required/missing`` 为稀疏键：仅入口/兜底面（静态判定）携带，
+        运行期根出口呈现不含——消费方据此可辨两面。
+        """
+        body = {
             "error_type": self.error_type.value,
             "message": str(self),
             "node_id": self.node_id,
@@ -422,6 +453,59 @@ class SuspendNotExecutableError(FlowExecutionException):
             "cause": self.cause,
             "fix": dict(self.fix),
             "frame_path": list(self.frame_path),
+            "stage": self.stage,
+        }
+        if self.profile is not None:
+            body["profile"] = self.profile
+            body["required"] = list(self.required or [])
+            body["missing"] = list(self.missing or [])
+        return body
+
+
+class ExecutionProfileError(FlowExecutionException):
+    """flow 的执行要求闭包里**非挂起族** token 不被目标 profile 满足（plaita#331）。
+
+    与 :class:`SuspendNotExecutableError` 同为执行入口的拒绝面、同一判定函数
+    （``validate_for_profile``）产出，按缺失 token 的族分流：缺 park/resume 族
+    （suspend:*/event_bus/queue）且存在挂起节点 → ``SuspendNotExecutableError``
+    （#317 机器判据）；只缺 network/sandbox → 本类。内置三 profile 均含这两
+    token，本类只在自定义 profile（console 池 profile 等）上出现。
+
+    错误体：``{error_type, message, profile, required, missing, flow_id, sites, fix}``。
+    """
+
+    code = -500
+    error_type = FlowErrorType.EXECUTION_PROFILE_UNSATISFIED
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        profile: str,
+        required: list,
+        missing: list,
+        flow_id: Optional[str] = None,
+        sites: Optional[list] = None,
+        fix: Optional[dict] = None,
+    ) -> None:
+        super().__init__(self.code, message, self.error_type, None)
+        self.profile = profile
+        self.required = list(required)
+        self.missing = list(missing)
+        self.flow_id = flow_id
+        self.sites = list(sites or [])
+        self.fix = dict(fix or {})
+
+    def to_dict(self) -> dict:
+        return {
+            "error_type": self.error_type.value,
+            "message": str(self),
+            "profile": self.profile,
+            "required": list(self.required),
+            "missing": list(self.missing),
+            "flow_id": self.flow_id,
+            "sites": [dict(s) for s in self.sites],
+            "fix": dict(self.fix),
         }
 
 
