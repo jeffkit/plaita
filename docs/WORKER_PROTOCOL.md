@@ -1,4 +1,4 @@
-# WORKER_PROTOCOL — 执行状态行协议（plaita#320 A1）
+# WORKER_PROTOCOL — 执行状态行协议（plaita#320 A1 / #322 B1 所有权 v1）
 
 > **定位**：协议完备性**存档**——把执行状态行新字段的 schema、写序不变量与
 > 迁移语义钉成文档，供跨语言/跨实现对账时引用。**不构成任何 Go 实现承诺**
@@ -13,7 +13,8 @@
 | `pending` | `Optional[Dict]` | worker 挂起落盘（与 suspended 同一次 CAS） | 执行意图引用——「为什么停下、在等什么」。引用不复制：订阅/timer 内容仍以 context（`$NODE.<id>.subscription_id`）与外部存储为准 |
 | `generation` | `int`（默认 0） | fenced CAS 落盘盖章（`storage/fenced.py`） | 复用 fence 世代——最后一次 fenced 写的世代。0 = 老行/未过 fenced 路径。#321 reconciler 幂等键 `execution_id + generation` 的取值源 |
 | `progress_at` | `Optional[str]`（ISO） | 行创建（首次 running 落盘）置 now；仅 `step_persist` 刷新 | 「步骤在前进」证据。与 `last_update_time` 严格正交：后者被看门狗每 TTL/3 刷新（活性），两者构成 mode 5（长节点卡死）双信号 |
-| `next_step` | `Optional[Dict]` | start 首落 / `step_persist` | 预分配的下一步引用 `{node_id, step_id, parent_step_id}`。`step_id`/`parent_step_id` 恒 None——step token 是 #322（B1 所有权 v1）的面，键位预留、schema 先行稳定 |
+| `next_step` | `Optional[Dict]` | start 首落 / `retry_wakeup` / `step_persist` | 预分配的下一步引用 `{node_id, step_id, parent_step_id}`。**#322 起 `step_id` 是铸造的分配决定**（`core/ownership.new_step_id()`；声明即所有权，不可再生），`parent_step_id` = 刚消费的 token（声明链锚）——schema 形状不变，语义从 aid 升级为决定（见 §6） |
+| `last_report_at` | `Optional[str]`（ISO） | `report_progress()` 的 worker 单点写（节流） | 「步内有上报的推进」时刻（#322）。与 `progress_at` / `last_update_time` 三信号正交；终态行**不清**（观测残留非意图声明）。None = 无上报/老行 |
 
 ### 1.1 `pending` schema
 
@@ -48,6 +49,62 @@
 2. **物化载体（enqueue/rpush/register）是投递线程同型物化**：补发/重投侧必须
    enqueue 前重读 status（非终态）+ generation 未变。义务落 **#321**；
    既有先例=挂起补偿派发的「持租约 + 持锁重读」（#233/#243）。
+
+## 2.1 B1 所有权 v1（plaita#322）——step token / 幂等键 / 进度租约
+
+> **义务声明（A1 r138 评审注记，落地存档）**：#320 窗①（ack 后崩溃）与
+> 窗②（租约冲突 ack）的重建语义是「重驱节点」——**#320 重建的副作用安全
+> 依赖 #322**：只有声明了 step token 的步骤经连接器幂等键获得「同逻辑步骤
+> 重试 = 同键 = 外部去重」的保证。#322 落地前，#320 的重建读法只回答
+> 「该做什么」，不回答「重做是否安全」。
+
+**step token 生命周期**（write-ahead：先声明、再执行）：
+
+- **铸造**（三个写点，均为状态行 CAS 内）：start 首落（声明 start 节点）、
+  `retry_wakeup`（声明 re-run 节点 = `$LAST_NODE`）、`step_persist`（声明
+  图遍历后继，`parent_step_id` = 刚消费的 token）。token = `uuid4().hex`
+  （`core/ownership.new_step_id()`）——跨重放的稳定性锚在「重投读同一行」，
+  不在 token 形状；挂起行 `next_step=None`（等待意图由 pending 承载）、
+  终态行随咽喉同 CAS 清除（终态不得声明未完成的工作）。
+- **消费**：worker 在每次 `run_distributed` 前把行声明的 token 绑到执行对象
+  （`bind_step`）。**键锚在行上而非节点上**：声明与实际推进偶有错位
+  （如 start 首步在步循环前的预消费）不影响重放稳定性——同状态行 ⇒ 同
+  token。挂起/老行恢复的首步 tokenless（无声明即无所有权主张，诚实优于
+  编造；该窗口的重建保护属 #321 侧义务）。
+
+**幂等键形**：
+
+- 执行面：`execution.idempotency_key = f"{execution_id}:{step_id}"`
+  （attempt/投递计数**不进键**，只做观测；执行段恒取**根**执行 id——子执行
+  `$EXECUTION_ID` 是构造期随机 uuid）。
+- 复合容器：`get_child_execution()`（签名零变更）+ `bind_child_step`
+  为循环迭代/并行分支派生 `f"{step_id}:{sub_key}"`（10 次迭代 = 10 个键；
+  同迭代重放同键；替身子执行缺 bind_step 静默跳过）；`derive_key(i)` 为
+  同名组成面。
+- 连接器外发：`f"{idempotency_key}:{node_id}"`——同一声明内多个外呼调用
+  互不串键。内置 http 连接器对**非安全方法**（POST/PUT/PATCH/DELETE）
+  自动带 `Idempotency-Key`；GET/HEAD/OPTIONS/TRACE（语义安全）不带；
+  用户显式给的头不覆盖；tokenless/替身执行对象一律不带头（收据面绝不
+  打断节点）。副作用收据**只给内置连接器**，不给 code 节点（#322 边界）；
+  agentrun 等 plaita-nodes 侧连接器经同一 `execution.idempotency_key`
+  面接入（独立仓，另行落地；不改 Go/Rust）。
+
+**进度租约**（三信号正交）：
+
+| 信号 | 写者 | 语义 |
+|---|---|---|
+| `last_update_time` | 看门狗心跳（每 TTL/3） | 活性 |
+| `progress_at` | 仅 `step_persist`（#320 钉死） | 步骤前进 |
+| `last_report_at` | `report_progress()` worker 单点写（节流，`PLAITA_PROGRESS_REPORT_MIN_INTERVAL_SECONDS`，默认 10s） | 步内上报的推进 |
+
+- 过期谓词：`now - max(progress_at, last_report_at) > step_timeout`
+  （`core/ownership.step_lease_expired` / `ExecutionState.step_lease_expired`）。
+- `step_timeout`：节点 `timeout` 优先（毫秒数/ISO8601），未声明用
+  `PLAITA_STEP_LEASE_TIMEOUT_SECONDS`（默认 24h，**默认宽**——阈值误杀的
+  代价远大于漏报）。
+- **本单过期只是可观测信号**（#321「running 有租约但停滞 → fence+cancel」
+  的判定输入、#316 gauge 的升级数据源）；看门狗续租行为**不变**（#27/#31/
+  #55/#32/#62 五单误杀家族的教训：活性判断与节点存亡解耦）。
 
 ## 3. 窗④补强选型：deadline 必填（二选一裁量）
 
@@ -105,8 +162,10 @@ deadline 必填**：
   无感（负控格钉：带新字段的行扫描结果与老行全等）。新字段是其未来数据源
   升级（gauge 判据从「载体四存放处」升级为「载体×pending 交叉」），接口
   注记留此，不预设实现轮。
-- **#322（B1 所有权 v1）**：`next_step.step_id`/`parent_step_id` 键位已预留；
-  step token 落地后 `next_step` 从 aid 字段升级为分配决定（不可再生）。
+- **#322（B1 所有权 v1，已落地）**：`next_step.step_id`/`parent_step_id` 键位
+  已从预留升级为**分配决定**（铸造/消费/幂等键形见 §2.1）；`next_step` 自此
+  是声明（不可再生），不再是纯 aid 字段。重建（#321）与重放的副作用安全
+  依赖该 token——见 §2.1 义务声明。
 - **#312（认识论分流）**：正交且互惠——词汇表管消息侧处置，本单管状态行
   意图记录；唯一交叉「无载体判定须含第四存放处（DLQ/隔离流在押=有载体）」
   是 #321 的读法义务（A125 收容不 touch 状态行 ⇒ pending 仍 armed，恢复走

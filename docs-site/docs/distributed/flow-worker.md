@@ -119,28 +119,19 @@ optional 类 WARNING + 安全默认；安全门未知值 fail-closed。空串 id
 故障，双跑由执行租约拦截（**start 与 resume 同一套租约**，#23）：
 
 1. 抢到消息的 worker resume 时拿不到租约 → `ExecutionLeaseError`。冲突分支
-   **先核实持有者存活再决定 ack**（#50，2026-10-08）：租约值嵌有持有者的
-   注册表 instance id，回收方查 `plaita:registry:flow_worker:{instance}`——
-   **在册且 `status=running`**（活持有者，正常竞争）→ **ack 释放**（否则对端每
-   `claim_min_idle_ms` XCLAIM 一次烧一次 delivery，超限即假死信）；**不在册**
-   （持有者已死、租约键是 ≤TTL 的尾巴）→ **不 ack** 留 pending，等租约过期后
-   下一轮回收从 checkpoint 续跑（代价 ≤TTL+60s，远小于 zombie reap）；**在册
-   但处于 draining/stopping/stopped/starting**（S18-02A）→ 同样**不 ack**：
-   这些状态不保证收尾，ack 会释放执行的唯一重投载体。信号缺失
-   （旧格式租约 / Redis 瞬断）按「存活未知」退化 ack；**未启用注册表
-   （`--no-registry`）例外**（B65-03，2026-10-20）：该形态下存活信号静态
-   不可得，把「存活未知」当「活持有者」会在持有者被冻结（SIGSTOP/GC/
-   调度饥饿，租约仍有效）时 ack 掉唯一消息——冻结者恢复后 `lease_lost`
-   退出，执行停在 `running` 且无载体；故该分支一律**不 ack**，留 pending
-   等租约过期后 reclaim（租约在时死信守卫拒绝死信，不会回归假死信风暴）；
-   `PLAITA_DISABLE_HOLDER_LIVENESS=1` 整体旁路回到无条件 ack；
-   **决议载体例外（A46-04/A47-F2，2026-10-19）**：`resume_type` 为
-   `event`/`timeout`/`cancel` 的消息**不看存活信号、一律不 ack**——suspend
-   提交窗口 `[订阅注册, 租约释放)` 内到达的它们不是重复载体，而是挂起执行
-   唯一的唤醒来源（#33）；持有者落盘 suspended 后不会再读它。消息留 pending，
-   租约释放后由 reclaim（或 #242 死信守卫重入队副本）推进；代价是最多
-   `max_deliveries × claim_min_idle_ms` 的延迟与 XCLAIM churn。
-   `continue`/`retry`/`start` 无推进语义，仍按上面的存活判据 ack；
+   的 ack 判据（plaita#322 收敛后**信号盲**）：**决议载体**（`resume_type`
+   为 `event`/`timeout`/`cancel`）**一律不 ack**——suspend 提交窗口内到达的
+   它们不是重复载体，而是挂起执行**唯一的唤醒来源**（#33；持有者落盘
+   suspended 后不会再读它），ack 掉即永久挂起（A46-04/A47-F2，留 pending
+   等租约释放后 reclaim，#242 死信守卫保证不死信）；**其余冲突
+   （continue/retry/start 等）一律 ack**——#50 时代的注册表存活核算
+   （在册/draining/`--no-registry`/回滚开关等分支）已随所有权 v1 退役：
+   声明的 step token（见上节）让重跑经连接器幂等键被外部系统去重，载体
+   丢失由 #321 对账器（「running 无租约 → continue」按声明重建，落地前
+   zombie reap 兜底）收敛；而存活判据读的信号本身（注册表键）被删/副本
+   落后时会将判据翻错面——#322 验收「注册表键被删/副本落后不影响正确性」
+   的唯一形态是判据不读它。`PLAITA_DISABLE_HOLDER_LIVENESS` 回滚开关随
+   核算一并退役；
 2. 持租约的活 worker 由看门狗每 lease TTL/3（默认 120s → 40s）续租，步骤
    执行期间租约不会过期——XCLAIM 真正接手的只有已死 worker 的消息；续租成功
    时顺带把**在跑节点**的进度写进 `node_timings`（长节点期间唯一的活性心跳，
@@ -761,7 +752,12 @@ flowchart TD
 | `pending` | 执行意图引用：`{kind: event\|timer\|service\|start\|cancel, ref_id, event_type, due_at, deadline, node_id, payload, recorded_at}`。本轮写路径产出 `event`（订阅等待，`deadline` 必填——超期可检可终局，缺省 30 天/`PLAITA_PENDING_EVENT_DEADLINE_SECONDS` 可调）与 `service`（外延服务派发凭据，原 `dispatch_pending` 的推广）两 kind。`node_id` = **最内层挂起节点**（嵌套帧栈对齐） |
 | `generation` | 复用 fence 世代（fenced CAS 落盘时盖章）；#321 对账器幂等键 `execution_id + generation` 的取值源 |
 | `progress_at` | 步提交前进时刻：行创建置 now、**仅 step_persist 刷新**（与看门狗刷的 `last_update_time` 正交——租约=活性、本字段=前进，长节点卡死双信号） |
-| `next_step` | 预分配的下一步 `{node_id, step_id, parent_step_id}`（`step_id` 键位留给 #322 step token）；挂起行/终态行为 None |
+| `next_step` | 预分配的下一步 `{node_id, step_id, parent_step_id}`；**#322 起 `step_id` 是铸造的 step token**（所有权 v1：start 首落/retry_wakeup/step_persist 三写点铸造，执行对象消费行声明，连接器幂等键 `execution_id:step_id[:sub_key][:node_id]` 的锚——同声明重投 ⇒ 同键 ⇒ 外部去重）；挂起行/终态行为 None |
+| `last_report_at` | **#322** 步内进度上报时刻（`report_progress()` 单点写，节流 `PLAITA_PROGRESS_REPORT_MIN_INTERVAL_SECONDS` 默认 10s）：与 `progress_at`/`last_update_time` 三信号正交；进度租约锚 = `max(progress_at, last_report_at)`，过期谓词 `step_lease_expired`（`step_timeout` 按节点 `timeout`，未声明 `PLAITA_STEP_LEASE_TIMEOUT_SECONDS` 默认 24h）——本版只产出可观测信号（#321 fence 判定的输入），看门狗续租行为不变 |
+
+**所有权 v1 的重建义务**（`docs/WORKER_PROTOCOL.md` §2.1 为权威）：#320
+窗①/窗②的「重建 = 重驱节点」副作用安全依赖 step token 的幂等键——重投/
+重试/重建消费**同一状态行的同一声明** ⇒ 同键，外部系统去重后至多一次副作用。
 
 写序纪律（不变量，`docs/WORKER_PROTOCOL.md` 为权威存档）：
 

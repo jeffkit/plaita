@@ -1,6 +1,7 @@
 import json
 import os
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Dict, Optional, List, Union
 
 from pydantic import BaseModel, Field
@@ -299,17 +300,52 @@ class ExecutionState(BaseModel):
         description=(
             "预分配的下一步引用（plaita#320）：``{node_id, step_id, "
             "parent_step_id}``——上一步提交时预声明的「接下来跑哪个节点」。"
-            "``step_id``/``parent_step_id`` 本轮恒 None（step 分配是 #322 "
-            "B1 所有权 v1 的 step token 面，键位预留、schema 先行稳定）。"
-            "与「不存派生动作」不矛盾：next node 的**解析**仍由引擎在 advance"
-            " 时现算（可再生的图遍历），本字段存的是**分配决定**（#322 起带"
-            " token 后不可再生）；#321 reconciler 的「running 无租约 → "
+            "``step_id`` 是 #322 B1 所有权 v1 的 step token（**分配决定**，"
+            "铸造于 start 首落 / retry_wakeup / step_persist 三个写点，不可"
+            "再生；连接器幂等键与重放/重建去重的锚——#320 ①②窗的重建副作用"
+            "安全依赖它，见 core/ownership.py 义务声明）；``parent_step_id`` "
+            "是声明链锚（= 刚消费的 token）。与「不存派生动作」不矛盾：next "
+            "node 的**解析**仍由引擎在 advance 时现算（可再生的图遍历），本"
+            "字段存的是分配决定本身；#321 reconciler 的「running 无租约 → "
             "continue」重建读它核对行声明的工作。写点：start 首落（=start 节点）、"
             "step_persist（=图遍历后继；解析失败置 None 并 WARNING——aid 字段"
             "不得阻断落盘）；挂起行置 None（等待意图由 pending 承载）；终态行"
             "同 CAS 清除（终态不得声明未完成的工作）。None = 老行/挂起/终态。"
         ),
     )
+    last_report_at: Optional[str] = Field(
+        None,
+        description=(
+            "步内进度上报时刻（plaita#322，ISO 串）：``report_progress()`` 的"
+            "单点写（节流窗内合并，见 core/ownership.py）。与 ``progress_at``"
+            "（仅步提交刷新）和 ``last_update_time``（看门狗活性心跳）严格"
+            "正交——三信号各管一域；进度租约锚 = ``max(progress_at, "
+            "last_report_at)``（``step_lease_expired`` 谓词，消费方 #321 "
+            "reconciler / #316 gauge 升级面）。终态行**不清**本字段：它是"
+            "「最后一段工作」的观测残留，不是意图声明（与 pending/next_step "
+            "的终态清除不同律）。None = 无上报/老行。"
+        ),
+    )
+
+    def step_lease_expired(
+        self,
+        timeout_seconds: float,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """进度租约是否过期（plaita#322）：``now - max(progress_at,
+        last_report_at) > timeout_seconds``。
+
+        ``timeout_seconds`` 由调用方解析（节点 ``timeout`` 优先，缺省
+        ``PLAITA_STEP_LEASE_TIMEOUT_SECONDS``——见
+        ``core/ownership.resolve_step_timeout_seconds``）。无基线（老行）
+        恒 False：宁可漏报不误杀。本谓词是**可观测信号**，不触发任何
+        主动作（看门狗行为不变，#321 才是 fence/取消的决策方）。
+        """
+        from plaita.core.ownership import step_lease_expired
+
+        return step_lease_expired(
+            self.progress_at, self.last_report_at, timeout_seconds, now=now
+        )
 
     def effective_pending(self) -> Optional[Dict[str, Any]]:
         """读面 pending 归一（plaita#320 迁移条款）：显式 pending → 老行惰性推导。

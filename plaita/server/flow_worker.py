@@ -33,6 +33,11 @@ from plaita.core.errors import (
 )
 from plaita.core.flow import Flow
 from plaita.core.executor import FlowExecution, ExecutionMode
+from plaita.core.ownership import (
+    declared_step_id,
+    new_step_id,
+    progress_report_min_interval_seconds,
+)
 from plaita.core.runner import is_retryable_error
 from plaita.storage.base import (
     ExecutionState,
@@ -118,7 +123,6 @@ from plaita.server.execution_lease import (
     ExecutionLeaseError,
     NullExecutionLease,
     RedisExecutionLease,
-    holder_instance_id,
     new_holder_token,
 )
 from plaita.server.tenant_context import (
@@ -187,13 +191,6 @@ def _fencing_disabled() -> bool:
 def _watchdog_disabled() -> bool:
     """波次②回滚开关（看门狗半边）：PLAITA_DISABLE_LEASE_WATCHDOG=1 时不启动续租线程。"""
     return _env_switch("PLAITA_DISABLE_LEASE_WATCHDOG")
-
-
-def _holder_liveness_disabled() -> bool:
-    """#50 回滚开关：PLAITA_DISABLE_HOLDER_LIVENESS=1 时租约冲突分支不做
-    持有者存活核算——无条件回到「ack 释放」（2026-10-06 语义，含 A47-F2
-    的决议载体收紧）。"""
-    return _env_switch("PLAITA_DISABLE_HOLDER_LIVENESS")
 
 
 # A47-F2：挂起执行的决议载体。subscribe→suspend 提交窗口内到达的
@@ -1518,6 +1515,9 @@ class FlowWorker:
         # on_node_start/on_node_end；落盘时由 _persist_state_or_raise 写入
         # ExecutionState.node_timings。
         self._node_timings: Dict[str, NodeTimingCallback] = {}
+        # plaita#322：进度上报节流戳（execution_id → monotonic 时刻），与
+        # _node_timings 同生命周期（终态收口回收单键）。
+        self._progress_report_at: Dict[str, float] = {}
         # run 级事件时间线（plaita#25）：**按执行**一个采集器，与 _node_timings
         # 同一对钩子、同一落盘收口（_collect_execution_timeline）。它同时是本进程
         # 向 SSE 频道 ``plaita:execution:events:{id}`` 发布事件的**唯一发布者**
@@ -2628,6 +2628,9 @@ class FlowWorker:
         state.node_timings = merged
         if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
             self._node_timings.pop(execution_id, None)
+            # plaita#322：进度上报节流戳与采集器同生命周期（终态回收单键；
+            # __new__ 骨架实例无登记表，按缺省跳过）。
+            self.__dict__.get("_progress_report_at", {}).pop(execution_id, None)
 
     def _collect_execution_timeline(
         self,
@@ -3379,6 +3382,10 @@ class FlowWorker:
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
+            # plaita#322：进度上报回调（report_progress → last_report_at 单点写）。
+            execution.bind_progress_reporter(
+                lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+            )
 
             # start 幂等键（波次二任务③，与 G1 预铸 id 组合）：在先行落行
             # 之前认领，映射值=预铸或就地铸造的 execution_id——重投/双开
@@ -3469,11 +3476,16 @@ class FlowWorker:
                 start_time=datetime.now().isoformat(),
                 # plaita#320：progress_at 行创建即置 now（A1 评审 §四.1——从未
                 # 步提交的行也要有停滞基线），此后仅 step_persist 刷新；
-                # next_step 首落声明即将执行的 start 节点（step_id/
-                # parent_step_id 键位留给 #322 step token）。
+                # next_step 首落声明即将执行的 start 节点——#322 起 step_id
+                # 是**铸造的分配决定**（write-ahead：先声明、再执行；重投读
+                # 同一行 ⇒ 同 token ⇒ 连接器幂等键稳定）。
                 progress_at=datetime.now().isoformat(),
                 next_step=(
-                    {"node_id": flow.start_node.id, "step_id": None, "parent_step_id": None}
+                    {
+                        "node_id": flow.start_node.id,
+                        "step_id": new_step_id(),
+                        "parent_step_id": None,
+                    }
                     if flow.start_node is not None
                     else None
                 ),
@@ -3544,6 +3556,9 @@ class FlowWorker:
             # 见 finally 里的条件释放。
             completed_normally = False
             try:
+                # plaita#322：首节点消费行声明（write-ahead 的执行半边——
+                # 声明在 3532 落行时已铸）；重投走「读同一行」⇒ 同 token。
+                self._bind_step_ownership(execution, state)
                 result = execution.run_distributed(flow, params=params, execution_id=execution_id)
 
                 # 处理执行结果
@@ -4203,6 +4218,25 @@ class FlowWorker:
                 state.status = "running"
                 state.error = None
                 state.end_time = None
+                # plaita#322：唤醒即声明 re-run 节点（write-ahead——先声明、
+                # 再执行；re-run 节点 = $LAST_NODE，重投读同一行 ⇒ 同 token
+                # ⇒ 连接器幂等键稳定）。progress_at 不动（#320 §四.2 钉死：
+                # 非步迁移不刷新）。
+                if not declared_step_id(state.next_step):
+                    rerun_node = (
+                        state.context.get("$LAST_NODE")
+                        if isinstance(state.context, dict)
+                        else None
+                    )
+                    state.next_step = (
+                        {
+                            "node_id": rerun_node,
+                            "step_id": new_step_id(),
+                            "parent_step_id": None,
+                        }
+                        if isinstance(rerun_node, str) and rerun_node
+                        else None
+                    )
                 self._persist_state_or_raise(execution_id, state, "retry_wakeup")
                 # 清预算 + 记配额原子收口（第七十一轮任务①）：两步散调在清
                 # 计数失败时会留下「配额已消耗、预算没拿到」的半生效态（记数
@@ -4221,6 +4255,11 @@ class FlowWorker:
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
+            # plaita#322：进度上报回调（同 start 路径——report_progress 的
+            # worker 面）。
+            execution.bind_progress_reporter(
+                lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+            )
             # 登记看门狗（波次②）：持租约期间每 TTL/3 续租，防长步 > TTL
             # 被 XCLAIM 抢占双跑（fence 世代随登记带上，心跳写要过世代 CAS）
             self._register_lease_watch(
@@ -4243,6 +4282,11 @@ class FlowWorker:
             # 用于 ``setup_flow``——即 start→resume 载体转换撞上的「首节点还
             # 没成功过」窗口；checkpoint 非空时引擎走真值分支，params 不参与
             # （续跑语义零变化，见 ``DistributedStrategy.execute``）。
+            #
+            # plaita#322：恢复首步消费行声明的 token（step_persist/retry_wakeup
+            # 铸的声明）；挂起/老行无声明 ⇒ tokenless（见
+            # ``_bind_step_ownership``）。重投读同一行 ⇒ 同 token。
+            self._bind_step_ownership(execution, state)
             result = execution.run_distributed(
                 flow,
                 params=params,
@@ -4439,8 +4483,16 @@ class FlowWorker:
             )
             execution.mode = ExecutionMode.DISTRIBUTED
             self._bind_observers(execution)
+            # plaita#322：向后兼容的按需创建路径同样挂进度上报回调。
+            execution.bind_progress_reporter(
+                lambda note, _eid=execution_id: self._report_step_progress(_eid, note)
+            )
 
         steps_since_persist = 0
+        # plaita#322：本消息已消费的 step token（声明链锚——step_persist 的
+        # parent_step_id 指向它）。初值取行声明（resume 路径已在入口绑定过，
+        # 兼容直接调用本方法的旧路径）。
+        current_step_id = declared_step_id(state.next_step)
 
         while True:
             is_end = result.get("is_end", False)
@@ -4525,6 +4577,12 @@ class FlowWorker:
                 state.status = "running"
                 try:
                     self._renew_lease_if_held(lease_execution_id, lease_holder)
+                    # plaita#322：每步执行前消费行声明的 token（write-ahead
+                    # 的执行半边）。绑定取自 state.next_step——步 k+1 跑的是
+                    # 步 k 落盘时声明的节点；重投/接管者读同一行 ⇒ 同 token
+                    # ⇒ 连接器幂等键稳定（声明与实际推进的节点偶有错位时，
+                    # 键的**重放稳定性**不受影响：键锚在行上而非节点上）。
+                    current_step_id = self._bind_step_ownership(execution, state)
                     # ``execution_id`` 显式透传（plaita#123 配套，同 resume 路径）：
                     # 本函数内该变量取自「被加载记录的 execution_id」且整个步进
                     # 循环内**不变**，把引擎 execution_id 钉死到它上面，重试计数
@@ -4593,9 +4651,12 @@ class FlowWorker:
                         # （与看门狗刷的 last_update_time 正交——租约=活性、
                         # 本字段=前进，mode 5 双信号检测面）；next_step 随步
                         # 提交预声明（#321 reconciler「running 无租约 →
-                        # continue」的重建读源，step token 键位留给 #322）。
+                        # continue」的重建读源）；#322 起 step_id 为铸造的
+                        # 分配决定，parent_step_id=刚消费的 token（声明链）。
                         state.progress_at = datetime.now().isoformat()
-                        state.next_step = self._next_step_from_context(flow, context)
+                        state.next_step = self._next_step_from_context(
+                            flow, context, parent_step_id=current_step_id
+                        )
                         self._persist_state_or_raise(execution_id, state, "step_persist")
                         steps_since_persist = 0
                         logger.info("流程步骤执行完成，继续下一步: %s", execution_id)
@@ -4856,15 +4917,20 @@ class FlowWorker:
         )
 
     def _next_step_from_context(
-        self, flow: Any, context: Optional[Dict[str, Any]]
+        self,
+        flow: Any,
+        context: Optional[Dict[str, Any]],
+        parent_step_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """从 checkpoint 现算下一步引用（plaita#320 next_step 预声明）。
+        """从 checkpoint 现算下一步引用并**铸造其 step token**（plaita#320
+        预声明 + #322 所有权 v1）。
 
         解析逻辑与引擎 advance 同源（``$LAST_NODE`` → ``flow.next_node``），
         但**失败不阻断落盘**：next_step 是 aid 字段，权威解析仍由引擎在
-        advance 时现算（#322 step token 落地前它不承载正确性）——分支未命中/
-        缺 next/图遍历异常一律置 None 并 WARNING（「行不声明」永远好过
-        「行声明错」）。
+        advance 时现算（token 的重放稳定性锚在「读同一行」上，不在节点解析
+        上）——分支未命中/缺 next/图遍历异常一律置 None 并 WARNING（「行不
+        声明」永远好过「行声明错」）。``parent_step_id`` = 刚消费的 token
+        （声明链审计锚，#322）。
         """
         try:
             ctx = context if isinstance(context, dict) else {}
@@ -4880,8 +4946,8 @@ class FlowWorker:
                 return None
             return {
                 "node_id": next_node.id,
-                "step_id": None,
-                "parent_step_id": None,
+                "step_id": new_step_id(),
+                "parent_step_id": parent_step_id,
             }
         except Exception as e:  # noqa: BLE001 — aid 字段解析失败不阻断落盘
             logger.warning(
@@ -4889,6 +4955,75 @@ class FlowWorker:
                 _scrub_url_text(e),
             )
             return None
+
+    def _bind_step_ownership(self, execution: Any, state: ExecutionState) -> Optional[str]:
+        """把状态行声明的 step token 绑到引擎执行对象（plaita#322）。
+
+        返回绑定的 token（供声明链记账）；无声明（挂起恢复首步/老行/解析
+        失败）绑 None = tokenless——连接器不出收据，诚实优于编造。绑定为
+        尽力而为（替身执行对象缺 ``bind_step`` 时静默跳过）：所有权面绝不
+        打断推进。
+        """
+        token = declared_step_id(getattr(state, "next_step", None))
+        binder = getattr(execution, "bind_step", None)
+        if callable(binder):
+            try:
+                binder(token)
+            except Exception as exc:  # noqa: BLE001 — 所有权面不阻断推进
+                logger.debug(
+                    "step token 绑定失败（忽略）: execution=%s: %s",
+                    getattr(state, "execution_id", "?"), _scrub_exception_text(exc),
+                )
+        return token
+
+    def _report_step_progress(
+        self, execution_id: str, note: Optional[str] = None
+    ) -> None:
+        """进度上报的 worker 落点（plaita#322）：``report_progress()`` 的
+        **单点写**——状态行 ``last_report_at`` 置 now，其余字段一概不碰。
+
+        与另外两类写者的关系：
+        - ``_persist_state_or_raise``（推进线程，节点边界）：本方法持同一把
+          ``_state_write_lock``（第三类写者纪律——读也在锁内）；
+        - ``_publish_node_progress``（看门狗心跳）：不写 last_report_at，
+          三信号正交（活性/前进/上报）。
+
+        节流（``PLAITA_PROGRESS_REPORT_MIN_INTERVAL_SECONDS``，默认 10s）：
+        高频上报（如 token 流）合并成低频行写；窗内调用直接返回。终态行
+        拒写（观测不得复活终态）；行缺失/读失败静默返回——进度上报绝不
+        打断节点执行（调用方 FlowExecution.report_progress 已兜异常，此处
+        再兜一层防直接调用）。
+        """
+        try:
+            now = datetime.now()
+            interval = progress_report_min_interval_seconds()
+            # 骨架 worker（__new__ 构造，无 __init__ 登记表）按「无节流」兜底。
+            stamps = self.__dict__.setdefault("_progress_report_at", {})
+            if interval > 0 and stamps.get(execution_id, 0.0) > 0:
+                if time.monotonic() - stamps[execution_id] < interval:
+                    return
+            with self._state_write_lock(execution_id):
+                state = self.execution_storage.load_execution_state(execution_id)
+                if state is None:
+                    return
+                if getattr(state, "status", "") in TERMINAL_EXECUTION_STATUSES:
+                    return
+                state.last_report_at = now.isoformat()
+                saved = self.execution_storage.save_execution_state(execution_id, state)
+            if interval > 0:
+                stamps[execution_id] = time.monotonic()
+            if not saved:
+                logger.warning(
+                    "进度上报落盘失败（忽略，下次上报重试）: execution_id=%s",
+                    execution_id,
+                )
+            elif note:
+                logger.info("执行 %s 进度上报: %s", execution_id, note)
+        except Exception as exc:  # noqa: BLE001 — 观测路径不得影响执行
+            logger.debug(
+                "进度上报失败（忽略）: execution_id=%s: %s",
+                execution_id, _scrub_exception_text(exc),
+            )
 
     def _clear_suspend_dispatch_pending(
         self, execution_id: str, state: ExecutionState, *, source: str
@@ -6116,47 +6251,36 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
         return None
 
     def _lease_conflict_ack_safe(self, body: Any) -> bool:
-        """ExecutionLeaseError 时 ack 是否安全（#50 加固）。
+        """ExecutionLeaseError 时 ack 是否安全（#322 所有权 v1 收敛后的
+        **信号盲判据**）。
 
-        「租约冲突 ack 释放」（2026-10-06 修）的前提是**有人在跑**：租约被
-        持有 = 持有者正常推进，ack 只释放重复载体。但租约键在持有者进程
-        死后仍可存活 ≤TTL（看门狗最后一次续期的尾巴，120s）——维护窗重启
-        /崩溃后的这段窗口里，另一 worker 按 claim_min_idle（60s）回收重投
-        消息，命中该分支把**非终态执行唯一的重投载体** ack 掉：执行停在
-        running，恢复退化成 zombie reap（plaita#50 双机两例实证）。
+        历史（配方背书，如实记）：2026-10-06 引入「在册 → ack」防假死信
+        风暴；#50（2026-10-08）加注册表存活核算防「死后 TTL 尾巴吞唯一
+        重投载体」；S18-02A（draining）/A46-04/A47-F2（决议载体）/
+        B65-03（--no-registry）三轮收紧。**本轮（#322）整体移除存活核算**：
 
-        判据：从租约值反解持有者 instance id（``new_holder_token`` 嵌入）
-        → 查服务注册表在册与否。注册表心跳 10s / TTL 30s，持有者死后
-        ≤30s 消失，早于 60s 的首次回收——在册 = 活持有者，ack 安全；
-        不在册 = TTL 尾巴，ack 会吞掉重试载体。
+        - 步骤级所有权落地后，重投/重建消费**同一状态行的同一 step token
+          声明**（``next_step.step_id``，见 ``docs/WORKER_PROTOCOL.md`` §2.1）
+          ⇒ 连接器幂等键稳定 ⇒ 外部系统去重，「ack 掉唯一载体」从不可恢复
+          降级为可恢复（#321 对账器「running 无租约 → continue」按声明
+          重建；落地前由 zombie reap 兜底）；
+        - 存活判据的成本恰是它读的信号本身：注册表键被删/副本落后/键过期
+          都会把判据翻错面（#322 验收：注册表键被删/副本落后不影响正确性）
+          ——信号盲是唯一不依赖信号质量的形态；
+        - 回滚开关 PLAITA_DISABLE_HOLDER_LIVENESS 随核算一并退役（其旁路
+          语义 = 现默认行为）。
 
-        拿不到任何信号（旧格式租约 / 读租约或注册表瞬断）按「存活未知」返回
-        True 保持 ack——宁可回到 zombie reap 兜底，不回归 2026-10-06 修掉的
-        假死信风暴（对端每 60s XCLAIM 烧 delivery）。
-        **例外：未启用注册表（``--no-registry``）不在此列**（B65-03）：该部署
-        形态下存活信号静态不可得，把「存活未知」当「活持有者」会在持有者被
-        冻结（SIGSTOP/GC/调度饥饿，租约仍有效）时 ack 掉唯一消息——冻结者
-        恢复后 ``lease_lost`` 退出，执行停在 running 且零载体。故该分支一律
-        **不 ack**，留 pending 等租约过期后 reclaim；租约在时死信守卫拒绝
-        死信，不会回归假死信风暴。
-        回滚开关 PLAITA_DISABLE_HOLDER_LIVENESS=1 整体旁路（回到无条件 ack）。
-
-        A47-F2（A46-04 根因）：持有者存活只证明「进程在」，不证明「会消费
-        这条消息」。suspend 提交窗口 [订阅注册, 租约释放) 内到达的
-        ``resume_type=event/timeout/cancel`` 是挂起执行的**唯一决议载体**
-        （#33：挂起只能被这三者唤醒），持有者落盘 suspended 后不会再读它。
-        旧判据在持有者在册时把它当重复载体 ack ⇒ 释放租约后零载体、执行
-        永久 suspended（默认 event 节点的自动恢复网为 0，见台账 A47-02）。
-        故决议载体**不看任何存活信号、一律不 ack**，留 pending 到租约释放后
+        **唯一保留的例外（A46-04/A47-F2，与存活判据正交）**：suspend 提交
+        窗口 [订阅注册, 租约释放) 内到达的 ``resume_type=event/timeout/
+        cancel`` 是挂起执行的**唯一决议载体**（#33：挂起只能被这三者唤醒），
+        持有者落盘 suspended 后不会再读它——ack 掉它是永久挂起，与重放
+        安全无关。故决议载体**无条件不 ack**，留 pending 到租约释放后
         reclaim；#242 死信守卫在租约仍在时拒绝死信，释放后重入队副本推进。
-        ``continue/retry/start`` 不携带推进语义，保持上面的原判据。本判据
-        只覆盖租约冲突窗口；#258 的 ``ResumeProtocolError`` 状态感知分支是
-        另一个窗口（协议错配），两套判据互不影响。
+        ``continue/retry/start`` 不携带推进语义，冲突即 ack。本判据只覆盖
+        租约冲突窗口；#258 的 ``ResumeProtocolError`` 状态感知分支是另一个
+        窗口（协议错配），两套判据互不影响。
         """
-        if _holder_liveness_disabled():
-            return True
-        # A46-04 / A47-F2：决议载体无条件留 pending（含信号缺失分支——
-        # 对「唯一载体」fail-open 就是永久挂起）。
+        # A46-04 / A47-F2：决议载体无条件留 pending。
         if (
             isinstance(body, dict)
             and body.get("type") == "resume"
@@ -6170,90 +6294,7 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                 body.get("resume_type"),
             )
             return False
-        if not (isinstance(body, dict) and body.get("execution_id")):
-            return True
-        if not getattr(self, "_enable_registry", False):
-            # B65-03：--no-registry 没有存活信号，不能把「存活未知」当「活
-            # 持有者」。持有者冻结时租约仍有效；ack 掉本消息后冻结者恢复
-            # 即 lease_lost 退出，执行停在 running 且无任何载体。留 pending，
-            # 等租约过期后由 reclaim 续跑（租约在时死信守卫拒绝死信）。
-            logger.warning(
-                "执行 %s 租约冲突，但服务注册表未启用（--no-registry）无法核实"
-                "持有者存活——不 ack，留 pending 等租约过期后 reclaim 续跑 "
-                "(B65-03)",
-                body.get("execution_id"),
-            )
-            return False
-        token = set_current_tenant(body.get("tenant_id"))
-        try:
-            try:
-                lease_value = self.execution_lease.get_holder(body["execution_id"])
-            except Exception as exc:  # noqa: BLE001 — 瞬断按存活未知处理
-                logger.debug("租约持有者存活核算读租约失败（按存活未知）: %s", _scrub_url_text(exc))
-                return True
-        finally:
-            reset_current_tenant(token)
-        instance = holder_instance_id(lease_value)
-        if not instance:
-            return True
-        registry_key = (
-            f"{ServiceRegistry.REGISTRY_PREFIX}:{self.SERVICE_TYPE}:{instance}"
-        )
-        try:
-            registered = bool(self.redis_client.exists(registry_key))
-        except Exception as exc:  # noqa: BLE001 — 瞬断按存活未知处理
-            logger.debug("租约持有者存活核算查注册表失败（按存活未知）: %s", _scrub_url_text(exc))
-            return True
-        if registered:
-            # 持有者在册但处于 draining（优雅停机中）：它**不保证**会收尾——
-            # _force_stop_after_drain 超时即放弃当前步退出。此时若 ack 释放
-            # 消息，执行唯一的重投载体就没了（2026-10-11 维护窗：Mac 重启时
-            # 4 个在途执行全部停 running、PEL=0，见 plaita#52 同族）。
-            # 故 draining 持有者不算「安全 ack」，消息留 pending，等租约过期后
-            # 由 reclaim 续跑。读注册表失败/无 status 字段 → 保持原语义（ack）。
-            if self._registry_entry_not_accepting(registry_key):
-                logger.warning(
-                    "执行 %s 租约持有者 %s 处于非 running 状态（停机/启动中，不保证收尾）"
-                    "——不 ack，留 pending 等租约过期后 reclaim 续跑",
-                    body.get("execution_id"),
-                    instance,
-                )
-                return False
-            return True
-        logger.warning(
-            "执行 %s 租约持有者 %s 已不在服务注册表（持有者已死、租约处 ≤%ss "
-            "TTL 尾巴）——不 ack，留 pending 等租约过期后 reclaim 续跑 (#50)",
-            body.get("execution_id"),
-            instance,
-            getattr(self, "lease_ttl_seconds", "?"),
-        )
-        return False
-
-    def _registry_entry_not_accepting(self, registry_key: str) -> bool:
-        """注册表条目的 status 是否**不保证收尾**（S18-02A / A45-03/A46-04）。
-
-        对 ``status not in {"running"}`` 返回 True：draining/stopping/stopped/
-        starting 与未知值都视为「持有者可能随时退出」——此时 ack 会释放执行的
-        唯一重投载体（2026-10-11 维护窗事故同族）。
-
-        **保持既有红线**：读失败 / 值非 JSON / **无 status 字段**（存量格式）
-        → False（不改变既有 ack 语义）；缺字段不等于「非 running」。
-        """
-        try:
-            raw = self.redis_client.get(registry_key)
-        except Exception as exc:  # noqa: BLE001 — 瞬断按「可收尾」处理（既有语义）
-            logger.debug("读注册表条目失败（按可收尾处理）: %s", _scrub_url_text(exc))
-            return False
-        if not raw:
-            return False
-        try:
-            data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001 — 非 JSON 值按可收尾处理
-            logger.debug("注册表条目非 JSON（按可收尾处理）: %s", _scrub_url_text(exc))
-            return False
-        if not isinstance(data, dict) or "status" not in data:
-            return False
-        return data.get("status") != "running"
+        return True
 
     def _affinity_handover_key(self, body: Dict[str, Any]) -> str:
         """交接计数键：按 **execution_id** 维度（全局稳定，见下）。
@@ -7390,20 +7431,17 @@ class RedisFlowWorker(RegistryMixin, ControlMixin, FlowWorker):
                     # （租约仍在→跳过）并最终重入队，但产生大量假死信污染 DLQ、
                     # 浪费队列往返。
                     #
-                    # 为何 ack 对活持有者是安全的：任务**没有丢**——它在持有者
-                    # 手里正常推进。但「租约在」≠「持有者在」：持有者进程死后
-                    # 租约键还有 ≤TTL 的尾巴（#50 双机实证：维护窗 SIGTERM 杀
-                    # 持有者 → 节点失败重试的重投消息在 60s 被对端回收 → 命中
-                    # 本分支被 ack → 非终态执行唯一重投载体被吞，执行停 running
-                    # 退化成 2h zombie reap）。故 ack 前先经
-                    # ``_lease_conflict_ack_safe`` 核实持有者仍在注册表：
-                    # 在册（活持有者）→ ack；不在册（TTL 尾巴）→ 不 ack 留
-                    # pending，等租约过期后下一轮 reclaim 正常取得租约从
-                    # checkpoint 续跑（代价 ≤TTL+60s，远小于 2h reap）。
+                    # 冲突分支的 ack 判据（plaita#322 收敛后**信号盲**）：非决议
+                    # 载体一律 ack——步骤级所有权（next_step.step_id 声明 +
+                    # 连接器幂等键）让重跑外部去重，载体丢失由 #321 对账器
+                    # （running 无租约 → continue 按声明重建）/ zombie reap
+                    # 收敛；存活核算（读注册表猜持有者存亡）随 #50 加固一并
+                    # 退役——信号被删/副本落后会把判据翻错面，判据不再读它。
                     # 亲和闸路径（TaskNotForThisWorker）保留"交接重入队"是对的：
                     # 那里**没人**能跑该任务，必须留给对端。决议载体
-                    # （event/timeout/cancel）另有 A47-F2 守卫：即使持有者在册
-                    # 也不 ack——它们不是重复载体，而是挂起执行的唯一唤醒来源。
+                    # （event/timeout/cancel）保留 A46-04/A47-F2 守卫：一律
+                    # 不 ack——它们不是重复载体，而是挂起执行的唯一唤醒来源
+                    # （永久挂起与重放安全正交，不因 #322 放行）。
                     if self._lease_conflict_ack_safe(task.body):
                         queue.note_lease_conflict()
                         queue.ack(task.message_id)
