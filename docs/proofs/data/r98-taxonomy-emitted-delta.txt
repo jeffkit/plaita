@@ -1,0 +1,48 @@
+# r98 判定表重算发射 delta（旧提交 JSON vs 新发射，B2 第九十八轮）
+# 旧表为 r89 手工补行状态、发射基点远早于 r89——--check 在 build_rows 阶段即
+# SystemExit、永远走不到缺行 diff 输出（#332 所述盲区），故漂移远大于中止点所示。
+rows: old=821 new=1143 added=1114 removed=792 same-key-content-changed=11
+meta.counts old: {"grep_hit_lines": 821, "ast_associated_calls": 805, "interpolated_sites": 656, "constant_message_sites": 149, "grep_false_hits": 16}
+meta.counts new: {"grep_hit_lines": 1143, "ast_associated_calls": 1127, "interpolated_sites": 1002, "constant_message_sites": 125, "grep_false_hits": 16}
+class_distribution old: {"A": 250, "B": 86, "C": 320, "N/A": 165}
+class_distribution new: {"A": 335, "B": 127, "C": 540, "N/A": 141}
+
+## 同键内容变化 11 行=行号漂移碰撞（同 file:line 同 method、底层调用已不同），
+## 新类全部由既有规则机械判定（无一涉及本轮新判据），逐行核代码确认：
+  plaita/server/event_filter.py:436 [info] A->B
+    old: self._subscription_id ⇒ A（流程/运行实体标识（跨日志可回查））
+    new: self._reconciler.interval_seconds ⇒ B（耗时/调度与分区元数据）; self._reconciler.backfill_seconds ⇒ B（耗时/调度与分区元数据）
+  plaita/server/flow_worker.py:2474 [error] N/A->A
+    old: 常量消息，无插值 ⇒ 无数据流出口
+    new: execution_id ⇒ A（流程/运行实体标识（跨日志可回查））; message ⇒ B（引擎构造错误文案（f-string 拼自 flow_id/version 流程实体标识，非异常对象文本））
+  plaita/server/flow_worker.py:460 [warning] C->A
+    old: backend ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; e ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+    new: execution_id ⇒ A（流程/运行实体标识（跨日志可回查））; tombstone.get("reason") ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））; body.get("tenant_id") ⇒ A（流程/运行实体标识（跨日志可回查））
+  plaita/server/flow_worker.py:4779 [error] C->C
+    old: self._metrics_port ⇒ B（基础设施标量/文件系统路径/对象句柄）; exc ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+    new: _scrub_exception_text(e) ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+  plaita/server/flow_worker.py:4796 [info] C->A
+    old: _mask_webhook_url_for_log(self._alert_webhook) ⇒ C（凭据形状值（已按 #88 族掩码）：进日志必须保持掩码形态）
+    new: execution_id ⇒ A（流程/运行实体标识（跨日志可回查））
+  plaita/server/services/delay_service.py:320 [error] C->A
+    old: task_id ⇒ A（流程/运行实体标识（跨日志可回查））; e ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+    new: member[:200] ⇒ A（数据面内容（求值结果/消息载荷/流程配置内容/决议值））
+  plaita/server/services/kafka_queue_service.py:134 [warning] C->C
+    old: group_id ⇒ A（流程/运行实体标识（跨日志可回查））; e ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+    new: _scrub_url_text(e) ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+  plaita/server/services/kafka_queue_service.py:310 [error] A->C
+    old: group_id ⇒ A（流程/运行实体标识（跨日志可回查））
+    new: _scrub_exception_text(e) ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+  plaita/server/services/kafka_queue_service.py:611 [info] A->B
+    old: execution_id ⇒ A（流程/运行实体标识（跨日志可回查））
+    new: len(records) ⇒ B（计数）
+  plaita/server/services/redis_queue_service.py:195 [error] C->B
+    old: e ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+    new: queue_type ⇒ B（状态/枚举/组件选择器/环境变量名/引擎具名原因/解析结果（名字非值））
+  plaita/storage/redis.py:503 [error] C->C
+    old: e ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+    new: key_str ⇒ A（队列/存储/回调实体键（定位数据实体））; _scrub_url_text(e) ⇒ C（异常对象/异常文本：str(e) 可夹带作者数据与凭据形状 ⇒ 必须 #88 族构造面清洗后进日志）
+
+## 新增行按类分布（C 类=异常文本经 _scrub_*/_mask_* 构造面清洗站点与裸异常，
+## 均为表外新站点首判，非既有已判定行翻红——零扰动对账见 r98-taxonomy-zero-perturbation.txt）：
+{"N/A": 137, "C": 532, "A": 326, "B": 119}
