@@ -69,25 +69,30 @@ for step in flow.debug(name="test"):
         实际可能在超时触发前就完成派发，或晚若干毫秒才触发。压测显示 1ms 级
         timeout 存在与派发耗时相当的固有抖动；请将最小超时设在 50ms 以上。
 
-!!! danger "Normal / Generator 遇到挂起节点 = 具名失败，绝不是成功（plaita#330）"
+!!! danger "Normal / Generator 遇到挂起节点 = 具名失败，绝不是成功（plaita#330 / #331）"
 
     事件 / 审批 / 延时 / `hitl_await` 等**挂起型节点**（`is_suspending=True`）只能在
     Distributed 模式挂起等待。Normal（`flow.run()`、`flow_run` MCP/CLI 工具、console
-    dry-run）与 Generator（`flow.debug()`）**不具备挂起能力**：执行到挂起节点时流程
-    **具名终止**，抛 `SuspendNotExecutableError`（`error_type="suspend_not_executable"`），
-    挂起点之后的节点**不会执行**；子流程（child / reference / loop / parallel）内任意
-    深度同理。历史上这里会把 pending 载荷当普通数据静默推进、流程假"成功"——那是
-    缺陷，不是可依赖的行为。
+    dry-run）与 Generator（`flow.debug()`）**不具备挂起能力**：执行入口在**任何节点
+    执行之前**就按流程的执行要求闭包（含子流程，`required_capabilities`）具名拒绝
+    （plaita#331，`stage="entry"`），抛 `SuspendNotExecutableError`
+    （`error_type="suspend_not_executable"`）——挂起点**之前**的节点也不会执行；
+    静态闭包看不见的旁路（直驱 runner 等）由 NodeRunner 兜底断言在 execute 前
+    具名拒（`stage="runner"`）。历史上这里会把 pending 载荷当普通数据静默推进、
+    流程假"成功"——那是缺陷，不是可依赖的行为。
 
     错误体（`exc.to_dict()` / `flow_run` 的 `error_detail`）：`{error_type, node_id,
-    node_type, source_line, flow_id, cause, fix, frame_path, message}`；`message` 首行
-    写死「这不是源码缺陷，不要删除/替换该节点」；`fix.action` 为 `run_distributed`
-    （改用分布式运行时）或 `restructure`（挂起节点在 loop/parallel 迭代帧内——v1
-    分布式同样具名拒绝，须移出迭代帧）。Generator **不会** yield "挂起步"——与 Go
-    引擎 `ExecuteGenerator` 的 `Step{Error}` 决策分类一致（#317 对拍锚）。
+    node_type, source_line, flow_id, cause, fix, frame_path, stage, message}`（入口/
+    兜底面另有 `profile, required, missing`）；`message` 首行写死「这不是源码缺陷，
+    不要删除/替换该节点」；`fix.action` 为 `run_distributed`（改用分布式运行时）或
+    `restructure`（挂起节点在 loop/parallel 迭代帧内——v1 分布式同样具名拒绝，须移出
+    迭代帧）。Generator **不会** yield "挂起步"——与 Go 引擎 `ExecuteGenerator` 的
+    `Step{Error}` 决策分类一致（#317 对拍锚）。作者期可用
+    `flow_compile(source, profile=...)` 提前拿到非致命 `execution_requirements`
+    报告（不改 `ok`）。
 
-    回滚旋钮 `PLAITA_SUSPEND_GUARD=warn` 只把呈现退回裸 `FlowSuspendedCarrier` +
-    WARNING（并把注册期能力契约降为 WARNING），**关不掉**挂起闸本身；
+    回滚旋钮 `PLAITA_SUSPEND_GUARD=warn` 把入口/兜底两道静态闸与呈现退回
+    WARNING 放行（并把注册期能力契约降为 WARNING），**关不掉**挂起闸本身；
     2026-11-30 到期删除，见 `docs/governance/execution-capabilities.md`。
 
 ## Distributed 模式

@@ -33,14 +33,23 @@ class CompileResult:
     ir: Optional[Dict[str, Any]] = None
     errors: List[CompileError] = field(default_factory=list)
     flow_id: Optional[str] = None
+    # plaita#331 作者期信号：``compile_flow(source, profile=...)`` 时附带非致命
+    # ``{"profile", "required", "missing"}``（递归闭包 × 目标执行档）。**稀疏键**：
+    # 仅传 profile 时进 to_dict——既有载荷形状逐字节不变、``ok`` 判定不受影响
+    # （A2 r61 评审 §4 向后兼容；验收：含 approval 的源码 compile(profile="normal")
+    # 返回本键但 ok 不变）。
+    execution_requirements: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "ok": self.ok,
             "flow_id": self.flow_id,
             "ir": self.ir,
             "errors": [e.to_dict() for e in self.errors],
         }
+        if self.execution_requirements is not None:
+            payload["execution_requirements"] = self.execution_requirements
+        return payload
 
 
 @dataclass
@@ -82,17 +91,23 @@ def compile_flow(
     source: str,
     *,
     flow_id: Optional[str] = None,
+    profile: Optional[str] = None,
     **opts: Any,
 ) -> CompileResult:
     """Compile @flow source to Flow IR + 拓扑校验。
 
     与 ``flow_from_source`` / ``FlowBuilder.build`` 走同一 ``validate_flow_ir`` 门，
     避免 Agent 自纠循环把「仅 AST 通过」当成编译成功。
+
+    ``profile``（plaita#331 作者期信号）：给内置执行档名（normal/generator/
+    distributed/local）即附非致命 ``execution_requirements``——**只读报告，
+    不改 ``ok``**（拒绝面在执行入口 / publish/start，作者期只提示）。未传
+    profile 时结果形状与历史逐字节一致。
     """
     try:
         ir = compile_source(source, flow_id=flow_id, **opts)
         # validate_flow_ir + Flow.model_validate（与 flow_from_source 同门）
-        build_flow(ir)
+        flow = build_flow(ir)
     except FlowIRValidationError as exc:
         return CompileResult(
             ok=False,
@@ -102,8 +117,28 @@ def compile_flow(
         err = _parse_codeflow_error(exc)
         return CompileResult(ok=False, errors=[err])
 
+    requirements: Optional[Dict[str, Any]] = None
+    if profile is not None:
+        from plaita.core.capabilities import check_execution_requirements
+
+        try:
+            report = check_execution_requirements(flow, profile)
+        except ValueError as exc:
+            # 未知 profile 名是调用方错误：按一条编译错误呈现，不炸工具体。
+            return CompileResult(
+                ok=False,
+                errors=[CompileError(line=None, message=str(exc))],
+            )
+        requirements = {
+            "profile": report["profile"],
+            "required": report["required"],
+            "missing": report["missing"],
+        }
+
     resolved_flow_id = ir.get("flow_id") or flow_id
-    return CompileResult(ok=True, ir=ir, flow_id=resolved_flow_id)
+    return CompileResult(
+        ok=True, ir=ir, flow_id=resolved_flow_id, execution_requirements=requirements,
+    )
 
 
 def run_flow(
@@ -156,12 +191,19 @@ def _stable_error_type(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, str]]:
-    """List registered node types for Planner prompts / MCP introspection."""
+def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, Any]]:
+    """List registered node types for Planner prompts / MCP introspection.
+
+    plaita#331：行内附作者期信号 ``requires``（声明的宿主能力 token，数据源 =
+    registry 声明面，list 时**不**重扫源码——A2 r61 评审 §4）与 ``suspends``
+    （is_suspending）。
+    """
+    from plaita.node.capabilities import declared_requirements
+
     registry = get_default_registry()
     if discover_plugins:
         registry.discover()
-    rows: List[Dict[str, str]] = []
+    rows: List[Dict[str, Any]] = []
     for node_type in sorted(registry.list_types()):
         cls = registry.get(node_type)
         placeholder = node_type.upper()
@@ -170,6 +212,10 @@ def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, str]]:
                 "node_type": node_type,
                 "placeholder": placeholder,
                 "node_name": getattr(cls, "node_name", node_type) if cls else node_type,
+                # plaita#331：requires/suspends 让作者在选节点时即看到宿主要求
+                # （suspend:root/event_bus/queue 族在 normal 下不可执行）。
+                "requires": sorted(declared_requirements(cls)) if cls else [],
+                "suspends": getattr(cls, "is_suspending", False) is True if cls else False,
             }
         )
     return rows

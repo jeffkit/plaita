@@ -1,0 +1,80 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+______ test_compile_with_profile_reports_requirements_without_changing_ok ______
+
+    def test_compile_with_profile_reports_requirements_without_changing_ok():
+        """验收格：含 event 的源码 compile(profile="normal") 返回
+        execution_requirements 但 ``ok`` 不变（非致命，作者期只提示不拦截）。"""
+        plain = compile_flow(EVENT_SRC)
+>       assert plain.ok and plain.execution_requirements is None
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'CompileResult' object has no attribute 'execution_requirements'
+
+plaita-ai/tests/test_issue331_authoring_signal.py:36: AttributeError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:38 EventNode '_n1': unknown config keys ['eventType'] will be IGNORED (possible typo?). Known keys: ['desc', 'errorHandler', 'error_handler', 'event_filter', 'event_type', 'id', 'name', 'next', 'output', 'source_line', 'subscription_timeout', 'timeout', 'timeoutHandler', 'timeout_handler', 'type']
+________________ test_compile_profile_distributed_missing_empty ________________
+
+    def test_compile_profile_distributed_missing_empty():
+        reported = compile_flow(EVENT_SRC, profile="distributed")
+        assert reported.ok
+>       assert reported.execution_requirements["missing"] == []
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'CompileResult' object has no attribute 'execution_requirements'
+
+plaita-ai/tests/test_issue331_authoring_signal.py:52: AttributeError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:38 EventNode '_n1': unknown config keys ['eventType'] will be IGNORED (possible typo?). Known keys: ['desc', 'errorHandler', 'error_handler', 'event_filter', 'event_type', 'id', 'name', 'next', 'output', 'source_line', 'subscription_timeout', 'timeout', 'timeoutHandler', 'timeout_handler', 'type']
+___________ test_compile_profile_closure_is_recursive_over_childflow ___________
+
+    def test_compile_profile_closure_is_recursive_over_childflow():
+        """递归闭包：@childflow 内的 EVENT 计入 required（嵌套 child token 累积）。"""
+        reported = compile_flow(CHILD_EVENT_SRC, profile="normal")
+        assert reported.ok
+>       req = reported.execution_requirements
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'CompileResult' object has no attribute 'execution_requirements'
+
+plaita-ai/tests/test_issue331_authoring_signal.py:60: AttributeError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:38 EventNode '_n1': unknown config keys ['eventType'] will be IGNORED (possible typo?). Known keys: ['desc', 'errorHandler', 'error_handler', 'event_filter', 'event_type', 'id', 'name', 'next', 'output', 'source_line', 'subscription_timeout', 'timeout', 'timeoutHandler', 'timeout_handler', 'type']
+WARNING  plaita:flow.py:251 flow outer structural check (non-fatal, flow still runs): [nodes[r].childFlow] 流程缺少 type=start 入口节点（共 3 个节点）。运行期这将抛 FlowStartMissingError——请添加 start 节点（FlowBuilder 用 start_with，@flow 前端自动补）。
+___________ test_compile_unknown_profile_is_compile_error_not_crash ____________
+
+    def test_compile_unknown_profile_is_compile_error_not_crash():
+        """未知 profile 名按一条编译错误呈现（工具体不炸、ok=false）。"""
+        reported = compile_flow(EVENT_SRC, profile="staging")
+>       assert not reported.ok
+E       assert not True
+E        +  where True = CompileResult(ok=True, ir={'runtime': 'python', 'flow_id': 'wait_flow', 'inputType': {'dataType': 'object'}, 'nodes': ...success', 'name': "return 'done'", 'desc': "return 'done'（第 5 行）", 'source_line': 5}]}, errors=[], flow_id='wait_flow').ok
+
+plaita-ai/tests/test_issue331_authoring_signal.py:67: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:38 EventNode '_n1': unknown config keys ['eventType'] will be IGNORED (possible typo?). Known keys: ['desc', 'errorHandler', 'error_handler', 'event_filter', 'event_type', 'id', 'name', 'next', 'output', 'source_line', 'subscription_timeout', 'timeout', 'timeoutHandler', 'timeout_handler', 'type']
+____________ test_flow_list_nodes_rows_carry_requires_and_suspends _____________
+
+    def test_flow_list_nodes_rows_carry_requires_and_suspends():
+        """行内 requires/suspends：event 声明 [event_bus, suspend:root] 且
+        suspends=true；纯控制流节点 requires=[] suspends=false。"""
+        rows = {r["node_type"]: r for r in list_node_types()}
+>       assert rows["event"]["requires"] == ["event_bus", "suspend:root"]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'requires'
+
+plaita-ai/tests/test_issue331_authoring_signal.py:75: KeyError
+=============================== warnings summary ===============================
+tests/test_issue331_authoring_signal.py::test_compile_with_profile_reports_requirements_without_changing_ok
+tests/test_issue331_authoring_signal.py::test_compile_profile_distributed_missing_empty
+tests/test_issue331_authoring_signal.py::test_compile_profile_closure_is_recursive_over_childflow
+tests/test_issue331_authoring_signal.py::test_compile_unknown_profile_is_compile_error_not_crash
+  /private/tmp/r103-base/plaita-ai/plaita_ai/flow_runner.py:93: DeprecationWarning: input_type/output_type on @flow/@childflow is deprecated and ignored; $INPUT is always a dict from run(**kwargs) or run({...}).
+    ir = compile_source(source, flow_id=flow_id, **opts)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED plaita-ai/tests/test_issue331_authoring_signal.py::test_compile_with_profile_reports_requirements_without_changing_ok
+FAILED plaita-ai/tests/test_issue331_authoring_signal.py::test_compile_profile_distributed_missing_empty
+FAILED plaita-ai/tests/test_issue331_authoring_signal.py::test_compile_profile_closure_is_recursive_over_childflow
+FAILED plaita-ai/tests/test_issue331_authoring_signal.py::test_compile_unknown_profile_is_compile_error_not_crash
+FAILED plaita-ai/tests/test_issue331_authoring_signal.py::test_flow_list_nodes_rows_carry_requires_and_suspends
+5 failed, 4 warnings in 0.36s

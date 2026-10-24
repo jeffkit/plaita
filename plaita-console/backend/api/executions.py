@@ -59,12 +59,19 @@ try:  # A2R24-01：统一错误 detail 形状 + 异常文本脱敏
 except ImportError:
     from error_contract import error_detail, scrubbed_detail
 
-try:  # plaita#300：publish/start 能力门 + runtime pool 路由
-    from ..services.capability_gate import UnsupportedNodeTypesError, gate_flow_nodes
+try:  # plaita#300：publish/start 能力门 + runtime pool 路由；#331：执行要求闸
+    from ..services.capability_gate import (
+        ExecutionProfileUnsatisfiedError,
+        UnsupportedNodeTypesError,
+        gate_flow_execution_profile,
+        gate_flow_nodes,
+    )
     from ..services.runtime_pools import resolve_runtime_queue
 except ImportError:
     from services.capability_gate import (  # type: ignore
+        ExecutionProfileUnsatisfiedError,
         UnsupportedNodeTypesError,
+        gate_flow_execution_profile,
         gate_flow_nodes,
     )
     from services.runtime_pools import resolve_runtime_queue  # type: ignore
@@ -2267,6 +2274,47 @@ async def get_execution(
         )
 
 
+def _gate_local_execution_profile(store, flow_id: str, version: Optional[str], tenant: Optional[str]) -> None:
+    """本地档 start 的执行要求闸（plaita#331）：local profile = 进程内事件总线
+    （可挂起/恢复）但**无**持久队列+延迟排程——delay 族在本地档 start 即 422
+    具名拒，绝不产生「suspended 行永不唤醒」。版本解析与
+    ``start_local_execution`` 同源（``version=None`` = 最高已发布）；行不存在/
+    未发布时不在此判——交由既有 404/400 面，避免双报错形状。集群档 start 不经
+    本闸（distributed 全集恒过；真正执行入口在 worker 侧 ``run_distributed``
+    的引擎闸，与集群档 runtime 池的 #300 门并列）。"""
+    try:
+        from ..services.local_executor import _latest_published
+    except ImportError:
+        from services.local_executor import _latest_published  # type: ignore
+
+    resolved = version or _latest_published(store, flow_id, tenant)
+    if resolved is None:
+        return
+    record = store.get_version(flow_id, resolved, tenant_id=tenant)
+    if record is None or record.status != "published":
+        return
+    try:
+        gate_flow_execution_profile(
+            record.definition, profile="local",
+            flow_id=flow_id, version=resolved,
+        )
+    except ExecutionProfileUnsatisfiedError as e:
+        detail = dict(e.detail)
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                str(detail.get("error") or "execution_requirements_unmet"),
+                (
+                    f"流程 {flow_id}@{resolved} 的执行要求 {detail.get('required')} "
+                    f"不被本地执行档 {detail.get('profile')} 满足，缺少 "
+                    f"{detail.get('missing')}（本地档无持久队列/延迟排程，"
+                    "请发布到分布式池后启动）"
+                ),
+                **detail,
+            ),
+        ) from e
+
+
 @router.post("/executions")
 async def start_execution(
     request: StartFlowRequest,
@@ -2275,7 +2323,7 @@ async def start_execution(
 ):
     """
     启动新的流程执行
-    
+
     - **flow_id**: 流程 ID
     - **version**: 流程版本
     - **params**: 输入参数
@@ -2283,6 +2331,11 @@ async def start_execution(
     # 本地单机模式：console 进程内直接执行
     if (local := get_local_executor(http_request)) is not None:
         tenant = tenant_scope(http_request, required=True)
+        # plaita#331：start 前执行要求闸（local 档 delay 族具名拒，在任何
+        # 建档/线程拉起之前）。
+        _gate_local_execution_profile(
+            flow_store.get_flow_store(), request.flow_id, request.version, tenant
+        )
         try:
             info = local.start_local_execution(
                 flow_store.get_flow_store(), request.flow_id, request.version,

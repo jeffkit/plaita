@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING
 
 from plaita.core.callback import BaseCallbackManager, CallbackManager
+from plaita.core.capabilities import SUSPEND_ALLOWED_FRAME_NODE_TYPES
 from plaita.core.context import ExecutionContext
 from plaita.core.deadline import execution_deadline_ms
 from plaita.core.errors import (
@@ -899,8 +900,9 @@ def _gate_resume_carrier(node, prev_state, resume_type, resume_data):
 SUSPEND_FRAMES_KEY = "SUSPEND_FRAMES"
 
 #: 作用域闸放行的帧节点类型（程式一 v1：仅 child/reference 调用链可承载
-#: 挂起穿透）。
-_SUSPEND_ALLOWED_FRAME_NODE_TYPES = frozenset({"child", "reference"})
+#: 挂起穿透）。单源在 plaita.core.capabilities（#331 入口静态闭包的
+#: ``fix=restructure`` 判定共用），此处保留历史别名（仓内既有引用面不动）。
+_SUSPEND_ALLOWED_FRAME_NODE_TYPES = SUSPEND_ALLOWED_FRAME_NODE_TYPES
 
 
 def _load_suspend_frames(context):

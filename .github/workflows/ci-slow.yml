@@ -20,6 +20,7 @@ on:
       - "docs/event-ARCHITECTURE.md"
       - "docs/mutation-testing.md"
       - "docs/issue69-mutation-matrix.md"
+      - "docs/governance/architecture.yaml"
       - "!duo-*-ledger.md"
   workflow_dispatch:
   schedule:
@@ -56,3 +57,8 @@ jobs:
         run: |
           python -m pytest tests/unit -m slow \
             --timeout=3600 --timeout-method=thread -q
+      # plaita#331 ⑤：能力矩阵 ↔ 治理账本对账的 nightly 独立步（差分断言
+      # 「注册表新增 node_type 而矩阵未变 → 红」的深夜兜底；push 门由
+      # tests/unit/test_issue331_execution_profile.py 差分格常态拦截）。
+      - name: Capability matrix ledger check (#331 differential)
+        run: python scripts/export_capability_matrix.py --check

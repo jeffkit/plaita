@@ -446,9 +446,10 @@ class TestNormalModeNamedFailure:
     def test_root_event_in_normal_mode_is_named_failure(self):
         """根流程 normal 模式的挂起节点：不再静默假完成。
 
-        #330 起根出口呈现为 ``SuspendNotExecutableError``（独立异常类）；闸点
-        仍是 carrier（见 test_carrier_escapes_normal_drive 的 ``_advance_one``
-        直抛钉），经 ``__cause__`` 链可达。
+        #330 起根出口呈现为 ``SuspendNotExecutableError``（独立异常类）；
+        plaita#331 起入口静态闸先行——静态闭包看得见的挂起节点在任何节点执行
+        前即被拒（``stage="entry"``，``__cause__`` 无 carrier），运行期根出口
+        呈现降为兜底（``_advance_one`` 直抛 carrier 钉在分布式宿主格不变）。
         """
         flow = Flow.model_validate({
             "flow_id": "n1", "version": "1", "runtime": "python",
@@ -462,7 +463,8 @@ class TestNormalModeNamedFailure:
         ex.mode = "normal"
         with pytest.raises(SuspendNotExecutableError) as ei:
             ex.run_compatible(flow, False)
-        assert isinstance(ei.value.__cause__, FlowSuspendedCarrier)
+        assert ei.value.stage == "entry"
+        assert ei.value.__cause__ is None
 
     def test_child_event_in_normal_mode_is_named_failure(self):
         """child 内 event 在 normal 模式：pending 载荷不再被当数据（历史静默
@@ -493,8 +495,11 @@ class TestNormalModeNamedFailure:
             list(ex.run_compatible(flow, True))
 
     def test_carrier_escapes_normal_drive_of_suspended_checkpoint(self):
-        """用 normal 语义驱动带嵌套挂起现场的 checkpoint：载体具名穿透，不得被
-        当普通推进吞掉（策略层外的兜底面）。"""
+        """用 normal 语义驱动带嵌套挂起现场的 checkpoint：不得被当普通推进吞掉
+        （策略层外的兜底面）。plaita#331 起 runner 兜底闸在挂起节点 execute
+        **前**具名拒绝（``stage="runner"``，宿主身份取执行链根=normal）——
+        比 #330 时代「先再订阅再在根出口呈现」更早终态、无重复订阅副作用；
+        分布式宿主的载体穿透钉见 TestNestedSuspension 分布式格（不变）。"""
         from plaita.core.runner import NodeRunner
         from plaita.core.strategies import _advance_one
 
@@ -510,8 +515,10 @@ class TestNormalModeNamedFailure:
         # node_execution=FlowExecution facade：子节点 arun 需要
         # get_child_execution（裸 ExecutionContext 没有该方法）。
         runner = NodeRunner(fresh._ctx, node_execution=fresh)
-        with pytest.raises(FlowSuspendedCarrier):
+        with pytest.raises(SuspendNotExecutableError) as ei:
             asyncio.run(_advance_one(flow, runner, fresh.callback_manager, node))
+        assert ei.value.stage == "runner"
+        assert ei.value.node_id == "wait"
 
 
 # ---------------------------------------------------------------------------

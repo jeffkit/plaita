@@ -1,0 +1,334 @@
+......F.......FFF....FF....FF.F.......                                   [100%]
+=================================== FAILURES ===================================
+_____ TestProfileTable.test_frame_allowlist_single_source_with_scope_gate ______
+
+self = <tests.unit.test_issue331_execution_profile.TestProfileTable object at 0x104baa580>
+
+    def test_frame_allowlist_single_source_with_scope_gate(self):
+        from plaita.core import strategies
+    
+>       assert strategies._SUSPEND_ALLOWED_FRAME_NODE_TYPES is SUSPEND_ALLOWED_FRAME_NODE_TYPES
+E       AssertionError: assert frozenset({'child', 'reference'}) is frozenset({'child', 'reference'})
+E        +  where frozenset({'child', 'reference'}) = <module 'plaita.core.strategies' from '/private/tmp/r103-base/plaita/core/strategies.py'>._SUSPEND_ALLOWED_FRAME_NODE_TYPES
+
+tests/unit/test_issue331_execution_profile.py:232: AssertionError
+_________ TestEntryGate.test_normal_entry_rejects_before_any_node_runs _________
+
+self = <tests.unit.test_issue331_execution_profile.TestEntryGate object at 0x104a1f890>
+
+    def test_normal_entry_rejects_before_any_node_runs(self):
+        """#331 与 #330 的区别钉：挂起点**之前**的节点也不执行（#330 运行期闸会先跑 before）。"""
+        ex = FlowExecution()
+        ex.mode = "normal"
+        with pytest.raises(SuspendNotExecutableError) as ei:
+            ex.run_compatible(_event_root(), False)
+>       assert CALLS == []
+E       AssertionError: assert ['before'] == []
+E         
+E         Left contains one more item: 'before'
+E         Use -v to get more diff
+
+tests/unit/test_issue331_execution_profile.py:403: AssertionError
+_________ TestEntryGate.test_generator_entry_rejects_before_first_step _________
+
+self = <tests.unit.test_issue331_execution_profile.TestEntryGate object at 0x104a1f390>
+
+    def test_generator_entry_rejects_before_first_step(self):
+        ex = FlowExecution()
+        ex.mode = "generator"
+        with pytest.raises(SuspendNotExecutableError) as ei:
+            for _ in ex.run_compatible(_event_root(), True):
+                pass
+>       assert CALLS == []
+E       AssertionError: assert ['before'] == []
+E         
+E         Left contains one more item: 'before'
+E         Use -v to get more diff
+
+tests/unit/test_issue331_execution_profile.py:426: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    asyncio:base_events.py:1865 Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x104be7d90>
+_________________ TestEntryGate.test_async_entry_twin_rejects __________________
+
+self = <tests.unit.test_issue331_execution_profile.TestEntryGate object at 0x104897a80>
+
+    def test_async_entry_twin_rejects(self):
+        ex = FlowExecution()
+        ex.mode = "normal"
+        with pytest.raises(SuspendNotExecutableError) as ei:
+            asyncio.run(ex.arun_compatible(_event_root(), False))
+>       assert ei.value.stage == "entry"
+E       AssertionError: assert 'runtime' == 'entry'
+E         
+E         - entry
+E         + runtime
+
+tests/unit/test_issue331_execution_profile.py:435: AssertionError
+_____ TestEntryGate.test_local_profile_accepts_approval_but_rejects_delay ______
+
+self = <tests.unit.test_issue331_execution_profile.TestEntryGate object at 0x102b86d50>
+
+    def test_local_profile_accepts_approval_but_rejects_delay(self):
+        """console local 后端（ADR-001 §3.4）：进程内事件总线可挂起/恢复 → approval 过；
+        无持久队列+延迟排程 → delay 具名拒，missing 恰为 ``queue``。"""
+        ex = FlowExecution()
+        ex.execution_profile = "local"
+        r = ex.run_distributed(_approval_root(), {})
+        assert r.get("is_suspend") is True
+    
+        ex2 = FlowExecution()
+        ex2.execution_profile = "local"
+>       with pytest.raises(Exception) as ei:
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE Exception
+
+tests/unit/test_issue331_execution_profile.py:493: Failed
+_________ TestEntryGate.test_execution_profile_propagates_to_children __________
+
+self = <tests.unit.test_issue331_execution_profile.TestEntryGate object at 0x102b86850>
+
+    def test_execution_profile_propagates_to_children(self):
+        ex = FlowExecution()
+        ex.execution_profile = "local"
+        child = ex.get_child_execution()
+>       assert child.execution_profile == "local"
+               ^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'FlowExecution' object has no attribute 'execution_profile'
+
+tests/unit/test_issue331_execution_profile.py:506: AttributeError
+___________ TestEntryGate.test_guard_warn_degrades_entry_to_warning ____________
+
+self = <tests.unit.test_issue331_execution_profile.TestEntryGate object at 0x104ac31e0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x104e1b950>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x105e538c0>
+
+    def test_guard_warn_degrades_entry_to_warning(self, monkeypatch, caplog):
+        """旋钮 warn：入口拒绝降 WARNING 放行，交回运行期闸/呈现（#330 warn 档=裸 carrier）。"""
+        monkeypatch.setenv("PLAITA_SUSPEND_GUARD", "warn")
+        ex = FlowExecution()
+        ex.mode = "normal"
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(FlowSuspendedCarrier):
+                ex.run_compatible(_event_root(), False)
+        msgs = [r.message for r in caplog.records]
+>       assert any("suspend-guard=warn" in m and "entry" in m for m in msgs)
+E       assert False
+E        +  where False = any(<generator object TestEntryGate.test_guard_warn_degrades_entry_to_warning.<locals>.<genexpr> at 0x103288930>)
+
+tests/unit/test_issue331_execution_profile.py:550: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.executor:_error_normalization.py:114 [suspend-guard=warn] suspending node at normal/generator root presented as failure (kept raw carrier): {'error_type': 'suspend_not_executable', 'message': "这不是源码缺陷，不要删除/替换该节点：\n挂起节点 'wait' (event) 在 flow 'root1' 返回了 pending 载荷，但当前执行模式（normal/generator）不具备挂起能力，流程已具名终止、后续节点未执行。", 'node_id': 'wait', 'node_type': 'event', 'source_line': None, 'flow_id': 'root1', 'cause': 'environment', 'fix': {'action': 'run_distributed', 'call': None, 'message': '本地 normal/generator 模式不具备挂起/恢复能力：事件/审批/延时等待需要分布式运行时。请到 console 将流程发布到分布式池验证，或使用 FlowExecution.run_distributed(...) 逐步驱动'}, 'frame_path': ['wait(event)'], 'stage': 'runtime'}
+______ TestRunnerGuard.test_bypass_is_blocked_before_execute_with_warning ______
+
+self = <tests.unit.test_issue331_execution_profile.TestRunnerGuard object at 0x104a1f9d0>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x1052b5090>
+
+    def test_bypass_is_blocked_before_execute_with_warning(self, caplog):
+        """直接驱动 ``_advance_one``（绕过入口与策略）：execute 前具名拒 + WARNING；
+        副作用计数 0——这正是 hitl_await 形状在 normal 下要堵的洞。"""
+        flow = self._flow()
+        ex = FlowExecution()
+        ex.mode = "normal"
+        ex._ctx.setup_flow(flow, (), {})
+        runner = NodeRunner(ex._ctx, node_execution=ex)
+        node = flow.find_node_by_id("s")
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(SuspendNotExecutableError) as ei:
+>               asyncio.run(_advance_one(flow, runner, ex.callback_manager, node))
+
+tests/unit/test_issue331_execution_profile.py:583: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py:719: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+flow = Flow(flow_id='bypass1', version='1', runtime='python', input_type=None, output_type=None, nodes=[Start(id='start', nam...0), result_type='success', error=None)], author='', desc='', metadata={}, timeout='', global_context={}, expose_env=[])
+runner = <plaita.core.runner.NodeRunner object at 0x1061caaf0>
+callback_manager = <plaita.core.callback.CallbackManager object at 0x1058b9e50>
+node = _SideEffectSuspend(id='s', name=None, desc=None, output=None, next='end', timeout='', source_line=None, timeout_handle...dler(strategy=<ErrorStrategy.ABORT: 'abort'>, default_value=None, error_code=-9527, error_message=None, retry_times=0))
+max_timeout_ms = None
+
+    async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None):
+        """Run one node via *runner*, update LAST_NODE/BRANCH/$NODE state, then resolve
+        the next node. Returns ``(result, branch, next_node, is_end)``.
+    
+        Shared by ``NormalStrategy`` and ``GeneratorStrategy`` so the
+        run → detect-end → resolve-next sequence lives in exactly one place.
+        Distributed mode cannot share it wholesale because it suspends on
+        ``EventNode`` instead of advancing, so it keeps its own single-step path.
+    
+        plaita#311 NS-M3（嵌套挂起）两面：
+    
+        - **fail-closed**（修正清单 #7：与子执行 fail-open 是同一个洞）：挂起型节点
+          的 pending 载荷不得当普通数据继续推进——``is_suspending`` 为真即抛
+          :class:`FlowSuspendedCarrier`（先于 end 判断与后继解析；挂起节点不可能
+          是 End）。根流程 normal/generator 模式由此从「静默假完成」变为具名失败；
+          分布式根的子执行里，载体沿调用链上抛到分布式步边界转换成合法挂起。
+          ``is True`` 的 bool 代理防御与本模块 continue 守卫（历史 288 行）同款。
+        - **传播压帧**（rs ``advance_from`` 的 push_frame 对应面）：carrier 从内层
+          ``runner.run_node`` 穿出时，把本帧（flow/上下文/子节点）压入其调用栈后
+          原样上抛——恢复续跑循环按同序消费（最深帧先返回）。
+        """
+        try:
+            result, branch = await runner.run_node(
+                flow, node, max_timeout_ms=max_timeout_ms, callback_manager=callback_manager,
+            )
+        except FlowSuspendedCarrier as carrier:
+            carrier.push_frame(flow, runner.context, node)
+            raise
+        # plaita#311 fail-closed：挂起检查先于 end 判断（挂起节点不可能是 End，
+        # rs advance_from 同序）。
+        if getattr(node, "is_suspending", False) is True:
+>           raise FlowSuspendedCarrier(
+                (
+                    f"Node {node.id!r} ({getattr(node, 'node_type', '?')}) suspended in flow "
+                    f"{getattr(flow, 'flow_id', '?')!r}: the pending payload is refused as "
+                    "data (plaita#311 fail-closed). Suspend/resume requires distributed "
+                    "mode; inside normal/generator executions a suspending node is a "
+                    "terminal named failure."
+                ),
+                node=node, flow=flow, context=runner.context, node_result=result,
+            )
+E           plaita.core.errors.FlowSuspendedCarrier: Node 's' (r103_side_effect_suspend) suspended in flow 'bypass1': the pending payload is refused as data (plaita#311 fail-closed). Suspend/resume requires distributed mode; inside normal/generator executions a suspending node is a terminal named failure.
+
+plaita/core/strategies.py:1142: FlowSuspendedCarrier
+_______ TestRunnerGuard.test_runner_uses_root_host_profile_for_subflows ________
+
+self = <tests.unit.test_issue331_execution_profile.TestRunnerGuard object at 0x104bcc2b0>
+
+    def test_runner_uses_root_host_profile_for_subflows(self):
+        """含子流程：normal 根下直接推进 child 节点（旁路），子执行里的挂起节点在
+        execute 前被 runner 闸拦——宿主身份取执行链的根。子流程节点用内置
+        ``event``（嵌套 child_flow dict 经默认 registry 延迟解析，自定义桩
+        node_type 不可见）。"""
+        root = _flow(
+            [
+                {"type": "start", "id": "start", "next": "call"},
+                {
+                    "type": "child",
+                    "id": "call",
+                    "childFlow": EVENT_CHILD,
+                    "next": "end",
+                },
+                {"type": "end", "id": "end", "output": "x"},
+            ],
+        )
+        ex = FlowExecution()
+        ex.mode = "normal"
+        ex._ctx.setup_flow(root, (), {})
+        runner = NodeRunner(ex._ctx, node_execution=ex)
+        with pytest.raises(SuspendNotExecutableError) as ei:
+>           asyncio.run(_advance_one(root, runner, ex.callback_manager, root.find_node_by_id("call")))
+
+tests/unit/test_issue331_execution_profile.py:624: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py:719: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+plaita/core/strategies.py:1133: in _advance_one
+    result, branch = await runner.run_node(
+plaita/core/runner.py:545: in run_node
+    result = await self._execute_with_retry(flow, node, max_timeout_ms)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/runner.py:651: in _execute_with_retry
+    result = await self._run_with_timeout(node, remaining_timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/runner.py:728: in _run_with_timeout
+    return await self._run_async_node(node, timeout_ms)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/runner.py:734: in _run_async_node
+    result = await node.arun(exec_ctx)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/node/child.py:83: in arun
+    return await child_execution.arun_compatible(self.child_flow, lazy, child_input)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+plaita/core/executor_compat.py:85: in arun_compatible
+    return await driven
+           ^^^^^^^^^^^^
+plaita/core/async_utils.py:96: in _flow_session_scoped
+    return await coro
+           ^^^^^^^^^^
+plaita/core/_error_normalization.py:152: in finish_normal
+    result = await coro
+             ^^^^^^^^^^
+plaita/core/strategies.py:164: in execute
+    result, branch, next_node, reached_end = await _advance_one(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+flow = Flow(flow_id='child1', version='1', runtime='python', input_type=None, output_type=None, nodes=[Start(id='cstart', nam...0), result_type='success', error=None)], author='', desc='', metadata={}, timeout='', global_context={}, expose_env=[])
+runner = <plaita.core.runner.NodeRunner object at 0x106660ed0>
+callback_manager = <plaita.core.callback.CallbackManager object at 0x103268230>
+node = EventNode(id='wait', name=None, desc=None, output=None, next='cend', timeout='', source_line=None, timeout_handler=Err..., error_code=-9527, error_message=None, retry_times=0), event_type='inner', event_filter={}, subscription_timeout=None)
+max_timeout_ms = 1800000
+
+    async def _advance_one(flow, runner, callback_manager, node, max_timeout_ms=None):
+        """Run one node via *runner*, update LAST_NODE/BRANCH/$NODE state, then resolve
+        the next node. Returns ``(result, branch, next_node, is_end)``.
+    
+        Shared by ``NormalStrategy`` and ``GeneratorStrategy`` so the
+        run → detect-end → resolve-next sequence lives in exactly one place.
+        Distributed mode cannot share it wholesale because it suspends on
+        ``EventNode`` instead of advancing, so it keeps its own single-step path.
+    
+        plaita#311 NS-M3（嵌套挂起）两面：
+    
+        - **fail-closed**（修正清单 #7：与子执行 fail-open 是同一个洞）：挂起型节点
+          的 pending 载荷不得当普通数据继续推进——``is_suspending`` 为真即抛
+          :class:`FlowSuspendedCarrier`（先于 end 判断与后继解析；挂起节点不可能
+          是 End）。根流程 normal/generator 模式由此从「静默假完成」变为具名失败；
+          分布式根的子执行里，载体沿调用链上抛到分布式步边界转换成合法挂起。
+          ``is True`` 的 bool 代理防御与本模块 continue 守卫（历史 288 行）同款。
+        - **传播压帧**（rs ``advance_from`` 的 push_frame 对应面）：carrier 从内层
+          ``runner.run_node`` 穿出时，把本帧（flow/上下文/子节点）压入其调用栈后
+          原样上抛——恢复续跑循环按同序消费（最深帧先返回）。
+        """
+        try:
+            result, branch = await runner.run_node(
+                flow, node, max_timeout_ms=max_timeout_ms, callback_manager=callback_manager,
+            )
+        except FlowSuspendedCarrier as carrier:
+            carrier.push_frame(flow, runner.context, node)
+            raise
+        # plaita#311 fail-closed：挂起检查先于 end 判断（挂起节点不可能是 End，
+        # rs advance_from 同序）。
+        if getattr(node, "is_suspending", False) is True:
+>           raise FlowSuspendedCarrier(
+                (
+                    f"Node {node.id!r} ({getattr(node, 'node_type', '?')}) suspended in flow "
+                    f"{getattr(flow, 'flow_id', '?')!r}: the pending payload is refused as "
+                    "data (plaita#311 fail-closed). Suspend/resume requires distributed "
+                    "mode; inside normal/generator executions a suspending node is a "
+                    "terminal named failure."
+                ),
+                node=node, flow=flow, context=runner.context, node_result=result,
+            )
+E           plaita.core.errors.FlowSuspendedCarrier: Node 'wait' (event) suspended in flow 'child1': the pending payload is refused as data (plaita#311 fail-closed). Suspend/resume requires distributed mode; inside normal/generator executions a suspending node is a terminal named failure.
+
+plaita/core/strategies.py:1142: FlowSuspendedCarrier
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow.py:251 flow f structural check (non-fatal, flow still runs): [nodes[call].childFlow] 流程缺少 type=start 入口节点（共 3 个节点）。运行期这将抛 FlowStartMissingError——请添加 start 节点（FlowBuilder 用 start_with，@flow 前端自动补）。
+=========================== short test summary info ============================
+FAILED tests/unit/test_issue331_execution_profile.py::TestProfileTable::test_frame_allowlist_single_source_with_scope_gate
+FAILED tests/unit/test_issue331_execution_profile.py::TestEntryGate::test_normal_entry_rejects_before_any_node_runs
+FAILED tests/unit/test_issue331_execution_profile.py::TestEntryGate::test_generator_entry_rejects_before_first_step
+FAILED tests/unit/test_issue331_execution_profile.py::TestEntryGate::test_async_entry_twin_rejects
+FAILED tests/unit/test_issue331_execution_profile.py::TestEntryGate::test_local_profile_accepts_approval_but_rejects_delay
+FAILED tests/unit/test_issue331_execution_profile.py::TestEntryGate::test_execution_profile_propagates_to_children
+FAILED tests/unit/test_issue331_execution_profile.py::TestEntryGate::test_guard_warn_degrades_entry_to_warning
+FAILED tests/unit/test_issue331_execution_profile.py::TestRunnerGuard::test_bypass_is_blocked_before_execute_with_warning
+FAILED tests/unit/test_issue331_execution_profile.py::TestRunnerGuard::test_runner_uses_root_host_profile_for_subflows
+9 failed, 29 passed in 1.63s

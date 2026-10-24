@@ -74,17 +74,25 @@ def _load_plugins(plugins: List[str], extra_paths: List[str]) -> None:
 
 
 @mcp.tool()
-def flow_compile(source: str, flow_id: Optional[str] = None) -> str:
+def flow_compile(source: str, flow_id: Optional[str] = None, profile: Optional[str] = None) -> str:
     """Compile @flow Python source to Flow IR without executing.
 
     Args:
         source: Complete @flow source string (may include @childflow functions).
         flow_id: Optional main flow function name when multiple @flow defs exist.
+        profile: Optional execution profile name (normal/generator/distributed/
+            local). When given, the result carries a NON-FATAL
+            ``execution_requirements`` report — ``{profile, required, missing}``
+            tokens the flow needs (recursively, incl. child/parallel/reference
+            flows) that the target host profile lacks. ``ok`` is unchanged:
+            a flow needing suspend/approval capabilities still compiles, but
+            you should route it to the distributed runtime (plaita#331).
 
     Returns:
-        JSON: {ok, flow_id, ir, errors:[{line, message}]}
+        JSON: {ok, flow_id, ir, errors:[{line, message}], execution_requirements?}
+        (``execution_requirements`` present only when ``profile`` is given)
     """
-    result = compile_flow(source, flow_id=flow_id)
+    result = compile_flow(source, flow_id=flow_id, profile=profile)
     return result_json(result)
 
 
@@ -170,8 +178,13 @@ def flow_list_nodes() -> str:
 
     Custom nodes appear as UPPERCASE placeholders in @flow (e.g. llm -> LLM).
 
+    Each row also carries authoring-time host requirements (plaita#331):
+    ``requires`` = declared capability tokens (suspend:root / suspend:nested /
+    event_bus / queue / sandbox / network), ``suspends`` = whether the node
+    parks the flow (needs the distributed runtime to resume).
+
     Returns:
-        JSON array: [{node_type, placeholder, node_name}, ...]
+        JSON array: [{node_type, placeholder, node_name, requires, suspends}, ...]
     """
     return result_json(list_node_types())
 

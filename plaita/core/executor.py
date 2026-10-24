@@ -36,6 +36,7 @@ from plaita.core.callback import (
     FlowCallback,
     LoggerCallback,
 )
+from plaita.core.capabilities import gate_execution_entry
 from plaita.core.context import ExecutionContext
 from plaita.core.executor_compat import CompatRunMixin
 from plaita.core.executor_express import ExpressNamespaceMixin
@@ -58,7 +59,11 @@ from plaita.core.strategies import (  # noqa: F401
     _create_lazy_output,
     _subscribe_event,
 )
-from plaita.core.errors import FlowExecutionException
+from plaita.core.errors import (
+    ExecutionProfileError,
+    FlowExecutionException,
+    SuspendNotExecutableError,
+)
 
 if TYPE_CHECKING:
     from plaita.event.core import EventBus
@@ -232,6 +237,10 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
     ):
         self.options = RunOptions(mode=_coerce_mode(mode), timeout=None)
         self.parent = parent
+        # plaita#331：宿主 profile 显式覆写（None = 由根的 mode 经
+        # ``profile_for_mode`` 推导，见 plaita.core.capabilities.host_profile）。
+        # console 进程内 local 后端设为 "local"（无持久队列+延迟排程）。
+        self.execution_profile = None
         self.verbose = verbose
         # 可选自定义节点注册表。``None`` 时沿用 ``flow`` 自身已解析的节点
         # (常规路径: ``Flow.model_validate`` 已用默认 registry 解析过)。传入
@@ -283,6 +292,9 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
         # 避免把父级 handler 当"新增 handler"再传一次导致双发。
         child = FlowExecution(self, callback_manager=self.callback_manager.child())
         child.mode = self.mode
+        # 宿主身份随执行链继承（判定以 host_profile 沿根链读取为准，副本供
+        # 节点/宿主直读；plaita#331）。
+        child.execution_profile = self.execution_profile
         return child
 
     @property
@@ -484,6 +496,10 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
         """Sync orchestration: clean, flow_start, setup_flow. Returns the
         strategy's awaitable/async-generator for later driving."""
         self._ensure_flow_resolved(flow)
+        # plaita#331 拒绝面：normal/generator 入口（sync/async/lazy 三态同经此
+        # 处）在**任何节点执行前**按递归闭包 × 宿主 profile 具名校验；子执行
+        # （parent 非空）不闸（递归闭包已在根算过，NS-M3 传播面不动）。
+        gate_execution_entry(self, flow)
         self.clean()
         self.callback_manager.on_flow_start(flow)
         self._ctx.setup_flow(flow, args, kwargs)
@@ -539,6 +555,20 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
         self._begin_run()
         try:
             self._ensure_flow_resolved(flow)
+            # plaita#331：本入口**就是**分布式宿主驱动（生产唯一路径，worker /
+            # console local 均先置 distributed；直驱 API 此前不置 mode，宿主
+            # profile 推导会误读成 normal）——入口处钉死宿主身份。
+            self.mode = ExecutionMode.DISTRIBUTED
+            # plaita#331 拒绝面：distributed 入口同闸（只判 token 不判帧类型——
+            # loop/parallel 帧内挂起由运行期作用域闸照常具名拒，入口不预判）。
+            # 具名拒绝走同一条 _raise_distributed_error 归一化（对外
+            # FlowErrorException 契约，__cause__ 保留原身份），与运行期
+            # 作用域闸的呈现口径一致；意外异常保持既有裸传播
+            # （_ensure_flow_resolved 等前置同径）。
+            try:
+                gate_execution_entry(self, flow)
+            except (SuspendNotExecutableError, ExecutionProfileError) as e:
+                _raise_distributed_error(e, flow, self.callback_manager)
             timeout = _distributed_timeout_or_raise(
                 flow, self.timeout, timeout, self.callback_manager)
             # 种子仅在调用方显式给出时透传——不带新 kwarg 地保持既有
