@@ -75,7 +75,9 @@ def _safe_environment(allowlist: Optional[List[str]] = None) -> Dict[str, str]:
             exposed[key] = os.environ[key]
             logger.warning(
                 "expose_env: $ENV.%s 被暴露给 flow 表达式（allowlist 命中，"
-                "请确认这是预期行为；该值会进入 checkpoint 序列化）", key,
+                "请确认这是预期行为；值仅在进程内存中用于表达式求值，"
+                "checkpoint 不落盘——恢复路径按当前进程 env 重注，plaita#326）",
+                key,
             )
     return exposed
 
