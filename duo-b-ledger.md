@@ -1055,3 +1055,15 @@
 - 门禁（无管道直录）：console 全量 **1613P/13S rc=0**（=开工基线 1592+新 21 精确对账）/ruff 4 文件 rc=0/mkdocs --strict rc=0；根仓 unit 未跑（零触 plaita/ 引擎面，席位口径）。基线 fe64f773；门禁期 origin/main 前移 2 提交（ADR 治理文档，`git diff --name-only` 核零交集）。
 - 文档：模块文档串（按行租约 bullet + 「多副本约定」取代 b117-03 段，删除协议进程内边界如实注记）；ops-runbook env 表新行 + WARNING 聚合行 + 投递链节多副本段。
 - 证据：`docs/proofs/r97-c2-outbox-row-lease.md` + `docs/proofs/data/r97-*`（驱动 `r97-lease-replica-driver.py` 可复跑）。交付=分支 `fix/c2-outbox-row-lease`（9b059a3e + proofs 笔）待主控验收合并；回评附 #324 一行。
+
+## 第九十八轮 · plaita#332（log-site-taxonomy 重算门背账裁定——154 条一轮清零，P2，2026-10-24，B2 修复席）
+
+- 缺陷（#332）：`classify_expr` 首个未匹配即 SystemExit（scripts/log_site_taxonomy.py:229），判定表自上次全绿后长期中止；各合并轮对新增 logger 站点**手工补行**、重算从未跑通——且 `--check` 在 `build_rows` 阶段即中止、**永远走不到缺行 diff 输出**（main() 的 `n_sites-c_sites` 段是死代码），手工补行者看不到缺行清单（#332 所述盲区的更精确形态）。
+- 再枚举（不盲信 r88b 清单）：探针对当前树全量收集未匹配（`~/.issue-keeper/duty/b2-r98-scripts/enum_unmatched.py`，monkeypatch 收集全部再退出）——仍 154 条但**成员已漂移**（新增 tenant_dlq_quota 12 条等，中止点 ownership.py:99 非 r88b 的 runner.py:711）。
+- 判定方法：逐条实读调用点±10 行+所在函数（6 处追到构造面：note=report_progress 文案〔NodeContext 不给 code 节点〕/where=掩码器字面量标签/violation=引擎可读原因/effective=配置标量/detail=_scrub_url_text 中转/warning=preflight 引造文案）；裸名走 OVERRIDES（`task`×4 沿 :2869 既有先例；**detail×2 如实判 C**=清洗产物经局部变量中转，保持已掩约束）；族式语义走规则表且**新 tuple 只追加在 B/A_RULES 列表末尾**（不前插不改既有 tuple）。
+- 零扰动实证：origin/main 规则 vs 本轮规则对全仓插值表达式判类对账——main 可判定的 **1750 条类别逐一相同（MISMATCH=0）**，新增覆盖 167 ⇒ **既有行零翻类/零翻红**（docs/proofs/data/r98-taxonomy-zero-perturbation.txt）。
+- 先红后绿（门=all-or-nothing，中间批以探针剩余数证进度）：基线红 154 → c1 OVERRIDES+30 红 124 → c2 B_RULES+8 红 41 → c3 A_RULES+3 **未判定 0** → c4 JSON 发射 **门 rc=0**（`✓ 判定表与代码重算一致（1143 行）`）。每批 #151 卫生 14 passed + ruff 绿。
+- 发射 delta 审计：旧 JSON 821 行 vs 新 1143（+1114/−792/同键变化 11）；11 行全为**行号漂移碰撞**（同键不同调用，新类均由既有规则判定，逐行核代码确认）；红点 C 320→540 全为**表外站点首判**（非既有行翻红）。跳过 0 条（无第三方面）；新增判据族 11+OVERRIDES 30，A/B/C/D 四类语义不变。
+- 残面：中止点机制未改（#332 建议 2 收集全部再退出/CI 信号属门脚本行为变更，留 owner）；手工补行时代应终结（门绿态下 --check 缺行 diff 恢复有效，后续新增站点须 --emit）。
+- 门禁（无管道直录）：taxonomy 门 rc=0 / `test_issue151_log_hygiene` 14P / ruff rc=0 / mkdocs --strict rc=0（主仓 venv）；根仓 unit/console 未跑（零触 plaita/ 代码，仅 scripts/+docs/）。
+- 证据：`docs/proofs/r98-taxonomy-backlog-batch1.md` + `docs/proofs/data/r98-taxonomy-*`。交付=分支 `fix/taxonomy-backlog-b1`（11a45d56+876bb525+5ad0717a+0f0bce2e）待主控验收合并；回评附 #332 一行。
