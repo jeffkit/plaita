@@ -308,9 +308,11 @@ def test_reconcile_healthy_rows_untouched(store: FlowStore, sessions,
     _publish_version(store)
     engine_outbox.run_delivery_cycle(target_redis, sessions)
     rec = engine_outbox.run_reconcile_cycle(target_redis, sessions)
-    # #303 起含 skipped（删除协议 tombstone/已删行的跳过计数，守恒场景为 0）
+    # #303 起含 skipped（删除协议 tombstone/已删行的跳过计数，守恒场景为 0）；
+    # #324 起含 lease_skipped/lease_open（按行租约面计数，守恒场景为 0）
     assert rec == {"checked": 1, "requeued": 0, "errors": 0,
-                   "drifted": 0, "source_missing": 0, "skipped": 0}
+                   "drifted": 0, "source_missing": 0, "skipped": 0,
+                   "lease_skipped": 0, "lease_open": 0}
     assert _rows(sessions)[0].status == "delivered"
 
 
