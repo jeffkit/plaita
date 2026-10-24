@@ -1089,3 +1089,4 @@
 - 门禁（无管道直录）：unit 独跑 **9147P/13S rc=0**（首跑 9146P/1F=卫生门红，修复后复跑；=r103 基线 9141+6 新格）/console 全量 **1637P/14S rc=0**（独跑复门；首跑 1636P/1F=issue37 usage 格负载敏感假红〔与 mkdocs 并跑窗口叠加〕定向 0.95s 绿，r88 判据；数字含共享树 #335 未提交面）/integ+e2e **287P/4S rc=0**/ruff 改动面零新增/mkdocs --strict rc=0（`PYTHON=/opt/homebrew/bin/python3` 绕 pyenv shim）。
 - 残面：#339 代码级关闭候 #335 落地（验收格已绿、依赖其 `engine_backend.resume_execution`）；本席不代收官。
 - 证据：`docs/proofs/r93-i338-nested-env-faces.md` + `docs/proofs/data/r93-probe-nested-env-postfix.txt`。交付=主 clone 直落 main（主 clone 席位口径；逐路径 add，邻席 #335 WIP 不暂存）；landing_gate 推前核验；回评附 #338/#339 各一行。
+- **CI 终态补记（同日）**：本轮两推 `9343910b`（代码+proofs+台账）+ `5bcb4084`（探针归档）在途 run 被后继推送取代 cancelled（非红判据）；终判=后继 run `97859f20`（B1 r93 #338，含本轮提交祖先）四腿 **CI success / slow lane success / Console E2E success / Deploy docs success**。回评 #319/#335 已发；两单留 open 待提报方验收。
