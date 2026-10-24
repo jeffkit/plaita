@@ -49,10 +49,17 @@ FLOW_ID = "conform-hello"
 VERSION = "1.0.0"
 GOOD_DEF = json.dumps({
     "nodes": [
-        {"type": "start", "id": "start", "next": "end"},
+        {"type": "start", "id": "start", "next": "wait"},
+        # 事件节点：resume 格的 $LAST_NODE 指向它（worker 的 #258 stale 载体
+        # 复核要求挂起形状真实——$NODE status=pending 的 suspending 节点）。
+        {"type": "event", "id": "wait", "event_type": "approval", "next": "end"},
         {"type": "end", "id": "end", "resultType": "success", "output": "ok"},
     ]
 })
+
+# 合法挂起 checkpoint 形状（event/timeout 决议有处可落）。
+PENDING_CONTEXT = {"step": 1, "$LAST_NODE": "wait",
+                   "$NODE": {"wait": {"status": "pending"}}}
 
 TERMINAL = ("completed", "failed", "cancelled")
 
@@ -309,6 +316,86 @@ def test_force_delete_suppresses_logs_and_clears_state(env):
     time.sleep(0.2)
     assert env.backend.read_status(eid) is None
     assert env.backend.recent_logs(eid) == []
+
+
+# ---- resume（C1 阶段 3：worker.resume_flow 驱动链双后端等价）----
+
+
+def test_resume_suspended_completes_via_event(env):
+    """挂起执行经 resume(event) 完成。local 腿走宿主入口
+    ``engine_backend.resume_execution``（行读取/CAS/绑定增强/nodes 续栽在
+    入口内）；memory 腿直接 ``launch_resume``——两条腿最终同一
+    ``worker.resume_flow`` 驱动链（lease/终态幂等/#33 守卫沿用基类）。"""
+    # 两腿都直接播种挂起态（不经 start 拍）——resume 拍的 stub 形状在
+    # launch 之前钉死为 end，杜绝异步驱动线程与主线程改 behavior 的竞态。
+    StubExecution.behavior = "end"
+    if env.kind == "local":
+        eid = uuid.uuid4().hex[:16]
+        fs.insert_local_execution(
+            execution_id=eid, flow_id=FLOW_ID, flow_version=VERSION,
+            status="suspended", tenant_id="default",
+        )
+        fs.update_local_execution(
+            eid, context_json=json.dumps(PENDING_CONTEXT, ensure_ascii=False)
+        )
+        assert engine_backend.resume_execution(
+            fs.get_flow_store(), eid, "event", {"approved": True}
+        ) is True
+    else:
+        eid = uuid.uuid4().hex[:16]
+        env.backend.execution_storage.save_execution_state(
+            eid,
+            ExecutionState(
+                execution_id=eid, flow_id=FLOW_ID, flow_version=VERSION,
+                status="suspended", context=dict(PENDING_CONTEXT),
+            ),
+        )
+        env.backend.launch_resume(eid, FLOW_ID, "event", {"approved": True})
+    StubExecution.behavior = "end"
+    assert _wait_thread_exit(eid), "resume 驱动线程未收口"
+    assert _wait_status(env.backend, eid, TERMINAL) == "completed"
+    state = env.backend.read_state(eid)
+    assert state["context"] == {"step": 2, "$LAST_NODE": "end"}
+    assert state["output"] == "done"
+    # resume 载体以 resume_type=event 进入引擎（挂起形状合法，未被 #258
+    # 归一化为 continue——该归一化是 running+非挂起形状的专用路径）
+    assert StubExecution.call_log[-1] == (StubExecution.marker, "event"), \
+        StubExecution.call_log
+
+
+def test_resume_seeds_trace_callback_with_row_nodes(env, monkeypatch):
+    """resume 把行上已累积 nodes_json 续栽进 trace 回调（本地行模型的面）。
+
+    旧环 resume 传 ``initial_nodes=row.nodes``——缺失即恢复首拍把节点 trace
+    清空重写（执行详情页丢恢复前节点）。钉住 wiring。"""
+    if env.kind != "local":
+        pytest.skip("nodes 续栽是 local 行模型的面")
+    seeded = [{"id": "a", "status": "success", "output": None}]
+    eid = uuid.uuid4().hex[:16]
+    fs.insert_local_execution(
+        execution_id=eid, flow_id=FLOW_ID, flow_version=VERSION,
+        status="suspended", tenant_id="default",
+    )
+    fs.update_local_execution(
+        eid,
+        context_json=json.dumps(PENDING_CONTEXT, ensure_ascii=False),
+        nodes_json=json.dumps(seeded, ensure_ascii=False),
+    )
+    captured: dict = {}
+    orig_trace = le._LocalTraceCallback
+
+    class SpyTrace(orig_trace):
+        def __init__(self, execution_id, initial_nodes=None):
+            captured["initial_nodes"] = initial_nodes
+            super().__init__(execution_id, initial_nodes=initial_nodes)
+
+    monkeypatch.setattr(le, "_LocalTraceCallback", SpyTrace)
+    StubExecution.behavior = "end"
+    assert engine_backend.resume_execution(
+        fs.get_flow_store(), eid, "event", {}
+    ) is True
+    assert _wait_thread_exit(eid), "resume 驱动线程未收口"
+    assert captured.get("initial_nodes") == seeded, captured
 
 
 def test_preminted_start_rejected_under_tombstone_window(env):

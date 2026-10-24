@@ -29,8 +29,10 @@ if str(BACKEND_DIR) not in sys.path:
 
 from api import executions as executions_api  # noqa: E402
 from auth import require_auth  # noqa: E402
+from plaita.server import flow_worker as fw  # noqa: E402
 from services import flow_store  # noqa: E402
 from services import local_executor as le  # noqa: E402
+from services import engine_backend  # noqa: E402
 from plaita.core.errors import ExecutionLeaseError  # noqa: E402
 from plaita.storage.base import ExecutionState  # noqa: E402
 from plaita.storage.fenced import (  # noqa: E402
@@ -257,7 +259,7 @@ class _BlockingExecution:
         pass
 
     def run_distributed(self, flow, params=None, saved_context=None,
-                        resume_type=None, resume_data=None):
+                        resume_type=None, resume_data=None, **kwargs):
         _BlockingExecution.started.set()
         _BlockingExecution.release.wait(timeout=10)
         return {
@@ -282,8 +284,9 @@ def _start_blocking_execution(tmp_path, monkeypatch) -> str:
     _publish_flow()
     _BlockingExecution.started = threading.Event()
     _BlockingExecution.release = threading.Event()
-    monkeypatch.setattr(le, "FlowExecution", _BlockingExecution)
-    info = le.start_local_execution(
+    # C1 阶段 3 起执行驱动经 engine backend，注入点在 flow_worker 命名空间。
+    monkeypatch.setattr(fw, "FlowExecution", _BlockingExecution)
+    info = engine_backend.start_execution(
         flow_store.get_flow_store(), "delete-demo", "1.0.0", {},
         tenant_id="default",
     )
@@ -322,7 +325,11 @@ def test_local_force_delete_stops_log_growth_and_purges_logs(tmp_path, monkeypat
         execution_id=eid, level="INFO", logger_name="t",
         message="before-delete", tenant_id="default",
     )
-    handler = le._ThreadLogHandler(eid, threading.get_ident(), "default")
+    # C1 阶段 3 起日志写入面 = engine backend 的 BackendLogHandler（同语义：
+    # 线程过滤 + 强删墓碑抑制 + local_logs sink），旧 _ThreadLogHandler 已删。
+    handler = engine_backend.BackendLogHandler(
+        eid, threading.get_ident(), engine_backend._fs_log_sink, "default"
+    )
     try:
         assert le.delete_local_execution(eid, tenant_id="default", force=True) is True
 

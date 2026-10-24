@@ -1,0 +1,24 @@
+........................................................................ [ 24%]
+........................................................................ [ 49%]
+........................................................................ [ 74%]
+..............s..s..s................................................... [ 99%]
+..                                                                       [100%]
+=============================== warnings summary ===============================
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[executor.py-FlowExecution]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: FlowExecution is 393 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[context.py-ExecutionContext]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: ExecutionContext is 373 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[runner.py-NodeRunner]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: NodeRunner is 342 LOC (soft=200, hard=400)
+    warnings.warn(
+
+tests/e2e/test_success_criteria.py::TestSC003ClassSizeBudget::test_class_under_hard_ceiling[strategies.py-DistributedStrategy]
+  /Users/kong/projects/infra4agent/plaita/tests/e2e/test_success_criteria.py:57: UserWarning: SC-003 soft budget: DistributedStrategy is 293 LOC (soft=200, hard=400)
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+287 passed, 4 skipped, 4 warnings in 36.35s

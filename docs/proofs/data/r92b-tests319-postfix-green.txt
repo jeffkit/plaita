@@ -1,0 +1,34 @@
+......                                                                   [100%]
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py: 28 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[raw]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:846: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[raw]
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+6 passed, 45 warnings in 0.70s

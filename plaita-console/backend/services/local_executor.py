@@ -1,11 +1,19 @@
-"""本地单机模式执行器。
+"""本地单机模式执行控制面与进程内注册表（C1 阶段 3 后的残面）。
 
-Redis 不可达时（``app.state.local_mode = True``），流程在 console 进程内以
-**分布式策略** 执行：EventBus 用进程内 InMemoryEventBus，checkpoint 存
-SQLite（local_executions.context_json）。
+本地单机档（``app.state.local_mode = True``）的**执行驱动**自 C1 阶段 2/3
+（plaita#323/#335）起统一走 :mod:`engine_backend`（与集群同一 ``FlowWorker``
+状态机，ADR-001「console local = engine backend」）；本模块不再有第二套
+executor 驱动（``start/resume_local_execution`` / ``_run_flow`` 已删），保留：
 
-因此本地档支持挂起-恢复（审批/事件节点挂起后，经 /resume 或进程内事件
-恢复）。限制（如实说明）：
+- **进程内注册表**：执行线程表 / 取消 Event 表 / 强删墓碑——engine backend
+  的驱动线程与 API 控制面共用同一份（``cancel_local_execution`` 置位同一
+  Event、``delete_local_execution`` join 同一线程、墓碑抑制同一窗口）；
+- **控制面/读面**：``cancel_local_execution`` / ``delete_local_execution`` /
+  ``get_local_execution`` / ``list_local_executions``；
+- **共享装配**：``_LocalTraceCallback``（节点 trace 回写）、langfuse 回调
+  构造、``_with_resume_binding``（#221 挂起订阅绑定，engine resume 同源）。
+
+语义注记（存量行为，如实说明）：
 
 - 无跨进程：resume 必须走同一个 console 进程；进程重启后挂起的执行
   checkpoint 仍在（SQLite），显式 resume 可继续，但进程内事件订阅已丢失
@@ -19,14 +27,12 @@ import logging
 import os
 import threading
 import time
-import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from plaita.core.callback import FlowCallback
 from plaita.core.executor import FlowExecution
-from plaita.core.flow import Flow
-from plaita.core.strategies import RESUME_BINDING_KEY, ExecutionMode
+from plaita.core.strategies import RESUME_BINDING_KEY
 
 try:
     from . import flow_store as fs
@@ -48,9 +54,9 @@ _lock = threading.Lock()
 _cancel_events: Dict[str, threading.Event] = {}
 
 # 强删墓碑（A43-01 本地档）：force 删除时执行线程可能仍在途（软中断只在
-# 步界生效）。删除是持久语义，故墓碑登记后该执行的 ``_ThreadLogHandler``
-# 写入一律丢弃，避免「删了记录、日志还在长」；线程退出时在 ``_run_flow``
-# 的 finally 清除墓碑，避免无限增长。
+# 步界生效）。删除是持久语义，故墓碑登记后该执行的日志写入（engine backend
+# ``BackendLogHandler``）一律丢弃，避免「删了记录、日志还在长」；线程退出时
+# 在驱动线程 finally 清除墓碑，避免无限增长。
 _deleted_executions: set[str] = set()
 
 # force 删除等待执行线程收口的期限（秒）。超时不阻塞请求（删除仍完成），
@@ -225,59 +231,13 @@ def _now() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _load_definition(
-    store: FlowStore,
-    flow_id: str,
-    version: Optional[str],
-    tenant_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    version = version or _latest_published(store, flow_id, tenant_id)
-    record = store.get_version(flow_id, version, tenant_id=tenant_id)
-    if record is None:
-        raise LookupError(f"流程版本不存在: {flow_id}@{version}")
-    definition = json.loads(record.definition)
-    definition["flow_id"] = flow_id
-    definition["version"] = version
-    return definition
-
-
-def start_local_execution(
-    store: FlowStore,
-    flow_id: str,
-    version: Optional[str],
-    params: Optional[Dict[str, Any]],
-    invoker: str = "local",
-    tenant_id: str = "",
-) -> Dict[str, Any]:
-    """以本地模式启动流程：同步建档 + 后台线程以分布式策略执行。"""
-    version = version or _latest_published(store, flow_id, tenant_id)
-    if version is None:
-        raise ValueError(f"流程 {flow_id} 没有已发布版本，请先在编排页发布")
-    record = store.get_version(flow_id, version, tenant_id=tenant_id or None)
-    if record is None:
-        raise LookupError(f"流程版本不存在: {flow_id}@{version}")
-    if record.status != "published":
-        raise ValueError(f"仅已发布版本可启动: {flow_id}@{version} 是 {record.status}")
-
-    execution_id = uuid.uuid4().hex[:16]
-    definition = json.loads(record.definition)
-    definition["flow_id"] = flow_id
-    definition["version"] = version
-
-    fs.insert_local_execution(
-        execution_id=execution_id,
-        flow_id=flow_id,
-        flow_version=version,
-        status="running",
-        input_json=json.dumps(params or {}, ensure_ascii=False),
-        invoker=invoker,
-        tenant_id=tenant_id,
-    )
-
-    _spawn(execution_id, _run_flow,
-           store, execution_id, flow_id, version, definition, params or {}, None,
-           tenant_id=tenant_id)
-    return _to_info(fs.get_local_execution(execution_id))
+# C1 阶段 3（plaita#335）：``_load_definition`` / ``start_local_execution`` /
+# ``resume_local_execution`` / ``_run_flow`` / ``_ThreadLogHandler``（第二套
+# 执行器驱动）已删——executions API 手动 start/resume 自本阶段起经
+# :mod:`engine_backend`（与集群同一 ``FlowWorker`` 状态机 + ``resume_flow``
+# 驱动链，ADR-001「console local = engine backend」）。本模块保留：进程内
+# 注册表（线程/取消 Event/强删墓碑，engine backend 共用）、控制面（cancel/
+# delete）与读面（get/list）、以及二者共用的 trace 回调与观测装配。
 
 
 def _with_resume_binding(context: Any, resume_type: str,
@@ -304,60 +264,6 @@ def _with_resume_binding(context: Any, resume_type: str,
     enriched = dict(data) if isinstance(data, dict) else {}
     enriched[RESUME_BINDING_KEY] = str(binding)
     return enriched
-
-
-def resume_local_execution(
-    store: FlowStore,
-    execution_id: str,
-    resume_type: str,
-    data: Optional[Dict[str, Any]],
-    tenant_id: Optional[str] = None,
-) -> bool:
-    """恢复挂起的执行：从 SQLite checkpoint 继续（分布式策略）。"""
-    row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
-    if row is None:
-        return False
-    if row["status"] != "suspended":
-        raise ValueError(f"仅挂起状态可恢复: 当前 {row['status']}")
-    # #33 对齐 worker 契约：挂起执行只认 event/cancel/timeout 决议——
-    # continue/retry 不携带推进语义（策略层 pending 守卫必拒），本地档
-    # 同样拒绝而不是让执行线程把失败落成 failed 终态。
-    if resume_type in ("continue", "retry"):
-        raise ValueError(
-            f"挂起执行不接受 resume_type={resume_type}（会被挂起节点守卫拒绝），"
-            "请用 event/cancel/timeout 决议挂起节点"
-        )
-
-    definition = _load_definition(store, row["flow_id"], row["flow_version"],
-                                  tenant_id=row.get("tenant_id") or None)
-    context = row.get("context")
-    if context is None:
-        raise ValueError("挂起 checkpoint 缺失，无法恢复")
-
-    # TOCTOU 防护：不用上面的快照做最终判定，而是原子条件更新
-    # （UPDATE ... WHERE status='suspended'），并发 resume 只有一个能抢到，
-    # 抢不到的按当前真实状态报错。
-    if not fs.update_local_execution_status_if(execution_id, "suspended", "running"):
-        current = fs.get_local_execution(execution_id)
-        raise ValueError(
-            f"仅挂起状态可恢复: 当前 {current['status'] if current else '已删除'}"
-        )
-
-    try:
-        _spawn(execution_id, _run_flow,
-               store, execution_id, row["flow_id"], row["flow_version"], definition,
-               {}, {
-                   "context": context,
-                   "resume_type": resume_type,
-                   "data": _with_resume_binding(context, resume_type, data),
-               },
-               initial_nodes=row.get("nodes") or [],
-               tenant_id=row.get("tenant_id") or "")
-    except RuntimeError:
-        # 同执行 ID 的线程仍存活：回滚状态并拒绝，避免双线程写同一执行记录。
-        fs.update_local_execution(execution_id, status="suspended")
-        raise ValueError(f"执行 {execution_id} 尚有线程在运行，不能重复恢复")
-    return True
 
 
 def _spawn(execution_id: str, target, *args, **kwargs) -> None:
@@ -409,188 +315,6 @@ def _build_langfuse_callback():
             _lf_warned = True
             logger.warning("Langfuse 观测未启用: %s", e)
         return None
-
-
-def _run_flow(
-    store: FlowStore,
-    execution_id: str,
-    flow_id: str,
-    version: str,
-    definition: Dict[str, Any],
-    params: Dict[str, Any],
-    resume: Optional[Dict[str, Any]],
-    initial_nodes: Optional[List[Dict[str, Any]]] = None,
-    tenant_id: str = "",
-) -> None:
-    """分布式策略驱动循环（与集群档 FlowWorker._process_execution_result 对齐）。"""
-    handler = _ThreadLogHandler(execution_id, threading.get_ident(), tenant_id)
-    root = logging.getLogger()
-    root.addHandler(handler)
-    try:
-        from . import credentials_svc as _creds
-    except ImportError:
-        import credentials_svc as _creds  # type: ignore
-    # 本地档线程在 console 进程内，与 worker 不同源（无消息体 tenant_id）；
-    # 把执行租户 set 进引擎租户上下文——credentials 据此路由到租户专属凭据
-    # 文件（default = 基础文件，其余 = 旁文件），与集群档 worker 同一机制。
-    engine_tenant_token = None
-    try:
-        from plaita.tenant_context import reset_current_tenant, set_current_tenant
-
-        engine_tenant_token = set_current_tenant(tenant_id or _creds.DEFAULT_TENANT_ID)
-    except Exception:  # noqa: BLE001 — 引擎侧上下文不可用不阻塞本地执行
-        pass
-    langfuse_callback = None
-    try:
-        logger.info(
-            "本地执行 %s %s（flow=%s@%s）",
-            execution_id, "恢复" if resume else "开始", flow_id, version,
-        )
-        flow = Flow.model_validate(definition)
-        # _LocalTraceCallback 必须在前：它把 $EXECUTION_ID 覆写为 console 的
-        # execution_id，随后的 LangfuseCallback 读到的 trace id 与控制台记录一致。
-        trace_callback = _LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
-        handlers: List[FlowCallback] = [trace_callback]
-        langfuse_callback = _build_langfuse_callback()
-        if langfuse_callback is not None:
-            handlers.append(langfuse_callback)
-        execution = FlowExecution(callback_handlers=handlers)
-        execution.mode = ExecutionMode.DISTRIBUTED
-        # plaita#331：宿主身份 = local 后端（进程内事件总线可挂起/恢复，**无**
-        # 持久队列+延迟排程）——引擎入口闸按 local 档判，delay 族在此具名拒
-        # （与 API 层 start/publish 闸同一判定函数，进程内旁路同样有闸）。
-        execution.execution_profile = "local"
-        # 让回调能拿到 execution：fresh start 的 on_flow_start（clean 之后触发）
-        # 会把 $EXECUTION_ID 覆写为 console 的 execution_id，保持两边一致。
-        trace_callback.bind_execution(execution)
-        if langfuse_callback is not None:
-            langfuse_callback.bind_execution(execution)
-
-        if resume is None:
-            result = execution.run_distributed(flow, params=params)
-        else:
-            result = execution.run_distributed(
-                flow,
-                saved_context=resume["context"],
-                resume_type=resume["resume_type"],
-                resume_data=resume.get("data"),
-            )
-        context = result.get("context")
-
-        while True:
-            context = result.get("context", context)
-            # 取消检查点（波次① §3.1 本地档）：cancel_local_execution 置位
-            # 的事件在此消费，步界终态化（软中断默认语义：在途节点跑完）。
-            if _cancel_event_set(execution_id):
-                _finalize_cancelled(execution_id, context)
-                if langfuse_callback is not None:
-                    langfuse_callback.finalize()
-                break
-            if result.get("is_end"):
-                logger.info("本地执行 %s 完成", execution_id)
-                # 条件推进 running→completed：已被置 cancelled 时条件不命中，
-                # 不覆写既有终态（覆写战争消失，T8）。字段先落、状态后翻，
-                # 中间态（running+output）无观察者依赖。
-                fs.update_local_execution(
-                    execution_id,
-                    output_json=json.dumps(_safe(result.get("result")), ensure_ascii=False),
-                    context_json=json.dumps(_safe(context), ensure_ascii=False),
-                    # plaita#37 P2：终态才聚合 usage（半截数字比没有数字更坏），
-                    # 未采集落 'null'（不是 0）。
-                    usage_json=_usage_json_for(context),
-                )
-                if fs.update_local_execution_status_if(execution_id, "running", "completed"):
-                    fs.update_local_execution(execution_id, end_time=datetime.utcnow())
-                    if langfuse_callback is not None:
-                        langfuse_callback.finalize()  # distributed 不发 on_flow_end，终态收口 root
-                else:
-                    logger.info("本地执行 %s 已非 running，保留现有终态", execution_id)
-                break
-            if result.get("is_suspend"):
-                logger.info("本地执行 %s 挂起，等待恢复", execution_id)
-                fs.update_local_execution(
-                    execution_id,
-                    context_json=json.dumps(_safe(context), ensure_ascii=False),
-                )
-                # 条件推进 running→suspended：取消已落 cancelled 时不覆写
-                if not fs.update_local_execution_status_if(execution_id, "running", "suspended"):
-                    logger.info("本地执行 %s 已被取消，保持 cancelled 终态", execution_id)
-                break
-
-            # 单步推进：resume_type="continue"。checkpoint 先落、状态用
-            # 条件更新充当取消闸门（原语已在 resume_local_execution 使用）：
-            # cancel_local_execution 已写 cancelled 时条件不命中 → 立即收口，
-            # 不再翻回 running。
-            fs.update_local_execution(
-                execution_id,
-                context_json=json.dumps(_safe(context), ensure_ascii=False),
-            )
-            if not fs.update_local_execution_status_if(execution_id, "running", "running"):
-                _finalize_cancelled(execution_id, context)
-                if langfuse_callback is not None:
-                    langfuse_callback.finalize()
-                break
-            result = execution.run_distributed(
-                flow, saved_context=context, resume_type="continue"
-            )
-    except Exception as e:  # noqa: BLE001 — 执行失败要落库而不是带崩线程
-        logger.warning("本地执行 %s 失败: %s", execution_id, e)
-        # plaita#37 P2：失败终态同样聚合 usage（能采到多少算多少；未采集落
-        # 'null'）。异常可能发生在 context 赋值之前 ⇒ locals() 取。
-        fs.finish_local_execution(
-            execution_id,
-            status="failed",
-            error_json=json.dumps(
-                {"message": str(e), "type": type(e).__name__}, ensure_ascii=False
-            ),
-            usage_json=_usage_json_for(locals().get("context")),
-        )
-        if langfuse_callback is not None:
-            langfuse_callback.finalize()
-    finally:
-        try:
-            root.removeHandler(handler)
-        except Exception:  # noqa: BLE001
-            pass
-        if engine_tenant_token is not None:
-            try:
-                from plaita.tenant_context import reset_current_tenant
-
-                reset_current_tenant(engine_tenant_token)
-            except Exception:  # noqa: BLE001
-                pass
-        with _lock:
-            _threads.pop(execution_id, None)
-            _deleted_executions.discard(execution_id)
-        _pop_cancel_event(execution_id)
-
-
-class _ThreadLogHandler(logging.Handler):
-    """只捕获本执行线程的 logging 记录，写入 local_logs（日志页本地档数据源）。"""
-
-    def __init__(self, execution_id: str, thread_id: int, tenant_id: str = ""):
-        super().__init__(level=logging.INFO)
-        self._execution_id = execution_id
-        self._thread_id = thread_id
-        self._tenant_id = tenant_id
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.thread != self._thread_id:
-            return
-        # 已强删的执行：线程可能还在途（软中断到步界才停），此后日志一律
-        # 丢弃——删除是持久语义，不得让 local_logs 在删除后继续增长。
-        if _is_deleted(self._execution_id):
-            return
-        try:
-            fs.insert_local_log(
-                execution_id=self._execution_id,
-                level=record.levelname,
-                logger_name=record.name,
-                message=record.getMessage(),
-                tenant_id=self._tenant_id,
-            )
-        except Exception:  # noqa: BLE001 — 日志失败不影响执行
-            pass
 
 
 def _latest_published(
@@ -654,7 +378,7 @@ def delete_local_execution(
     """持久删除本地执行（A43-01 本地档）。
 
     非终态（running/suspended）默认拒绝（``ExecutionActiveError``）——此前
-    直接删行，后台线程继续跑到结束、``_ThreadLogHandler`` 继续写 local_logs，
+    直接删行，后台线程继续跑到结束、日志写入（engine backend handler）继续进 local_logs，
     记录「删了又能在日志页查到」。
 
     ``force=True`` 时先取消再删：置位取消 Event → 有界等待线程在步界收口

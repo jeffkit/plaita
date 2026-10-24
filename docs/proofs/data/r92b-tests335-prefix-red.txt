@@ -1,0 +1,234 @@
+............FFFs..FFFFFFF                                                [100%]
+=================================== FAILURES ===================================
+_______________ test_resume_suspended_completes_via_event[local] _______________
+
+env = namespace(backend=<services.engine_backend.EngineBackend object at 0x1084dd7f0>, kind='local', start=<function env.<locals>.start at 0x1084e8e00>, seed_suspended=<function env.<locals>.seed_suspended at 0x1084ea700>)
+
+    def test_resume_suspended_completes_via_event(env):
+        """挂起执行经 resume(event) 完成。local 腿走宿主入口
+        ``engine_backend.resume_execution``（行读取/CAS/绑定增强/nodes 续栽在
+        入口内）；memory 腿直接 ``launch_resume``——两条腿最终同一
+        ``worker.resume_flow`` 驱动链（lease/守卫/#33 语义沿用基类）。"""
+        StubExecution.behavior = "suspend"
+        if env.kind == "local":
+            eid = env.start({})
+            assert _wait_status(env.backend, eid, TERMINAL + ("suspended",)) == "suspended"
+>           assert engine_backend.resume_execution(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                fs.get_flow_store(), eid, "event", {"approved": True}
+            ) is True
+E           AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_engine_backend_conformance.py:326: AttributeError
+------------------------------ Captured log call -------------------------------
+INFO     services.engine_backend:engine_backend.py:531 engine backend 执行 d5d63b81643a4628 开始（flow=conform-hello@1.0.0）
+INFO     services.engine_backend:engine_backend.py:539 engine backend 执行 d5d63b81643a4628 收口（status=None）
+______________ test_resume_suspended_completes_via_event[memory] _______________
+
+env = namespace(backend=<services.engine_backend.EngineBackend object at 0x10847f3f0>, kind='memory', start=<function env.<locals>.start at 0x108412de0>, seed_suspended=<function env.<locals>.seed_suspended at 0x1084128e0>)
+
+    def test_resume_suspended_completes_via_event(env):
+        """挂起执行经 resume(event) 完成。local 腿走宿主入口
+        ``engine_backend.resume_execution``（行读取/CAS/绑定增强/nodes 续栽在
+        入口内）；memory 腿直接 ``launch_resume``——两条腿最终同一
+        ``worker.resume_flow`` 驱动链（lease/守卫/#33 语义沿用基类）。"""
+        StubExecution.behavior = "suspend"
+        if env.kind == "local":
+            eid = env.start({})
+            assert _wait_status(env.backend, eid, TERMINAL + ("suspended",)) == "suspended"
+            assert engine_backend.resume_execution(
+                fs.get_flow_store(), eid, "event", {"approved": True}
+            ) is True
+        else:
+            eid = env.seed_suspended()
+>           env.backend.launch_resume(eid, FLOW_ID, "event", {"approved": True})
+            ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'EngineBackend' object has no attribute 'launch_resume'
+
+tests/console/test_engine_backend_conformance.py:331: AttributeError
+____________ test_resume_seeds_trace_callback_with_row_nodes[local] ____________
+
+env = namespace(backend=<services.engine_backend.EngineBackend object at 0x108367a00>, kind='local', start=<function env.<locals>.start at 0x1083dc4a0>, seed_suspended=<function env.<locals>.seed_suspended at 0x1083dd6c0>)
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1084a9bd0>
+
+    def test_resume_seeds_trace_callback_with_row_nodes(env, monkeypatch):
+        """resume 把行上已累积 nodes_json 续栽进 trace 回调（本地行模型的面）。
+    
+        旧环 resume 传 ``initial_nodes=row.nodes``——缺失即恢复首拍把节点 trace
+        清空重写（执行详情页丢恢复前节点）。钉住 wiring。"""
+        if env.kind != "local":
+            pytest.skip("nodes 续栽是 local 行模型的面")
+        seeded = [{"id": "a", "status": "success", "output": None}]
+        eid = uuid.uuid4().hex[:16]
+        fs.insert_local_execution(
+            execution_id=eid, flow_id=FLOW_ID, flow_version=VERSION,
+            status="suspended", tenant_id="default",
+        )
+        fs.update_local_execution(
+            eid,
+            context_json='{"step": 1, "$LAST_NODE": "a"}',
+            nodes_json=json.dumps(seeded, ensure_ascii=False),
+        )
+        captured: dict = {}
+        orig_trace = le._LocalTraceCallback
+    
+>       class SpyTrace(orig):
+                       ^^^^
+E       NameError: name 'orig' is not defined
+
+tests/console/test_engine_backend_conformance.py:364: NameError
+_________________ test_resume_unknown_execution_returns_false __________________
+
+env = None
+
+    def test_resume_unknown_execution_returns_false(env):
+>       assert engine_backend.resume_execution(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            fs.get_flow_store(), "no-such-exec", "event", {}
+        ) is False
+E       AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_issue335_engine_resume.py:158: AttributeError
+______________________ test_resume_rejects_non_suspended _______________________
+
+env = None
+
+    def test_resume_rejects_non_suspended(env):
+        eid = _seed_row("running")
+        with pytest.raises(ValueError) as ei:
+>           engine_backend.resume_execution(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                fs.get_flow_store(), eid, "event", {}
+            )
+E           AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_issue335_engine_resume.py:166: AttributeError
+_______________ test_resume_suspended_rejects_continue_and_retry _______________
+
+env = None
+
+    def test_resume_suspended_rejects_continue_and_retry(env):
+        """#33 对齐 worker 契约：挂起执行只认 event/cancel/timeout 决议。"""
+        for resume_type in ("continue", "retry"):
+            eid = _seed_row("suspended")
+            with pytest.raises(ValueError) as ei:
+>               engine_backend.resume_execution(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    fs.get_flow_store(), eid, resume_type, {}
+                )
+E               AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_issue335_engine_resume.py:177: AttributeError
+___________________ test_resume_missing_checkpoint_rejected ____________________
+
+env = None
+
+    def test_resume_missing_checkpoint_rejected(env):
+        eid = _seed_row("suspended", context="null")
+        with pytest.raises(ValueError) as ei:
+>           engine_backend.resume_execution(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                fs.get_flow_store(), eid, "event", {}
+            )
+E           AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_issue335_engine_resume.py:187: AttributeError
+__________________ test_resume_thread_alive_rolls_back_status __________________
+
+env = None
+
+    def test_resume_thread_alive_rolls_back_status(env):
+        """同 id 线程仍存活：拒绝 + 状态回滚 suspended（防双线程写同一行）。"""
+        eid = _seed_row("suspended")
+        blocker = threading.Thread(target=lambda: threading.Event().wait(30),
+                                   daemon=True)
+        with le._lock:
+            le._threads[eid] = blocker
+        try:
+            with pytest.raises(ValueError) as ei:
+>               engine_backend.resume_execution(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    fs.get_flow_store(), eid, "event", {}
+                )
+E               AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_issue335_engine_resume.py:203: AttributeError
+_____________ test_resume_happy_path_flips_running_then_completes ______________
+
+env = None
+
+    def test_resume_happy_path_flips_running_then_completes(env):
+        eid = _seed_row("suspended", context='{"step": 1, "$LAST_NODE": "a"}')
+>       assert engine_backend.resume_execution(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            fs.get_flow_store(), eid, "event", {"approved": True}
+        ) is True
+E       AttributeError: module 'services.engine_backend' has no attribute 'resume_execution'
+
+tests/console/test_issue335_engine_resume.py:215: AttributeError
+________________________ test_old_loop_symbols_deleted _________________________
+
+env = None
+
+    def test_old_loop_symbols_deleted(env):
+        """C1 阶段 3 收口：第二套执行器驱动面已删（engine backend 是唯一执行
+        语义）。符号回潜即红。"""
+        for symbol in (
+            "start_local_execution",
+            "resume_local_execution",
+            "_run_flow",
+            "_load_definition",
+            "_ThreadLogHandler",
+        ):
+>           assert not hasattr(le, symbol), f"旧环符号未删: {symbol}"
+E           AssertionError: 旧环符号未删: start_local_execution
+E           assert not True
+E            +  where True = hasattr(le, 'start_local_execution')
+
+tests/console/test_issue335_engine_resume.py:238: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_engine_backend_conformance.py::test_start_completes_with_output_context_and_thread_logs[local]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_engine_backend_conformance.py: 64 warnings
+plaita-console/backend/tests/console/test_issue335_engine_resume.py: 35 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_engine_backend_conformance.py: 9 warnings
+plaita-console/backend/tests/console/test_issue335_engine_resume.py: 7 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:846: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_engine_backend_conformance.py: 27 warnings
+plaita-console/backend/tests/console/test_issue335_engine_resume.py: 21 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_engine_backend_conformance.py: 9 warnings
+plaita-console/backend/tests/console/test_issue335_engine_resume.py: 7 warnings
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:1032: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_engine_backend_conformance.py::test_start_completes_with_output_context_and_thread_logs[local]
+plaita-console/backend/tests/console/test_engine_backend_conformance.py::test_cancel_running_execution_thread_exits_at_boundary[local]
+plaita-console/backend/tests/console/test_engine_backend_conformance.py::test_cancel_running_execution_thread_exits_at_boundary[local]
+plaita-console/backend/tests/console/test_engine_backend_conformance.py::test_cancel_suspended_execution_finalizes_directly[local]
+plaita-console/backend/tests/console/test_engine_backend_conformance.py::test_force_delete_suppresses_logs_and_clears_state[local]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:1575: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    end_time=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_engine_backend_conformance.py::test_resume_suspended_completes_via_event[local]
+FAILED tests/console/test_engine_backend_conformance.py::test_resume_suspended_completes_via_event[memory]
+FAILED tests/console/test_engine_backend_conformance.py::test_resume_seeds_trace_callback_with_row_nodes[local]
+FAILED tests/console/test_issue335_engine_resume.py::test_resume_unknown_execution_returns_false
+FAILED tests/console/test_issue335_engine_resume.py::test_resume_rejects_non_suspended
+FAILED tests/console/test_issue335_engine_resume.py::test_resume_suspended_rejects_continue_and_retry
+FAILED tests/console/test_issue335_engine_resume.py::test_resume_missing_checkpoint_rejected
+FAILED tests/console/test_issue335_engine_resume.py::test_resume_thread_alive_rolls_back_status
+FAILED tests/console/test_issue335_engine_resume.py::test_resume_happy_path_flips_running_then_completes
+FAILED tests/console/test_issue335_engine_resume.py::test_old_loop_symbols_deleted
+10 failed, 14 passed, 1 skipped, 185 warnings in 2.70s

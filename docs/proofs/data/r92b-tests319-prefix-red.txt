@@ -1,0 +1,130 @@
+FFFF..                                                                   [100%]
+=================================== FAILURES ===================================
+_______________ test_none_path_delete_eats_rebuilt_row[console] ________________
+
+form = 'console'
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1373/test_none_path_delete_eats_reb0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1041c2b10>
+
+    @pytest.mark.parametrize("form", ["console", "raw"])
+    def test_none_path_delete_eats_rebuilt_row(form, tmp_path, monkeypatch):
+        """陈旧删除（expected_versions=None）收尾 DELETE 按 id 命中重建行 →
+        「create 201 + delete 200 + 行消失」。修后：删除具名 409、重建行完好。"""
+        store = _make_store(form, tmp_path, monkeypatch)
+        result = _run_interleave(store, monkeypatch, pinned=False,
+                                 rebuild_with_version=False)
+        assert result["create"] == "created", result
+        # 修复判据：陈旧删除不得假报成功，重建行必须存活。
+>       assert result["stale_delete"].startswith("VersionConflictError"), result
+E       AssertionError: {'create': 'created', 'stale_delete': 'committed'}
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x102606c70>('VersionConflictError')
+E        +    where <built-in method startswith of str object at 0x102606c70> = 'committed'.startswith
+
+tests/console/test_issue319_create_delete_resurrection.py:161: AssertionError
+_________________ test_none_path_delete_eats_rebuilt_row[raw] __________________
+
+form = 'raw'
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1373/test_none_path_delete_eats_reb1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1058bf490>
+
+    @pytest.mark.parametrize("form", ["console", "raw"])
+    def test_none_path_delete_eats_rebuilt_row(form, tmp_path, monkeypatch):
+        """陈旧删除（expected_versions=None）收尾 DELETE 按 id 命中重建行 →
+        「create 201 + delete 200 + 行消失」。修后：删除具名 409、重建行完好。"""
+        store = _make_store(form, tmp_path, monkeypatch)
+        result = _run_interleave(store, monkeypatch, pinned=False,
+                                 rebuild_with_version=False)
+        assert result["create"] == "created", result
+        # 修复判据：陈旧删除不得假报成功，重建行必须存活。
+>       assert result["stale_delete"].startswith("VersionConflictError"), result
+E       AssertionError: {'create': 'created', 'stale_delete': 'committed'}
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x102606c70>('VersionConflictError')
+E        +    where <built-in method startswith of str object at 0x102606c70> = 'committed'.startswith
+
+tests/console/test_issue319_create_delete_resurrection.py:161: AssertionError
+________ test_pinned_path_delete_eats_rebuilt_row_and_version[console] _________
+
+form = 'console'
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1373/test_pinned_path_delete_eats_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105921fd0>
+
+    @pytest.mark.parametrize("form", ["console", "raw"])
+    def test_pinned_path_delete_eats_rebuilt_row_and_version(form, tmp_path,
+                                                             monkeypatch):
+        """重建期 save 同 version/status（1.0.0/draft）穿过 expected_versions 钉版
+        DELETE（rowcount=1），父行收尾 DELETE 按 id 命中重建行 → 行+版本双吃。
+        修后：父行钉版失配 409，事务整体回滚、版本行随回滚还原。"""
+        store = _make_store(form, tmp_path, monkeypatch)
+        result = _run_interleave(store, monkeypatch, pinned=True,
+                                 rebuild_with_version=True)
+        assert result["create"] == "created" and result["rebuild_save"] == "saved", result
+>       assert result["stale_delete"].startswith("VersionConflictError"), result
+E       AssertionError: {'create': 'created', 'rebuild_save': 'saved', 'stale_delete': 'committed'}
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x102606c70>('VersionConflictError')
+E        +    where <built-in method startswith of str object at 0x102606c70> = 'committed'.startswith
+
+tests/console/test_issue319_create_delete_resurrection.py:181: AssertionError
+__________ test_pinned_path_delete_eats_rebuilt_row_and_version[raw] ___________
+
+form = 'raw'
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-1373/test_pinned_path_delete_eats_r1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105fdfac0>
+
+    @pytest.mark.parametrize("form", ["console", "raw"])
+    def test_pinned_path_delete_eats_rebuilt_row_and_version(form, tmp_path,
+                                                             monkeypatch):
+        """重建期 save 同 version/status（1.0.0/draft）穿过 expected_versions 钉版
+        DELETE（rowcount=1），父行收尾 DELETE 按 id 命中重建行 → 行+版本双吃。
+        修后：父行钉版失配 409，事务整体回滚、版本行随回滚还原。"""
+        store = _make_store(form, tmp_path, monkeypatch)
+        result = _run_interleave(store, monkeypatch, pinned=True,
+                                 rebuild_with_version=True)
+        assert result["create"] == "created" and result["rebuild_save"] == "saved", result
+>       assert result["stale_delete"].startswith("VersionConflictError"), result
+E       AssertionError: {'create': 'created', 'rebuild_save': 'saved', 'stale_delete': 'committed'}
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x102606c70>('VersionConflictError')
+E        +    where <built-in method startswith of str object at 0x102606c70> = 'committed'.startswith
+
+tests/console/test_issue319_create_delete_resurrection.py:181: AssertionError
+=============================== warnings summary ===============================
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py: 28 warnings
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[raw]
+  /Users/kong/projects/infra4agent/plaita/plaita-console/backend/services/flow_store.py:823: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[console]
+plaita-console/backend/tests/console/test_issue319_create_delete_resurrection.py::test_normal_delete_unaffected[raw]
+  /opt/homebrew/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[console]
+FAILED tests/console/test_issue319_create_delete_resurrection.py::test_none_path_delete_eats_rebuilt_row[raw]
+FAILED tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[console]
+FAILED tests/console/test_issue319_create_delete_resurrection.py::test_pinned_path_delete_eats_rebuilt_row_and_version[raw]
+4 failed, 2 passed, 45 warnings in 0.74s

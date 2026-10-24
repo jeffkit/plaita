@@ -2278,7 +2278,7 @@ def _gate_local_execution_profile(store, flow_id: str, version: Optional[str], t
     """本地档 start 的执行要求闸（plaita#331）：local profile = 进程内事件总线
     （可挂起/恢复）但**无**持久队列+延迟排程——delay 族在本地档 start 即 422
     具名拒，绝不产生「suspended 行永不唤醒」。版本解析与
-    ``start_local_execution`` 同源（``version=None`` = 最高已发布）；行不存在/
+    engine_backend.start_execution 同源（``version=None`` = 最高已发布）；行不存在/
     未发布时不在此判——交由既有 404/400 面，避免双报错形状。集群档 start 不经
     本闸（distributed 全集恒过；真正执行入口在 worker 侧 ``run_distributed``
     的引擎闸，与集群档 runtime 池的 #300 门并列）。"""
@@ -2328,7 +2328,8 @@ async def start_execution(
     - **version**: 流程版本
     - **params**: 输入参数
     """
-    # 本地单机模式：console 进程内直接执行
+    # 本地单机模式：console 进程内直接执行（C1 阶段 3/#335：经 engine
+    # backend，与集群同一 FlowWorker 状态机；local_executor 旧环已删）。
     if (local := get_local_executor(http_request)) is not None:
         tenant = tenant_scope(http_request, required=True)
         # plaita#331：start 前执行要求闸（local 档 delay 族具名拒，在任何
@@ -2337,7 +2338,11 @@ async def start_execution(
             flow_store.get_flow_store(), request.flow_id, request.version, tenant
         )
         try:
-            info = local.start_local_execution(
+            from ..services import engine_backend
+        except ImportError:
+            from services import engine_backend  # type: ignore
+        try:
+            info = engine_backend.start_execution(
                 flow_store.get_flow_store(), request.flow_id, request.version,
                 request.params, tenant_id=tenant,
             )
@@ -3012,12 +3017,17 @@ async def resume_execution(
       不传/空/`null` 不落 `params` 键；checkpoint 非空时 `params` 惰性，
       绑定值一律以盘上 checkpoint 为准。
     """
-    # 本地单机模式：从 SQLite checkpoint 继续（分布式策略）
+    # 本地单机模式：从 SQLite checkpoint 继续（C1 阶段 3/#335：经 engine
+    # backend 的 worker.resume_flow 驱动链；local_executor 旧环已删）。
     # 写路径 required=True（A2R17-01 全量视角只读；A1 r110 a/P2）。
     if (local := get_local_executor(http_request)) is not None:
         tenant = tenant_scope(http_request, required=True)
         try:
-            ok = local.resume_local_execution(
+            from ..services import engine_backend
+        except ImportError:
+            from services import engine_backend  # type: ignore
+        try:
+            ok = engine_backend.resume_execution(
                 flow_store.get_flow_store(), execution_id, request.resume_type,
                 request.data, tenant_id=tenant,
             )
@@ -3461,7 +3471,7 @@ def project_local_timeline(info: Dict[str, Any]) -> Dict[str, Any]:
     节点 trace 本身就带 ``started_ms``/``ended_ms``，是既有真源的**只读视图**，
     不新增列、不新增写入方）。
 
-    本地档没有 cluster 的入队等待窗口（``start_local_execution`` 建档即开跑），
+    本地档没有 cluster 的入队等待窗口（engine backend ``start_execution`` 建档即开跑），
     故 ``queue_wait_ms`` 恒为 None（**不假造 0**）；``enqueued_at`` 取建档时间
     ``start_time`` 仅作参照。
     """

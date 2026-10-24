@@ -134,7 +134,7 @@ def fire(store, schedule: Dict[str, Any], trigger_kind: str = "cron") -> Optiona
     执行驱动自本轮起走 ``engine_backend.start_execution``（复用集群同一个
     ``FlowWorker`` 状态机，只换 storage——ADR-001「console local = engine
     backend」）；入口契约（版本校验/异常类型/行建档/返回形）与旧
-    ``local_executor.start_local_execution`` 逐项对齐，等价性由
+    （旧环已于 C1 阶段 3 删除）逐项对齐，等价性由
     ``tests/console/test_engine_backend_conformance.py`` 双后端套件钉死。
 
     ``cron`` 是调度循环的到点触发：先在 SQLite 上原子推进 ``next_run_at``

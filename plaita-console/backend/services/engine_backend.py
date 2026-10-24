@@ -18,12 +18,14 @@ timeline 采集），只换 storage——local 不是第四种执行语义，是
 进程内注册表（执行线程 / 取消 Event / 强删墓碑）与 ``local_executor``
 **共用同一份模块级表**：API 面（cancel/delete/logs 的本地分支）对 engine
 起跑的执行零感知——``cancel_local_execution`` 置位同一 Event、
-``delete_local_execution`` join 同一线程、``_ThreadLogHandler`` 抑制语义
+``delete_local_execution`` join 同一线程、日志抑制（``BackendLogHandler``）
 同一窗口。
 
-阶段边界（#323 C1 分阶段）：本阶段只切 **local_scheduler 运行面**（调度
-触发的执行经 engine backend 起跑）；executions API 的手动 start/resume 仍
-走 local_executor 旧环（阶段 3 收口合并后删除旧环）。本地墓碑是进程内
+阶段边界（#323 C1 分阶段）：阶段 2 切 ``local_scheduler.fire``；**阶段 3
+（#335）** 起 executions API 的手动 start/resume 同经本模块
+（``start_execution`` / ``resume_execution``），``local_executor`` 的第二套
+执行器驱动（手搓 run_distributed 循环）随之删除——engine backend 是本地档
+唯一执行语义（ADR-001）。本地墓碑是进程内
 强删窗口（线程收口即清），与集群持久墓碑的口径差异在
 ``LocalExecutionStorage.load_execution_tombstone`` 如实声明。
 """
@@ -290,13 +292,42 @@ class LocalMirror:
             )
 
     def record_failed(self, execution_id: str, exc: BaseException) -> None:
+        """失败终态镜像。usage 聚合与旧环同口径（#37 P2：终态才聚合、能采
+        多少算多少、未采集落 'null'）——worker 的 start 失败路径**刻意留
+        running 行**（集群 at-least-once 契约，不终态化），咽喉点的
+        ``_collect_usage`` 不经此路。聚合源两段兜底：行上最后持久化的
+        checkpoint context（步界已落盘的失败）→ trace 回调已落库的节点
+        ``output.usage``（流内异常先于步界 checkpoint 时行上无 context，
+        已完成节点的 usage 采集面等价）。"""
+        row = fs.get_local_execution(execution_id)
+        usage_json = le._usage_json_for((row or {}).get("context"))
+        if usage_json == "null":
+            nodes = (row or {}).get("nodes") or []
+            node_results = {
+                n["id"]: {"usage": n["output"].get("usage")}
+                for n in nodes
+                if isinstance(n, dict) and n.get("id")
+                and isinstance(n.get("output"), dict)
+                and isinstance(n["output"].get("usage"), dict)
+            }
+            if node_results:
+                try:
+                    from plaita.storage.usage import aggregate_node_usage
+
+                    usage = aggregate_node_usage(node_results)
+                    if usage is not None:
+                        usage_json = json.dumps(usage, ensure_ascii=False)
+                except Exception:  # noqa: BLE001 — 观测口径失败绝不拖累终态
+                    logger.warning(
+                        "失败终态 usage 聚合失败（按未采集落库）", exc_info=True
+                    )
         fs.finish_local_execution(
             execution_id,
             status="failed",
             error_json=json.dumps(
                 {"message": str(exc), "type": type(exc).__name__}, ensure_ascii=False
             ),
-            usage_json="null",
+            usage_json=usage_json,
         )
 
 
@@ -463,8 +494,9 @@ class EngineBackend:
     def build_worker(
         self, execution_id: str, tenant_id: str = "",
         extra_handlers: Optional[List[Any]] = None,
+        initial_nodes: Optional[List[Any]] = None,
     ) -> EngineBackendWorker:
-        trace = le._LocalTraceCallback(execution_id)
+        trace = le._LocalTraceCallback(execution_id, initial_nodes=initial_nodes)
         handlers: List[Any] = [trace]
         langfuse = le._build_langfuse_callback()
         if langfuse is not None:
@@ -509,12 +541,32 @@ class EngineBackend:
             execution_id, flow_id, version, params or {}, tenant_id or "",
         )
 
+    def launch_resume(
+        self,
+        execution_id: str,
+        flow_id: str,
+        resume_type: str,
+        data: Optional[Dict[str, Any]],
+        initial_nodes: Optional[List[Any]] = None,
+        tenant_id: str = "",
+    ) -> None:
+        """恢复挂起执行：同一 ``_spawn`` 防护（同 id 线程存活拒绝）起跑
+        resume 驱动线程（C1 阶段 3）。"""
+        le._spawn(
+            execution_id, self._drive,
+            execution_id, flow_id, "", {}, tenant_id or "",
+            {"resume_type": resume_type, "data": data,
+             "initial_nodes": initial_nodes},
+        )
+
     def _drive(
         self, execution_id: str, flow_id: str, version: str,
         params: Dict[str, Any], tenant_id: str,
+        resume: Optional[Dict[str, Any]] = None,
     ) -> None:
         """驱动线程：旧环 _run_flow 的脚手架（日志/租户/回调/收尾）+
-        FlowWorker 状态机驱动（start_flow 内含整个步界循环）。"""
+        FlowWorker 状态机驱动（start_flow 内含整个步界循环；resume 走
+        ``resume_flow``——lease/终态幂等/#33 守卫沿用基类，C1 阶段 3）。"""
         handler = BackendLogHandler(
             execution_id, threading.get_ident(), self.log_sink, tenant_id
         )
@@ -528,13 +580,29 @@ class EngineBackend:
         except Exception:  # noqa: BLE001 — 引擎侧上下文不可用不阻塞本地执行
             pass
         try:
-            logger.info(
-                "engine backend 执行 %s 开始（flow=%s@%s）", execution_id, flow_id, version
+            if resume is None:
+                logger.info(
+                    "engine backend 执行 %s 开始（flow=%s@%s）",
+                    execution_id, flow_id, version,
+                )
+            else:
+                logger.info(
+                    "engine backend 执行 %s 恢复（flow=%s, resume_type=%s）",
+                    execution_id, flow_id, resume["resume_type"],
+                )
+            worker = self.build_worker(
+                execution_id, tenant_id,
+                initial_nodes=(resume or {}).get("initial_nodes"),
             )
-            worker = self.build_worker(execution_id, tenant_id)
-            result = worker.start_flow(
-                flow_id, params=params, version=version, execution_id=execution_id
-            )
+            if resume is None:
+                result = worker.start_flow(
+                    flow_id, params=params, version=version, execution_id=execution_id
+                )
+            else:
+                result = worker.resume_flow(
+                    flow_id, execution_id, resume["resume_type"],
+                    data=resume.get("data"),
+                )
             self.mirror.record_output(execution_id, result or {})
             logger.info(
                 "engine backend 执行 %s 收口（status=%s）",
@@ -664,9 +732,11 @@ def start_execution(
     invoker: str = "local",
     tenant_id: str = "",
 ) -> Dict[str, Any]:
-    """本地档经 engine backend 起跑——``local_scheduler.fire`` 的运行面入口。
+    """本地档经 engine backend 起跑——``local_scheduler.fire`` 与 executions
+    API 手动 start 的运行面入口（C1 阶段 2/3）。
 
-    行为契约与 ``local_executor.start_local_execution`` 逐项对齐：版本解析/
+    行为契约与旧环 ``local_executor.start_local_execution``（C1 阶段 3 已删）
+    逐项对齐：版本解析/
     发布校验同规则（同型异常，``fire`` 的失败留痕语义不变）、行建档同列
     （input/invoker/tenant/start_time）、返回同形（``get_local_execution``
     行 dict）。差异仅在执行驱动：FlowWorker 状态机替代手搓 run_distributed
@@ -693,3 +763,63 @@ def start_execution(
     )
     local_backend(store).launch(execution_id, flow_id, version, params, tenant_id)
     return fs.get_local_execution(execution_id)
+
+
+def resume_execution(
+    store,
+    execution_id: str,
+    resume_type: str,
+    data: Optional[Dict[str, Any]],
+    tenant_id: Optional[str] = None,
+) -> bool:
+    """本地档经 engine backend 恢复挂起执行——executions API 手动 resume 的
+    运行面入口（C1 阶段 3，#335）。
+
+    行为契约与旧环 ``local_executor.resume_local_execution``（本阶段已删）
+    逐项对齐：行缺失 ``False``；非挂起 / ``continue|retry``（#33，挂起执行
+    只认 event/cancel/timeout 决议）/ checkpoint 缺失均 ``ValueError`` 同
+    文案；挂起→running 原子 CAS 充当并发 resume 互斥（抢不到按当前真实
+    状态报错）；``_spawn`` 同 id 线程存活拒绝时回滚状态再拒。差异仅在执行
+    驱动：``worker.resume_flow``（lease/终态幂等/挂起幂等短路/flow_hash
+    守卫沿用基类，本地行无 flow_hash 列跳过）替代手搓 run_distributed 循环；
+    ``_with_resume_binding``（#221 挂起订阅绑定）与行上 nodes 续栽（恢复
+    不清节点 trace）同源保留。
+    """
+    row = fs.get_local_execution(execution_id, tenant_id=tenant_id)
+    if row is None:
+        return False
+    if row["status"] != "suspended":
+        raise ValueError(f"仅挂起状态可恢复: 当前 {row['status']}")
+    # #33 对齐 worker 契约：挂起执行只认 event/cancel/timeout 决议——
+    # continue/retry 不携带推进语义（策略层 pending 守卫必拒），本地档
+    # 同样拒绝而不是让执行线程把失败落成 failed 终态。
+    if resume_type in ("continue", "retry"):
+        raise ValueError(
+            f"挂起执行不接受 resume_type={resume_type}（会被挂起节点守卫拒绝），"
+            "请用 event/cancel/timeout 决议挂起节点"
+        )
+    context = row.get("context")
+    if context is None:
+        raise ValueError("挂起 checkpoint 缺失，无法恢复")
+
+    # TOCTOU 防护：不用上面的快照做最终判定，而是原子条件更新
+    # （UPDATE ... WHERE status='suspended'），并发 resume 只有一个能抢到，
+    # 抢不到的按当前真实状态报错。
+    if not fs.update_local_execution_status_if(execution_id, "suspended", "running"):
+        current = fs.get_local_execution(execution_id)
+        raise ValueError(
+            f"仅挂起状态可恢复: 当前 {current['status'] if current else '已删除'}"
+        )
+
+    try:
+        local_backend(store).launch_resume(
+            execution_id, row["flow_id"], resume_type,
+            le._with_resume_binding(context, resume_type, data),
+            initial_nodes=row.get("nodes") or [],
+            tenant_id=row.get("tenant_id") or "",
+        )
+    except RuntimeError:
+        # 同执行 ID 的线程仍存活：回滚状态并拒绝，避免双线程写同一执行记录。
+        fs.update_local_execution(execution_id, status="suspended")
+        raise ValueError(f"执行 {execution_id} 尚有线程在运行，不能重复恢复")
+    return True

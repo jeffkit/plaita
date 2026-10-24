@@ -17,8 +17,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from plaita.server import flow_worker as fw  # noqa: E402
+
 from services import flow_store as fs  # noqa: E402
 from services import local_executor as le  # noqa: E402
+from services import engine_backend  # noqa: E402
 
 DEF = json.dumps(
     {
@@ -55,7 +58,7 @@ class _StubExecution:
         pass
 
     def run_distributed(self, flow, params=None, saved_context=None,
-                        resume_type=None, resume_data=None):
+                        resume_type=None, resume_data=None, **kwargs):
         self.calls.append(resume_type or "start")
         if len(self.calls) == 1:
             _StubExecution.first_started.set()
@@ -88,10 +91,12 @@ def test_t8_cancel_running_execution_thread_exits_at_boundary(tmp_path, monkeypa
     _publish_flow()
     _StubExecution.release_first = threading.Event()
     _StubExecution.first_started = threading.Event()
-    # patch 须覆盖执行线程整个生命周期（子线程在 spawn 后才构造 FlowExecution）
-    monkeypatch.setattr(le, "FlowExecution", _StubExecution)
+    # patch 须覆盖执行线程整个生命周期（子线程在 spawn 后才构造 FlowExecution）；
+    # C1 阶段 3 起执行驱动经 engine backend（FlowWorker 状态机），注入点在
+    # flow_worker 模块命名空间。
+    monkeypatch.setattr(fw, "FlowExecution", _StubExecution)
 
-    info = le.start_local_execution(
+    info = engine_backend.start_execution(
         fs.get_flow_store(), "cancel-demo", "1.0.0", {}, tenant_id="default"
     )
     eid = info["execution_id"]

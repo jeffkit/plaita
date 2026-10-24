@@ -450,7 +450,30 @@ class FlowStore:
                     session, flow_id=flow_id, tenant_id=row_tenant,
                     expected_versions=expected_versions,
                 )
-            session.delete(record)
+            # #319：父行删除钉在观察快照上（id + created_at 双条件）+ rowcount
+            # 复核。session.delete(record) 的 ORM DELETE 只按代理主键 id 定位，
+            # 且实际执行在 commit 前 flush（_outbox_purge 的 autoflush 处）——
+            # SELECT 观察到提交之间，同 id 行可被并发删除并由 create 重建
+            # （SQLite rowid 复用使重建行 id 与观察行相同；PG/MySQL 序列不复
+            # 用则旧 id 消失），收尾 DELETE 两面失真：命中重建行（rowcount=1
+            # 静默吃掉 create 已交付的新生命周期）或零命中（confirm_deleted_rows
+            # 仅告警、假报删除成功）。created_at 不可变且重建必换值（PG/MySQL
+            # 上 created_at 同秒截断也无妨——id 已不复用）；rowcount≠1 → 409，
+            # 事务整体回滚（本事务已执行的版本行删除/outbox purge 一并还原），
+            # 与 _delete_versions_pinned「快照失配 → 具名 409、零删除」同语义。
+            row_delete = session.execute(
+                delete(FlowRecord).where(
+                    FlowRecord.id == record.id,
+                    FlowRecord.created_at == record.created_at,
+                    FlowRecord.tenant_id == row_tenant,
+                    FlowRecord.flow_id == flow_id,
+                )
+            )
+            if row_delete.rowcount != 1:
+                raise VersionConflictError(
+                    f"流程 {flow_id} 在删除期间被并发修改或重建"
+                    f"（删除目标已消失），请刷新后重试"
+                )
             # #299：级联删版本的同时清掉发布 outbox，防对账重投已删流程。
             # 租户以行内为准（全量视角删除时入参 tenant_id 可能为 None）。
             _outbox_purge(session, tenant_id=row_tenant, flow_id=flow_id)
@@ -2170,7 +2193,7 @@ def insert_local_log(
     message: str,
     tenant_id: str = "",
 ) -> None:
-    """写入一条本地执行日志（由 _ThreadLogHandler 高频调用，单行提交可接受）。"""
+    """写入一条本地执行日志（由执行日志 handler 高频调用，单行提交可接受）。"""
     store = get_flow_store()
     with store._session_local() as session:
         session.add(
