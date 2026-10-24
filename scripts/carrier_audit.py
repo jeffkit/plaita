@@ -73,7 +73,8 @@
     python scripts/carrier_audit.py --loop                   # 常驻循环（间隔 env 可调，缺省 60s）
 
 输出：``$PLAITA_CARRIER_AUDIT_OUTPUT_DIR/carrier_metrics.prom``（Prometheus
-textfile 约定）+ ``carrier_snapshot.json``。失败轮次**不覆写**上一轮产物
+textfile 约定）+ ``carrier_snapshot.json``（schema 2：含 per-execution 段，
+#321 reconciler shadow 消费——单分类器、双视输出）。失败轮次**不覆写**上一轮产物
 （last_success 停止推进即 meta-alert 信号）。
 
 回滚 = 停掉 timer，无残留键（全程只读）。
@@ -310,6 +311,10 @@ class RoundResult:
     sources_failed: List[str] = field(default_factory=list)
     missing_samples: List[Dict[str, str]] = field(default_factory=list)
     observed_statuses: Set[str] = field(default_factory=set)
+    #: schema 2 快照的 per-execution 段（#321 shadow 同源消费：非终态全集 +
+    #: 带载体终态行〔orphan 候选〕）。verdict 复用 ``_verdict``（含源失败轮的
+    #: unknown），消费方按它聚合可逐格重放 cells——双向互证的数据前提。
+    executions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _source(
@@ -575,14 +580,37 @@ def scan_round(client: ReadOnlyRedis, config: AuditConfig, *, now: Optional[floa
         if terminal:
             if present:
                 orphan_terminal_count += 1
+                # schema 2：带载体终态行入 per-execution 段（gc 意图候选）；
+                # 无载体终态行不入段（对账面纯噪声）。
+                result.executions.append(
+                    {
+                        "execution_id": row.execution_id,
+                        "tenant": row.tenant,
+                        "status": row.status,
+                        "carriers": sorted(present),
+                        "messages": queue_counts.get(row.execution_id, 0),
+                        "verdict": _verdict(row, present),
+                    }
+                )
             continue
         if row.corrupt or not row.status:
             # 行不可读/状态为空：carrier 与 status 均不可判 → 落 unknown cell
-            #（不入 page 规则，见 missing_help）；计数已在解析点记过。
+            #（不入 page 规则，见 missing_help）；per-execution 段同步收
+            #（verdict=unknown，消费方聚合可重放 unknown cell）。
             cell_counts[(row.tenant, "unknown", "unknown")] = (
                 cell_counts.get((row.tenant, "unknown", "unknown"), 0) + 1
             )
             result.observed_statuses.add("unknown")
+            result.executions.append(
+                {
+                    "execution_id": row.execution_id,
+                    "tenant": row.tenant,
+                    "status": "",
+                    "carriers": sorted(present),
+                    "messages": queue_counts.get(row.execution_id, 0),
+                    "verdict": "unknown",
+                }
+            )
             continue
         if row.status not in NON_TERMINAL_STATUSES:
             # 非终态枚举外的状态：仍按非终态判（不漏 missing），告警并入渲染
@@ -597,6 +625,16 @@ def scan_round(client: ReadOnlyRedis, config: AuditConfig, *, now: Optional[floa
             cell_counts.get((row.tenant, row.status, verdict), 0) + 1
         )
         result.observed_statuses.add(row.status)
+        result.executions.append(
+            {
+                "execution_id": row.execution_id,
+                "tenant": row.tenant,
+                "status": row.status,
+                "carriers": sorted(present),
+                "messages": queue_counts.get(row.execution_id, 0),
+                "verdict": verdict,
+            }
+        )
         if verdict == "none" and len(missing_samples) < MISSING_SAMPLES_CAP:
             missing_samples.append(
                 {
@@ -742,9 +780,15 @@ def render_prom(result: RoundResult) -> str:
 
 
 def render_snapshot(result: RoundResult, config: AuditConfig) -> Dict[str, Any]:
-    """RoundResult → console JSON 快照形状（含部署拓扑与 none 样本）。"""
+    """RoundResult → console JSON 快照形状（含部署拓扑、none 样本与 per-execution 段）。
+
+    schema 2（#321 起）：新增 ``executions`` 段——非终态全集 + 带载体终态行
+    的逐执行明细（carriers/messages/verdict）。#321 reconciler shadow 以此为
+    唯一候选集与 actual 侧来源（单分类器、双视输出）；既有各键与 gauge 族
+    语义不变（加法扩展）。
+    """
     return {
-        "schema": 1,
+        "schema": 2,
         "generated_at": result.generated_at,
         "duration_seconds": round(result.duration_seconds, 6),
         "config": {
@@ -765,6 +809,7 @@ def render_snapshot(result: RoundResult, config: AuditConfig) -> Dict[str, Any]:
         "check_errors": result.check_errors,
         "sources_failed": result.sources_failed,
         "missing_samples": result.missing_samples,
+        "executions": result.executions,
     }
 
 

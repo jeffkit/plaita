@@ -1,0 +1,615 @@
+........................................................................ [  4%]
+........................................................................ [  9%]
+........................................................................ [ 13%]
+........................................................................ [ 18%]
+......................................................ss................ [ 22%]
+................................................................ssssssss [ 27%]
+ss...................................................................... [ 31%]
+........................................................................ [ 36%]
+........................................................................ [ 40%]
+........................................................................ [ 45%]
+........................................................................ [ 49%]
+........................................................................ [ 54%]
+........................................................................ [ 58%]
+........................................................................ [ 63%]
+........................................................................ [ 67%]
+........................................................................ [ 72%]
+........................................................................ [ 76%]
+........................................................................ [ 81%]
+........................................................................ [ 85%]
+...s.................................................................... [ 90%]
+........................................................................ [ 95%]
+.....s.................................................................. [ 99%]
+.......                                                                  [100%]
+=============================== warnings summary ===============================
+config.py:18
+  /private/tmp/plaita-b3-r102/plaita-console/backend/config.py:18: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class Settings(BaseModel):
+
+plaita-console/backend/tests/console/test_a12901_publish_unencodable_gate.py: 30 warnings
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 84 warnings
+plaita-console/backend/tests/console/test_a134_gate_seed_examples.py: 36 warnings
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 468 warnings
+plaita-console/backend/tests/console/test_a1r111_copilot_thread_tenant.py: 38 warnings
+plaita-console/backend/tests/console/test_a2r35_01_caps_shape_422.py: 23 warnings
+plaita-console/backend/tests/console/test_a2r40_01_cluster_redis_url_pin.py: 7 warnings
+plaita-console/backend/tests/console/test_a2r44_02_trigger_attribution.py: 1 warning
+plaita-console/backend/tests/console/test_a2r45_03_users_membership_scope.py: 62 warnings
+plaita-console/backend/tests/console/test_a2r47_01_copilot_thread_gate_bypass.py: 122 warnings
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 23 warnings
+plaita-console/backend/tests/console/test_a2r53_tenant_status_publish.py: 9 warnings
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 31 warnings
+plaita-console/backend/tests/console/test_a69_02_event_canonical.py: 8 warnings
+plaita-console/backend/tests/console/test_admin_auth.py: 19 warnings
+plaita-console/backend/tests/console/test_b74_02_unknown_queue.py: 1 warning
+plaita-console/backend/tests/console/test_clean_c4_executions_api.py: 11 warnings
+plaita-console/backend/tests/console/test_cluster_switch_rebind.py: 11 warnings
+plaita-console/backend/tests/console/test_cluster_tenant.py: 5 warnings
+plaita-console/backend/tests/console/test_console_task_queue_env.py: 2 warnings
+plaita-console/backend/tests/console/test_credentials_api.py: 7 warnings
+plaita-console/backend/tests/console/test_dryrun_api.py: 11 warnings
+plaita-console/backend/tests/console/test_e2e_closure.py: 3 warnings
+plaita-console/backend/tests/console/test_engine_outbox.py: 130 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 361 warnings
+plaita-console/backend/tests/console/test_execution_delete_persistence.py: 28 warnings
+plaita-console/backend/tests/console/test_flow_source_api.py: 23 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 37 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 66 warnings
+plaita-console/backend/tests/console/test_flow_version_api.py: 6 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 33 warnings
+plaita-console/backend/tests/console/test_issue157_resume_params.py: 31 warnings
+plaita-console/backend/tests/console/test_issue166_input_redaction.py: 1 warning
+plaita-console/backend/tests/console/test_issue190_dryrun_node_capability.py: 9 warnings
+plaita-console/backend/tests/console/test_issue191_event_tenant_binding.py: 2 warnings
+plaita-console/backend/tests/console/test_issue192_tenant_read_surface.py: 133 warnings
+plaita-console/backend/tests/console/test_issue208_login_rate_limit.py: 20 warnings
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py: 53 warnings
+plaita-console/backend/tests/console/test_issue211_service_start_atomic.py: 1 warning
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 171 warnings
+plaita-console/backend/tests/console/test_issue217_admin_prefix_matrix.py: 118 warnings
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 38 warnings
+plaita-console/backend/tests/console/test_issue223_credentials_atomic_export.py: 28 warnings
+plaita-console/backend/tests/console/test_issue226_credential_isolation.py: 25 warnings
+plaita-console/backend/tests/console/test_issue239_write_probe.py: 10 warnings
+plaita-console/backend/tests/console/test_issue244_cluster_id_path_injection.py: 2 warnings
+plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py: 42 warnings
+plaita-console/backend/tests/console/test_issue251_credentials_order.py: 20 warnings
+plaita-console/backend/tests/console/test_issue254_offboarded_platform_view.py: 235 warnings
+plaita-console/backend/tests/console/test_issue255_tenant_runtime_purge.py: 38 warnings
+plaita-console/backend/tests/console/test_issue257_tenant_credentials_order.py: 22 warnings
+plaita-console/backend/tests/console/test_issue25_execution_timeline_api.py: 1 warning
+plaita-console/backend/tests/console/test_issue260_platform_account_guard.py: 276 warnings
+plaita-console/backend/tests/console/test_issue261_cluster_platform_admin.py: 158 warnings
+plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py: 58 warnings
+plaita-console/backend/tests/console/test_issue263_cluster_read_surface_gate.py: 255 warnings
+plaita-console/backend/tests/console/test_issue263_dispatch_ledger_tenant_scope.py: 43 warnings
+plaita-console/backend/tests/console/test_issue264_dlq_tenant_generation.py: 51 warnings
+plaita-console/backend/tests/console/test_issue265_services_read_redaction.py: 40 warnings
+plaita-console/backend/tests/console/test_issue26_console_metrics_dlq.py: 1 warning
+plaita-console/backend/tests/console/test_issue273_274_queued_visibility_dedup.py: 23 warnings
+plaita-console/backend/tests/console/test_issue276_derived_worker_redis_url.py: 1 warning
+plaita-console/backend/tests/console/test_issue277_tenant_sidewrites.py: 3 warnings
+plaita-console/backend/tests/console/test_issue280_dedup_race_cancel.py: 9 warnings
+plaita-console/backend/tests/console/test_issue284_create_generation_order.py: 2 warnings
+plaita-console/backend/tests/console/test_issue285_owner_guards.py: 13 warnings
+plaita-console/backend/tests/console/test_issue286_287_owner_state_machine.py: 8 warnings
+plaita-console/backend/tests/console/test_issue289_mark_race.py: 4 warnings
+plaita-console/backend/tests/console/test_issue28_start_quota_429.py: 7 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 290 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 61 warnings
+plaita-console/backend/tests/console/test_issue292_copilot_platform_gate.py: 77 warnings
+plaita-console/backend/tests/console/test_issue293_294_295_login_guard_v2.py: 72 warnings
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 93 warnings
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py: 115 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 42 warnings
+plaita-console/backend/tests/console/test_issue304_version_delete_guard.py: 75 warnings
+plaita-console/backend/tests/console/test_issue305_graph_generate.py: 9 warnings
+plaita-console/backend/tests/console/test_issue305_graph_validate.py: 63 warnings
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 37 warnings
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py: 32 warnings
+plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py: 21 warnings
+plaita-console/backend/tests/console/test_issue308_delete_cascade.py: 63 warnings
+plaita-console/backend/tests/console/test_issue309_graph_validate_hardening.py: 9 warnings
+plaita-console/backend/tests/console/test_issue314_save_delete_residual_window.py: 16 warnings
+plaita-console/backend/tests/console/test_issue32_dryrun_dry_flag.py: 1 warning
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 99 warnings
+plaita-console/backend/tests/console/test_issue42_dispatch_capacity.py: 10 warnings
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py: 3 warnings
+plaita-console/backend/tests/console/test_issue64_queue_key_scope.py: 64 warnings
+plaita-console/backend/tests/console/test_issue73_retry_budget_gate.py: 33 warnings
+plaita-console/backend/tests/console/test_issue_a112_login_hardening.py: 65 warnings
+plaita-console/backend/tests/console/test_issue_a2r13_delete_redis_outside_txn.py: 11 warnings
+plaita-console/backend/tests/console/test_issue_a2r17_full_view.py: 112 warnings
+plaita-console/backend/tests/console/test_issue_a2r20_startup_budgets.py: 12 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_contract_residual.py: 26 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_error_contract.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r24_projection_contract.py: 12 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_request_strict.py: 32 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_schedule_history_contract.py: 4 warnings
+plaita-console/backend/tests/console/test_issue_a2r25_08_09_db_sensitive.py: 22 warnings
+plaita-console/backend/tests/console/test_issue_a2r25_10_credentials_key.py: 35 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_schedule_pin_guard.py: 114 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_trigger_semantics.py: 34 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 164 warnings
+plaita-console/backend/tests/console/test_issue_a50_tenant_delete_races.py: 38 warnings
+plaita-console/backend/tests/console/test_issue_a54_01_tenant_logs_purge.py: 47 warnings
+plaita-console/backend/tests/console/test_issue_a54_02_dispatch_ledger_generation.py: 36 warnings
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py: 112 warnings
+plaita-console/backend/tests/console/test_issue_a54_06_orphan_flows.py: 10 warnings
+plaita-console/backend/tests/console/test_issue_a54_09_queue_key_set.py: 9 warnings
+plaita-console/backend/tests/console/test_issue_a67_credentials_residual.py: 4 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 10 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 93 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 188 warnings
+plaita-console/backend/tests/console/test_local_reconcile.py: 36 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 63 warnings
+plaita-console/backend/tests/console/test_migrate_sqlite_to_pg.py: 4 warnings
+plaita-console/backend/tests/console/test_nodes_api.py: 12 warnings
+plaita-console/backend/tests/console/test_pg_portability_bootstrap.py: 2 warnings
+plaita-console/backend/tests/console/test_property_types_api.py: 9 warnings
+plaita-console/backend/tests/console/test_r135_quarantine_replay.py: 66 warnings
+plaita-console/backend/tests/console/test_r52_tenant_generation_binding.py: 68 warnings
+plaita-console/backend/tests/console/test_r53_dlq_replay_api.py: 48 warnings
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 1430 warnings
+plaita-console/backend/tests/console/test_r55_audit_queue_surface.py: 2548 warnings
+plaita-console/backend/tests/console/test_r55_cluster_success_audit.py: 24 warnings
+plaita-console/backend/tests/console/test_r56_tenant_status_reconcile.py: 6 warnings
+plaita-console/backend/tests/console/test_s17_04_sse_finished.py: 23 warnings
+plaita-console/backend/tests/console/test_s17_frontend_contract.py: 50 warnings
+plaita-console/backend/tests/console/test_schedule_cas_api.py: 3 warnings
+plaita-console/backend/tests/console/test_schedule_trigger_visibility.py: 3 warnings
+plaita-console/backend/tests/console/test_service_manager_reset.py: 2 warnings
+plaita-console/backend/tests/console/test_start_returns_execution_id.py: 4 warnings
+plaita-console/backend/tests/console/test_supervisor_api.py: 19 warnings
+plaita-console/backend/tests/console/test_tenants.py: 199 warnings
+plaita-console/backend/tests/console/test_wave12_cancel_api.py: 4 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/sql/schema.py:4296: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore[call-arg, no-any-return, no-untyped-call]  # noqa: E501
+
+plaita-console/backend/tests/console/test_a12901_publish_unencodable_gate.py: 6 warnings
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 19 warnings
+plaita-console/backend/tests/console/test_a134_gate_seed_examples.py: 12 warnings
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 17 warnings
+plaita-console/backend/tests/console/test_a2r35_01_caps_shape_422.py: 1 warning
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 6 warnings
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 10 warnings
+plaita-console/backend/tests/console/test_e2e_closure.py: 1 warning
+plaita-console/backend/tests/console/test_engine_outbox.py: 29 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 62 warnings
+plaita-console/backend/tests/console/test_execution_delete_persistence.py: 3 warnings
+plaita-console/backend/tests/console/test_flow_source_api.py: 4 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 13 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 21 warnings
+plaita-console/backend/tests/console/test_flow_version_api.py: 2 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 3 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 28 warnings
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 2 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 25 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 4 warnings
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 23 warnings
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py: 21 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 10 warnings
+plaita-console/backend/tests/console/test_issue304_version_delete_guard.py: 12 warnings
+plaita-console/backend/tests/console/test_issue305_graph_validate.py: 11 warnings
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 6 warnings
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py: 6 warnings
+plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py: 4 warnings
+plaita-console/backend/tests/console/test_issue308_delete_cascade.py: 10 warnings
+plaita-console/backend/tests/console/test_issue309_graph_validate_hardening.py: 1 warning
+plaita-console/backend/tests/console/test_issue314_save_delete_residual_window.py: 2 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 5 warnings
+plaita-console/backend/tests/console/test_issue_a2r17_full_view.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r20_startup_budgets.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_contract_residual.py: 5 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_projection_contract.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r24_request_strict.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r52_schedule_pin_guard.py: 21 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_trigger_semantics.py: 4 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 24 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 1 warning
+plaita-console/backend/tests/console/test_local_langfuse.py: 12 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 21 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 6 warnings
+plaita-console/backend/tests/console/test_r52_tenant_generation_binding.py: 1 warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 4 warnings
+plaita-console/backend/tests/console/test_s17_04_sse_finished.py: 3 warnings
+plaita-console/backend/tests/console/test_tenants.py: 5 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/flow_store.py:823: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"ts": datetime.utcnow(), "tid": tenant_id, "fid": flow_id, "ver": version},
+
+plaita-console/backend/tests/console/test_a12901_publish_unencodable_gate.py: 10 warnings
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 47 warnings
+plaita-console/backend/tests/console/test_a134_gate_seed_examples.py: 28 warnings
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 51 warnings
+plaita-console/backend/tests/console/test_a2r35_01_caps_shape_422.py: 1 warning
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 18 warnings
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 35 warnings
+plaita-console/backend/tests/console/test_e2e_closure.py: 3 warnings
+plaita-console/backend/tests/console/test_engine_outbox.py: 87 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 165 warnings
+plaita-console/backend/tests/console/test_execution_delete_persistence.py: 9 warnings
+plaita-console/backend/tests/console/test_flow_source_api.py: 4 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 22 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 47 warnings
+plaita-console/backend/tests/console/test_flow_version_api.py: 4 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 5 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 82 warnings
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 2 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 73 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 12 warnings
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 53 warnings
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py: 63 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 30 warnings
+plaita-console/backend/tests/console/test_issue304_version_delete_guard.py: 28 warnings
+plaita-console/backend/tests/console/test_issue305_graph_validate.py: 31 warnings
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 18 warnings
+plaita-console/backend/tests/console/test_issue307_followups_guard_scan_perf_diag.py: 6 warnings
+plaita-console/backend/tests/console/test_issue307_saturation_branch_a13301.py: 4 warnings
+plaita-console/backend/tests/console/test_issue308_delete_cascade.py: 22 warnings
+plaita-console/backend/tests/console/test_issue309_graph_validate_hardening.py: 1 warning
+plaita-console/backend/tests/console/test_issue314_save_delete_residual_window.py: 2 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 5 warnings
+plaita-console/backend/tests/console/test_issue_a2r17_full_view.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r20_startup_budgets.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_contract_residual.py: 5 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_projection_contract.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r24_request_strict.py: 3 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_schedule_pin_guard.py: 33 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_trigger_semantics.py: 12 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 72 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 3 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 36 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 61 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 18 warnings
+plaita-console/backend/tests/console/test_r52_tenant_generation_binding.py: 1 warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 10 warnings
+plaita-console/backend/tests/console/test_s17_04_sse_finished.py: 9 warnings
+plaita-console/backend/tests/console/test_tenants.py: 11 warnings
+  /Users/kong/projects/infra4agent/plaita/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:1180: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+plaita-console/backend/tests/console/test_a12901_publish_unencodable_gate.py: 2 warnings
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 14 warnings
+plaita-console/backend/tests/console/test_a134_gate_seed_examples.py: 8 warnings
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 17 warnings
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 6 warnings
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 7 warnings
+plaita-console/backend/tests/console/test_e2e_closure.py: 1 warning
+plaita-console/backend/tests/console/test_engine_outbox.py: 29 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 51 warnings
+plaita-console/backend/tests/console/test_execution_delete_persistence.py: 3 warnings
+plaita-console/backend/tests/console/test_flow_store.py: 4 warnings
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 1 warning
+plaita-console/backend/tests/console/test_flow_version_api.py: 1 warning
+plaita-console/backend/tests/console/test_flows_api.py: 1 warning
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 27 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 24 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 4 warnings
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 15 warnings
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py: 21 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 10 warnings
+plaita-console/backend/tests/console/test_issue304_version_delete_guard.py: 8 warnings
+plaita-console/backend/tests/console/test_issue305_graph_validate.py: 10 warnings
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 6 warnings
+plaita-console/backend/tests/console/test_issue308_delete_cascade.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_schedule_pin_guard.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_trigger_semantics.py: 4 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 24 warnings
+plaita-console/backend/tests/console/test_local_cancel.py: 1 warning
+plaita-console/backend/tests/console/test_local_langfuse.py: 12 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 20 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 6 warnings
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 3 warnings
+plaita-console/backend/tests/console/test_s17_04_sse_finished.py: 3 warnings
+plaita-console/backend/tests/console/test_tenants.py: 3 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/flow_store.py:1009: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a12901_publish_unencodable_gate.py: 2 warnings
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 4 warnings
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 17 warnings
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 1 warning
+plaita-console/backend/tests/console/test_engine_outbox.py: 5 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 3 warnings
+plaita-console/backend/tests/console/test_flows_api.py: 1 warning
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 24 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 4 warnings
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 6 warnings
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py: 22 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 1 warning
+plaita-console/backend/tests/console/test_issue304_version_delete_guard.py: 8 warnings
+plaita-console/backend/tests/console/test_issue305_graph_validate.py: 10 warnings
+plaita-console/backend/tests/console/test_issue307_delete_guard_scan_limits.py: 6 warnings
+plaita-console/backend/tests/console/test_issue308_delete_cascade.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_schedule_pin_guard.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a2r52_trigger_semantics.py: 4 warnings
+plaita-console/backend/tests/console/test_tenants.py: 3 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/deployments.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_a12901_publish_unencodable_gate.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 7 warnings
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r24_contract_residual.py: 2 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/deployments.py:189: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "exported_at": datetime.utcnow().isoformat(),
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 3 warnings
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py: 2 warnings
+plaita-console/backend/tests/console/test_engine_outbox.py: 26 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 10 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/engine_outbox.py:741: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a134_02_delete_publish_toctou.py: 1 warning
+plaita-console/backend/tests/console/test_engine_outbox.py: 10 warnings
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py: 4 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/engine_outbox.py:932: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 33 warnings
+plaita-console/backend/tests/console/test_a1r111_copilot_thread_tenant.py: 3 warnings
+plaita-console/backend/tests/console/test_a2r45_03_users_membership_scope.py: 3 warnings
+plaita-console/backend/tests/console/test_a2r47_01_copilot_thread_gate_bypass.py: 6 warnings
+plaita-console/backend/tests/console/test_admin_auth.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 18 warnings
+plaita-console/backend/tests/console/test_issue192_tenant_read_surface.py: 13 warnings
+plaita-console/backend/tests/console/test_issue208_login_rate_limit.py: 2 warnings
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py: 4 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 9 warnings
+plaita-console/backend/tests/console/test_issue217_admin_prefix_matrix.py: 12 warnings
+plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py: 3 warnings
+plaita-console/backend/tests/console/test_issue254_offboarded_platform_view.py: 13 warnings
+plaita-console/backend/tests/console/test_issue260_platform_account_guard.py: 22 warnings
+plaita-console/backend/tests/console/test_issue261_cluster_platform_admin.py: 17 warnings
+plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py: 5 warnings
+plaita-console/backend/tests/console/test_issue263_cluster_read_surface_gate.py: 29 warnings
+plaita-console/backend/tests/console/test_issue263_dispatch_ledger_tenant_scope.py: 4 warnings
+plaita-console/backend/tests/console/test_issue264_dlq_tenant_generation.py: 3 warnings
+plaita-console/backend/tests/console/test_issue265_services_read_redaction.py: 5 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 23 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 8 warnings
+plaita-console/backend/tests/console/test_issue292_copilot_platform_gate.py: 6 warnings
+plaita-console/backend/tests/console/test_issue293_294_295_login_guard_v2.py: 2 warnings
+plaita-console/backend/tests/console/test_issue305_graph_generate.py: 1 warning
+plaita-console/backend/tests/console/test_issue64_queue_key_scope.py: 10 warnings
+plaita-console/backend/tests/console/test_issue73_retry_budget_gate.py: 5 warnings
+plaita-console/backend/tests/console/test_issue_a112_login_hardening.py: 3 warnings
+plaita-console/backend/tests/console/test_issue_a2r17_full_view.py: 8 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a50_tenant_delete_races.py: 2 warnings
+plaita-console/backend/tests/console/test_issue_a54_01_tenant_logs_purge.py: 3 warnings
+plaita-console/backend/tests/console/test_issue_a54_02_dispatch_ledger_generation.py: 3 warnings
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py: 4 warnings
+plaita-console/backend/tests/console/test_r135_quarantine_replay.py: 1 warning
+plaita-console/backend/tests/console/test_r52_tenant_generation_binding.py: 8 warnings
+plaita-console/backend/tests/console/test_r53_dlq_replay_api.py: 1 warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 14 warnings
+plaita-console/backend/tests/console/test_r55_audit_queue_surface.py: 6 warnings
+plaita-console/backend/tests/console/test_r55_cluster_success_audit.py: 1 warning
+plaita-console/backend/tests/console/test_s17_frontend_contract.py: 3 warnings
+plaita-console/backend/tests/console/test_tenants.py: 19 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/users_svc.py:185: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(days=SESSION_TTL_DAYS)
+
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 209 warnings
+plaita-console/backend/tests/console/test_a1r111_copilot_thread_tenant.py: 4 warnings
+plaita-console/backend/tests/console/test_a2r45_03_users_membership_scope.py: 3 warnings
+plaita-console/backend/tests/console/test_a2r47_01_copilot_thread_gate_bypass.py: 6 warnings
+plaita-console/backend/tests/console/test_admin_auth.py: 1 warning
+plaita-console/backend/tests/console/test_enterprise.py: 58 warnings
+plaita-console/backend/tests/console/test_issue192_tenant_read_surface.py: 13 warnings
+plaita-console/backend/tests/console/test_issue20_ai_generate_stream_gate.py: 4 warnings
+plaita-console/backend/tests/console/test_issue214_viewer_write_matrix.py: 9 warnings
+plaita-console/backend/tests/console/test_issue217_admin_prefix_matrix.py: 13 warnings
+plaita-console/backend/tests/console/test_issue245_tenant_credentials_purge.py: 14 warnings
+plaita-console/backend/tests/console/test_issue254_offboarded_platform_view.py: 18 warnings
+plaita-console/backend/tests/console/test_issue260_platform_account_guard.py: 31 warnings
+plaita-console/backend/tests/console/test_issue261_cluster_platform_admin.py: 22 warnings
+plaita-console/backend/tests/console/test_issue262_dispatch_authoritative.py: 5 warnings
+plaita-console/backend/tests/console/test_issue263_cluster_read_surface_gate.py: 33 warnings
+plaita-console/backend/tests/console/test_issue263_dispatch_ledger_tenant_scope.py: 4 warnings
+plaita-console/backend/tests/console/test_issue264_dlq_tenant_generation.py: 5 warnings
+plaita-console/backend/tests/console/test_issue265_services_read_redaction.py: 5 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 61 warnings
+plaita-console/backend/tests/console/test_issue291_supervisor_loopback_host.py: 16 warnings
+plaita-console/backend/tests/console/test_issue292_copilot_platform_gate.py: 6 warnings
+plaita-console/backend/tests/console/test_issue305_graph_generate.py: 1 warning
+plaita-console/backend/tests/console/test_issue64_queue_key_scope.py: 10 warnings
+plaita-console/backend/tests/console/test_issue73_retry_budget_gate.py: 5 warnings
+plaita-console/backend/tests/console/test_issue_a2r17_full_view.py: 29 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 3 warnings
+plaita-console/backend/tests/console/test_issue_a54_01_tenant_logs_purge.py: 6 warnings
+plaita-console/backend/tests/console/test_issue_a54_02_dispatch_ledger_generation.py: 3 warnings
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py: 10 warnings
+plaita-console/backend/tests/console/test_r135_quarantine_replay.py: 1 warning
+plaita-console/backend/tests/console/test_r52_tenant_generation_binding.py: 8 warnings
+plaita-console/backend/tests/console/test_r53_dlq_replay_api.py: 1 warning
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 41 warnings
+plaita-console/backend/tests/console/test_r55_audit_queue_surface.py: 18 warnings
+plaita-console/backend/tests/console/test_r55_cluster_success_audit.py: 19 warnings
+plaita-console/backend/tests/console/test_s17_frontend_contract.py: 13 warnings
+plaita-console/backend/tests/console/test_tenants.py: 68 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/users_svc.py:283: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_a1r110_fullview_write_surface.py: 16 warnings
+plaita-console/backend/tests/console/test_issue290_supervisor_tenant_scope.py: 1 warning
+plaita-console/backend/tests/console/test_issue_a2r17_full_view.py: 6 warnings
+plaita-console/backend/tests/console/test_s17_frontend_contract.py: 4 warnings
+plaita-console/backend/tests/console/test_tenants.py: 3 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/users_svc.py:385: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if row is None or row.expires_at < datetime.utcnow():
+
+plaita-console/backend/tests/console/test_a1r111_copilot_thread_tenant.py: 7 warnings
+plaita-console/backend/tests/console/test_a2r47_01_copilot_thread_gate_bypass.py: 29 warnings
+plaita-console/backend/tests/console/test_issue292_copilot_platform_gate.py: 3 warnings
+plaita-console/backend/tests/console/test_r55_audit_observability.py: 1 warning
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/flow_store.py:1300: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    record.updated_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a2r47_01_copilot_thread_gate_bypass.py::TestConcurrentFirstUse::test_same_tenant_race_adopts_winner_row_and_keeps_both_counts
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/flow_store.py:1328: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    winner.updated_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_waits_for_inflight_row_action
+plaita-console/backend/tests/console/test_a2r50_outbox_manual_exit_lock.py::test_manual_exit_sequential_semantics_conserved
+plaita-console/backend/tests/console/test_engine_outbox.py::test_dlq_resolve_api_exits_queue_with_trace
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_guard_rollback_restores_exact_status
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/engine_outbox.py:1126: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    note = f"manually resolved by {actor or 'unknown'} @ {datetime.utcnow().isoformat()}"
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 20 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py:86: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_a2r54_publish_race_toctou.py: 7 warnings
+plaita-console/backend/tests/console/test_enterprise.py: 1 warning
+plaita-console/backend/tests/console/test_flow_store.py: 1 warning
+plaita-console/backend/tests/console/test_flow_store_concurrency.py: 17 warnings
+plaita-console/backend/tests/console/test_issue_a2r24_request_strict.py: 1 warning
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/flow_store.py:755: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "ts": datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_b74_02_unknown_queue.py: 14 warnings
+plaita-console/backend/tests/console/test_issue42_dispatch_capacity.py: 16 warnings
+plaita-console/backend/tests/console/test_issue42_dispatch_one.py: 29 warnings
+  /private/tmp/plaita-b3-r102/plaita/server/registry.py:236: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    self.redis_client.setex(
+
+plaita-console/backend/tests/console/test_execution_delete_persistence.py::test_running_delete_without_force_is_409_and_keeps_all_keys
+plaita-console/backend/tests/console/test_execution_delete_persistence.py::test_force_delete_purges_state_index_fence_lease_cancel_events
+plaita-console/backend/tests/console/test_execution_delete_persistence.py::test_force_delete_tenant_namespace_revokes_tenant_fence_lease
+plaita-console/backend/tests/console/test_execution_delete_persistence.py::test_terminal_delete_purges_fence_and_lease
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_execution_delete_persistence.py:105: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "start_time": datetime.utcnow().isoformat(),
+
+plaita-console/backend/tests/console/test_execution_delete_persistence.py: 1 warning
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 2 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 4 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 4 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 4 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 6 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 3 warnings
+plaita-console/backend/tests/console/test_s17_04_sse_finished.py: 1 warning
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/local_executor.py:499: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fs.update_local_execution(execution_id, end_time=datetime.utcnow())
+
+plaita-console/backend/tests/console/test_execution_delete_persistence.py::test_local_force_delete_stops_log_growth_and_purges_logs
+plaita-console/backend/tests/console/test_execution_delete_persistence.py::test_local_delete_via_api_requires_force_then_purges_logs
+plaita-console/backend/tests/console/test_issue37_usage_display.py::TestLocalApiUsage::test_failed_local_run_still_records_usage
+plaita-console/backend/tests/console/test_local_cancel.py::test_t8_cancel_running_execution_thread_exits_at_boundary
+plaita-console/backend/tests/console/test_local_cancel.py::test_t8_cancel_running_execution_thread_exits_at_boundary
+plaita-console/backend/tests/console/test_local_cancel.py::test_cancel_suspended_execution_finalizes_directly
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/flow_store.py:1552: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    end_time=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue222_output_redaction.py: 12 warnings
+plaita-console/backend/tests/console/test_issue37_usage_display.py: 30 warnings
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py: 16 warnings
+plaita-console/backend/tests/console/test_local_langfuse.py: 24 warnings
+plaita-console/backend/tests/console/test_local_mode.py: 60 warnings
+plaita-console/backend/tests/console/test_local_scheduler.py: 12 warnings
+plaita-console/backend/tests/console/test_s17_04_sse_finished.py: 6 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/local_executor.py:225: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().isoformat()
+
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py: 50 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py:120: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py::TestRealGoWorkerRegistration::test_real_entry_publish_gates_sql_query_flow
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py::TestRealGoWorkerRegistration::test_real_entry_start_gate_blocks_no_enqueue_no_row
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py::TestRealGoWorkerRegistration::test_real_entry_supported_flow_routes_to_go_queue
+plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py::TestRealGoWorkerRegistration::test_services_read_face_shows_real_manifest
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue300_runtime_capability_gate.py:493: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py::TestManualTriggerGateAndRouting::test_unsupported_flow_rejected_before_enqueue
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py::TestManualTriggerGateAndRouting::test_go_flow_trigger_lands_in_go_queue
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py::TestManualTriggerGateAndRouting::test_python_flow_trigger_stays_in_default_queue
+plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py::TestManualTriggerGateAndRouting::test_trigger_without_manifests_fails_open
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue300_schedule_trigger_pool.py:156: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_symmetric_stale_read_delivery_skips_after_delete
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py:188: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue303_delete_vs_outbox_race.py::test_startup_recovery_requeues_crashed_deleting_rows
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/engine_outbox.py:597: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    f"@ {datetime.utcnow().isoformat()}"
+
+plaita-console/backend/tests/console/test_issue305_graph_generate.py: 44 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue305_graph_generate.py:98: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_issue305_graph_validate.py: 86 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue305_graph_validate.py:104: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_issue309_graph_validate_hardening.py: 32 warnings
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue309_graph_validate_hardening.py:86: DeprecationWarning: Call to deprecated setex. (Use 'set' instead.) -- Deprecated since version 2.6.12.
+    redis.setex(
+
+plaita-console/backend/tests/console/test_issue_a2r52_schedule_pin_guard.py::test_local_delete_draft_pinned_409_and_force_pauses
+plaita-console/backend/tests/console/test_issue_a2r52_trigger_semantics.py::test_local_paused_manual_trigger_409_schedule_paused
+plaita-console/backend/tests/console/test_local_scheduler.py::test_schedule_crud_roundtrip
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_schedule_crud_trigger_are_audited
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_schedule_crud_trigger_are_audited
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_schedule_crud_trigger_are_audited
+plaita-console/backend/tests/console/test_tenants.py::test_disable_tenant_stops_its_local_schedules
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/schedule_store.py:92: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.updated_at = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_record_fire_failure_does_not_replay_same_due
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_crash_after_fire_does_not_replay_same_due
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_cron_success_advances_once_and_paused_skips
+plaita-console/backend/tests/console/test_issue_a48_scheduler_lifecycle.py::test_active_tenant_stale_snapshot_still_fires
+plaita-console/backend/tests/console/test_local_scheduler.py::test_due_schedule_auto_fires_and_records_history
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/local_scheduler.py:123: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    updated_at=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_pre_delete_assets_are_visible
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_pre_delete_assets_are_visible
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_db_assets_do_not_survive_tenant_recreation
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_db_assets_do_not_survive_tenant_recreation
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_other_tenant_assets_are_preserved
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_other_tenant_assets_are_preserved
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_audit_is_retained_but_read_surface_is_generation_scoped
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_audit_is_retained_but_read_surface_is_generation_scoped
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py:113: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ts=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py::test_audit_is_retained_but_read_surface_is_generation_scoped
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_issue_a54_03_05_db_assets.py:265: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ts=datetime.utcnow(),
+
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_running_becomes_suspended_with_reason
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_fail_mode_terminates_with_end_time
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_only_running_is_touched
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_idempotent_across_restarts
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_idempotent_across_restarts
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_mode_from_env_with_fallback
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_condition_update_protects_concurrent_finish
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_empty_store_is_noop
+plaita-console/backend/tests/console/test_r55_audit_observability.py::test_api_key_write_default_audits_effective_tenant_and_identity
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/reconcile.py:69: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "reconciled_at": datetime.utcnow().isoformat(),
+
+plaita-console/backend/tests/console/test_local_reconcile.py::TestReconcileOrphans::test_fail_mode_terminates_with_end_time
+  /private/tmp/plaita-b3-r102/plaita-console/backend/services/reconcile.py:128: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fields["end_time"] = datetime.utcnow()
+
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_running_execution_cancel_writes_flag_not_status
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_suspended_execution_cancel_keeps_direct_write
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_terminal_execution_cancel_is_idempotent
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_cancel_flag_keys_excluded_from_list_and_find
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_tenant_scoped_cancel_writes_tenant_namespace_flag
+plaita-console/backend/tests/console/test_wave12_cancel_api.py::test_delete_execution_also_clears_cancel_flag
+  /private/tmp/plaita-b3-r102/plaita-console/backend/tests/console/test_wave12_cancel_api.py:70: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "start_time": datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1577 passed, 14 skipped, 14799 warnings in 199.27s (0:03:19)
+console-rc=0
