@@ -15,8 +15,9 @@ C1 控制面边界（plaita#323）：调度**行读写**（CRUD / 触发历史�
 ``next_run_at`` 条件更新作为 due 幂等键（A48-02）：先推进再执行，同一 due
 不会因崩溃/历史写失败/多副本扫描再起一条执行。
 
-cron 语义与集群档共享同一实现（plaita.server.services.schedule_service 的
-``validate_cron`` / ``next_run_after``，croniter，本地时区）。
+cron 语义与集群档共享同一实现（``plaita.server.services.schedule_core`` 的
+``validate_cron`` / ``next_run_after``，croniter，本地时区；共享语义——错过
+不补偿、本地时区、同一 due 只触发一次——的合同也单源在该模块 docstring）。
 """
 from __future__ import annotations
 
@@ -29,9 +30,11 @@ from typing import Any, Dict, Optional
 from sqlalchemy import select, update
 
 try:
-    from plaita.server.services.schedule_service import next_run_after, validate_cron
+    # 2026-10-25 触发面收敛：改从 schedule_core 取纯时间函数——不再为两个
+    # 符号把 schedule_service 整包（redis/dedup/触发面）拖进 console import 图。
+    from plaita.server.services.schedule_core import next_run_after, validate_cron
 except ImportError:  # 兼容不同安装布局
-    from plaita.server.services.schedule_service import (  # type: ignore
+    from plaita.server.services.schedule_core import (  # type: ignore
         next_run_after,
         validate_cron,
     )
@@ -235,7 +238,8 @@ def warn_local_schedules_inactive(store) -> int:
         logger.warning(
             "集群档未启动本地调度循环：SQLite 中仍有 %d 条本地单机档调度，"
             "它们不会执行、也不在集群调度列表中显示。需要继续运行请切回本地"
-            "单机档，或在集群档按相同 cron 重建后删除本地条目。",
+            "单机档，或调用 POST /api/schedules/import-local 一键迁入集群"
+            "（幂等，本地条目原地停用）。",
             len(rows),
         )
     return len(rows)

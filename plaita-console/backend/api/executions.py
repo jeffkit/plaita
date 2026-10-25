@@ -65,6 +65,8 @@ try:  # plaita#300：publish/start 能力门 + runtime pool 路由；#331：执�
         UnsupportedNodeTypesError,
         gate_flow_execution_profile,
         gate_flow_nodes,
+        queue_service_alive,
+        TIER_SERVICE_TYPES,
     )
     from ..services.runtime_pools import resolve_runtime_queue
 except ImportError:
@@ -73,6 +75,8 @@ except ImportError:
         UnsupportedNodeTypesError,
         gate_flow_execution_profile,
         gate_flow_nodes,
+        queue_service_alive,
+        TIER_SERVICE_TYPES,
     )
     from services.runtime_pools import resolve_runtime_queue  # type: ignore
 
@@ -449,7 +453,71 @@ def _admission_version_row(redis: Optional[Redis], flow_id: Any,
                     **detail,
                 ),
             ) from e
+        # 队列服务点名（2026-10-25「现场盘点」）：flow 需要队列服务唤醒
+        # （managed:queue 台阶节点，如 delay/approval/http_callback/queue 族）
+        # 而对应守护进程不在场（注册表无活实例）→ 422 具名拒——集群档从
+        # 「假设服务在岗」改为「点名后才放行」，杜绝「投递成功无人消费」
+        # 的静默搁浅。节点侧声明（managed:queue）不变；查不动 fail-open
+        # （probe 内部已 WARNING）。调度触发面（cron/manual 经本函数受理）
+        # 自动同闸；失败转具名 WARNING（A2R24 触发契约由调用方维护）。
+        _gate_queue_service_presence(redis, version_row, flow_id=flow_id)
     return version_row
+
+
+def _gate_queue_service_presence(redis: Any, version_row: Any, *, flow_id: Any) -> None:
+    """managed:queue 台阶的现场盘点：flow 里每个队列服务族的 node_type 出现
+    即点名对应 service_type；任一岗无人 → 422（error=queue_service_absent）。
+
+    node_type → service_type 同名直映（delay→delay_service 注册名 delay；
+    http_callback/http_callback…）；注册键 TTL 30s——进程刚死 ≤30s 内点名
+    仍放行，属已知滞后（键过期前结果不翻转），与「服务在岗判定」精度一致。
+    """
+    try:
+        from plaita.core.flow import Flow as _Flow
+        flow = _Flow.model_validate(
+            __import__("json").loads(version_row.definition)
+            if isinstance(version_row.definition, (str, bytes))
+            else version_row.definition
+        )
+    except Exception as exc:  # noqa: BLE001 — 定义合法性由定义闸具名，此处跳过留痕
+        logger.warning(
+            "队列服务点名跳过：flow=%s definition 不可解析（%s）",
+            flow_id, type(exc).__name__,
+        )
+        return
+    # 两级模型（managed:queue 子档废除，tier 分支 fb36f085）：唤醒源=节点
+    # wake_service 接线字段；未带字段的历史定义按内置队列族名单兜底。
+    needed: dict = {}
+    for node in flow.nodes:
+        node_type = str(getattr(node, "node_type", "?"))
+        svc = getattr(node, "wake_service", None) or (
+            node_type if node_type in (
+                "delay", "approval", "http_callback", "redis_queue", "kafka_queue"
+            ) else None
+        )
+        if svc:
+            needed.setdefault(svc, node)
+    if not needed:
+        return
+    for node_type in sorted(needed):
+        alive = queue_service_alive(redis, node_type)
+        if alive is False:
+            raise HTTPException(
+                status_code=422,
+                detail=error_detail(
+                    "queue_service_absent",
+                    (
+                        f"流程 {flow_id}@{getattr(version_row, 'version', '')} 的节点 "
+                        f"{node_type!r} 挂起后需要队列唤醒服务（{node_type}_service/"
+                        "wake 进程对应 source），但注册表里没有活实例——任务投递后"
+                        "将无人消费、执行将永久挂起。请拉起对应服务（console 集群页"
+                        "或 python -m plaita.server.services wake）后重试，或把该"
+                        "节点换成不需要队列服务的写法"
+                    ),
+                    node_type=node_type,
+                    service_type=node_type,
+                ),
+            )
 
 
 def _runtime_queue_for_flow(flow_id: Any, version: Any,

@@ -12,8 +12,9 @@ Track C 任务2（2026-10 分布式可靠性修复）：审批记录历史上存
 #56（2026-10-10）：``start_service`` 历史上只置 ``is_running = True``——
 worker 挂起时 RPUSH 进 ``plaita:approval:queue`` 的任务（见
 ``flow_worker._dispatch_service_task``）无人读，审批记录永不创建，审批
-节点永久 suspended 且无订阅超时兜底。现按 DelayService 的轮询骨架常驻
-消费该队列（不用 BLPOP：出队即内存持有、崩溃即丢，见 #11）。
+节点永久 suspended 且无订阅超时兜底。现常驻消费该队列（消费骨架收敛到
+:mod:`.wake` 的 ``ListQueueConsumeMixin``，2026-10-25——与 DelayService
+同源：不用 BLPOP，出队即内存持有、崩溃即丢，见 #11）。
 """
 import asyncio
 import json
@@ -23,12 +24,13 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from .base_service import BaseExtendedService
+from .wake import WakeConsumeMixin
 from ...logger import logger
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
-# 队列消费周期（秒）。service_config.poll_interval 可覆盖。
+# 队列消费周期/批量缺省值（2026-10-25 起消费面收敛到 wake 骨架；常量保留给
+# 既有 import 面与 service_config 覆盖语义——骨架缺省同值 0.5s/50 条）。
 APPROVAL_POLL_INTERVAL_SECONDS = 0.5
-# 每周期最多处理条数（防单周期阻塞过久）。
 APPROVAL_CONSUME_BATCH = 50
 # worker 派发键：与 flow_worker._dispatch_service_task 的
 # ``f"plaita:{subtype}:queue"``（subtype=审批节点 generate_service_config 的
@@ -54,7 +56,7 @@ end
 """
 
 
-class ApprovalService(BaseExtendedService):
+class ApprovalService(WakeConsumeMixin, BaseExtendedService):
     """
     审批服务
     负责创建审批任务并处理审批决策
@@ -80,15 +82,10 @@ class ApprovalService(BaseExtendedService):
         self.queue_key = (service_config or {}).get(
             "approval_queue", APPROVAL_DEFAULT_QUEUE_KEY
         )
-        self._poll_interval = float(
-            (service_config or {}).get("poll_interval", APPROVAL_POLL_INTERVAL_SECONDS)
-        )
-        self._consumer_thread: Optional[threading.Thread] = None
-        # 停止信号：stop_service 唤醒阻塞中的消费线程，不必等满一个轮询周期。
+        # 消费循环/in-flight/线程壳收敛到共享骨架（wake.py，2026-10-25）：
+        # 轮询周期、批量、in-flight 集合与停机信号由骨架统一持有。
+        self._init_wake_consume(service_config)
         self._stop_event = threading.Event()
-        # in-flight 去重（进程内）：已提交但尚未出队的任务不重复提交。
-        self._inflight: set = set()
-        self._inflight_lock = threading.Lock()
 
     @property
     def _use_redis(self) -> bool:
@@ -121,17 +118,10 @@ class ApprovalService(BaseExtendedService):
         try:
             self.is_running = True
             # 消费 worker 派发的审批任务：无消费线程时任务堆在队列里，审批
-            # 记录永不创建、执行永久 suspended（#56）。list 原语缺一不可。
-            if self._redis_client is None or not hasattr(self._redis_client, "lrange"):
-                logger.warning("审批服务无 redis 客户端，队列消费不启动")
-                return True
+            # 记录永不创建、执行永久 suspended（#56）。消费循环收敛到共享
+            # 骨架（wake.ListQueueConsumeMixin → _start_wake_consumer）。
             self._stop_event.clear()
-            self._consumer_thread = threading.Thread(
-                target=self._consume_queue,
-                name="approval-service-consumer",
-                daemon=True,
-            )
-            self._consumer_thread.start()
+            self._start_wake_consumer()
             logger.info("审批服务已启动（消费队列: %s）", self.queue_key)
             return True
         except Exception as e:  # noqa: BLE001 — 启动失败只告警不扩散
@@ -143,12 +133,7 @@ class ApprovalService(BaseExtendedService):
         try:
             self.is_running = False
             self._stop_event.set()
-            thread = self._consumer_thread
-            if thread is not None:
-                thread.join(timeout=self._poll_interval + 1.0)
-                if thread.is_alive():
-                    logger.warning("审批队列消费线程未在停机窗口内退出: %s", self.queue_key)
-                self._consumer_thread = None
+            self._stop_wake_consumer()
             # 只清进程内存回退态；Redis 记录是跨实例共享的持久态，停机不清
             # （带 TTL 自清理），否则重启/停机即全丢、兄弟实例也被拖垮。
             self.pending_approvals.clear()
@@ -158,100 +143,50 @@ class ApprovalService(BaseExtendedService):
             logger.error("停止审批服务失败: %s", _scrub_exception_text(e))
             return False
 
+    # ---- 共享骨架钩子（wake.ListQueueConsumeMixin） ----
+
+    def _wake_queue_key(self) -> str:
+        return self.queue_key
+
+    def _pre_submit_check(self, task_config: Dict[str, Any]) -> bool:
+        """重复投递存在性检查（at-least-once 的覆盖防线）：记录已存在的审批
+        不重建（重建会清掉已落的审批决策），直接出队。"""
+        approval_id = task_config.get("approval_id")
+        if not (self._use_redis and approval_id):
+            return True
+        try:
+            duplicate = bool(self._redis_client.get(self._record_key(approval_id)))
+        except Exception as e:  # noqa: BLE001 — 查询失败按不存在处理
+            logger.warning("审批记录查询失败（按不存在处理）: %s", _scrub_url_text(e))
+            return True
+        if duplicate:
+            logger.info("审批任务已存在（重复投递，跳过重建）: %s", approval_id)
+            return False
+        return True
+
+    # 测试/观测兼容别名：旧内部方法名指向骨架实现（行为逐项一致）。
     def _consume_queue(self) -> None:
-        """消费循环：周期轮询 ``plaita:approval:queue``（同 DelayService 骨架）。
+        self._consume_wake_loop()
 
-        不用 BLPOP：出队即内存持有、进程崩溃即丢（#11），审批会永久 suspended；
-        这里改用「LRANGE 批量读 + 处理走完才 LREM」，崩溃/重投只会重复消费
-        一次，由 ``_run_dispatched_task`` 的存在性检查挡掉覆盖。
-        """
-        while self.is_running and not self.is_shutdown_requested():
-            try:
-                self._consume_batch()
-            except Exception as e:  # noqa: BLE001 — 单轮失败不杀消费线程
-                logger.error("审批队列轮询失败: %s", _scrub_exception_text(e))
-            self._stop_event.wait(timeout=self._poll_interval)
-
-    def _consume_batch(self) -> None:
-        raw_items = self._redis_client.lrange(
-            self.queue_key, 0, APPROVAL_CONSUME_BATCH - 1
-        )
-        for raw in raw_items or []:
-            if isinstance(raw, bytes):
-                raw = raw.decode()
-            task_config = self._parse_dispatched_task(raw)
-            if task_config is None:
-                self._finalize_consumed(raw)
-                continue
-            with self._inflight_lock:
-                if raw in self._inflight:
-                    continue
-                self._inflight.add(raw)
-            self.thread_pool.submit(self._run_dispatched_task, raw, task_config)
+    def _consume_batch(self) -> int:
+        return self._consume_wake_batch()
 
     def _parse_dispatched_task(self, raw: str) -> Optional[Dict[str, Any]]:
-        """解析派发任务；坏条目返回 None（调用方就地出队，不无限重读）。"""
-        try:
-            task_config = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.error("审批任务配置非法（丢弃）: %r", raw[:200])
-            return None
-        if not isinstance(task_config, dict) or not self.validate_task_config(task_config):
-            logger.error("审批任务配置校验失败（丢弃）: %r", raw[:200])
-            return None
-        return task_config
+        return self._parse_wake_task(raw)
 
     def _run_dispatched_task(self, raw: str, task_config: Dict[str, Any]) -> None:
-        """线程池内执行派发任务；处理走完才出队（at-least-once）。"""
-        task_id = self._generate_task_id(task_config)
-        self.active_tasks.add(task_id)
-        try:
-            approval_id = task_config.get("approval_id")
-            duplicate = False
-            if self._use_redis and approval_id:
-                try:
-                    duplicate = bool(self._redis_client.get(self._record_key(approval_id)))
-                except Exception as e:  # noqa: BLE001 — 查询失败按不存在处理
-                    logger.warning("审批记录查询失败（按不存在处理）: %s", _scrub_url_text(e))
-            if duplicate:
-                # 队列是 at-least-once：崩溃/重投会重复投递同一条。记录已在
-                # 说明审批已创建，重放不能重建记录（会清掉已落的审批决策）。
-                logger.info("审批任务已存在（重复投递，跳过重建）: %s", approval_id)
-                return
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(self.handle_task(task_config))
-            finally:
-                try:
-                    loop.close()
-                except Exception as exc:
-                    logger.warning("event loop close failed during task cleanup: %s", _scrub_exception_text(exc))
-            logger.info("审批任务 %s 执行完成: %s", task_id, result)
-        except Exception as e:  # noqa: BLE001 — 单任务失败不杀消费线程
-            logger.error("审批任务 %s 执行失败: %s", task_id, _scrub_exception_text(e))
-            self._handle_task_error(task_config, e)
-        finally:
-            self.active_tasks.discard(task_id)
-            if self.is_shutdown_requested():
-                # 停机中断的任务留在队列，下次启动由消费线程重新读取。
-                with self._inflight_lock:
-                    self._inflight.discard(raw)
-            else:
-                self._finalize_consumed(raw)
+        self._run_wake_task(raw, task_config,
+                            on_confirmed=self._finalize_consumed,
+                            on_rejected=self._on_wake_rejected)
 
     def _finalize_consumed(self, raw: str) -> None:
-        """任务处理走完：LREM 出队并清 in-flight。
+        """任务处理走完：LREM 出队并清 in-flight（骨架 _ack_wake_task 别名，
+        名字保留给既有测试调用面）。
 
-        LREM 失败只导致下轮重复消费一次——``_run_dispatched_task`` 的存在性
+        LREM 失败只导致下轮重复消费一次——``_pre_submit_check`` 的存在性
         检查会让重放不覆盖已落记录的审批。
         """
-        try:
-            self._redis_client.lrem(self.queue_key, 1, raw)
-        except Exception as e:  # noqa: BLE001 — 出队失败下轮重试
-            logger.error("审批任务出队失败: %s", _scrub_url_text(e))
-        with self._inflight_lock:
-            self._inflight.discard(raw)
+        self._ack_wake_task(raw)
 
     async def handle_task(self, task_config: Dict[str, Any]) -> bool:
         """处理审批任务创建"""

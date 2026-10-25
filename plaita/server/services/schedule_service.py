@@ -35,7 +35,6 @@ created_at / updated_at / next_run_at / last_fired_at / last_enqueue_ok``
   ``sched:{schedule_id}:fired:{墙钟秒}`` 并 warning（调度循环会先自愈
   ``next_run_at``，该路径只在定义缺失且调用方未传 due 时可达）。
 """
-import itertools
 import json
 import os
 import threading
@@ -44,7 +43,6 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from croniter import croniter
 from redis import Redis
 from redis.exceptions import WatchError
 
@@ -56,6 +54,15 @@ from ..tenant_quota import release_tenant_start, try_admit_tenant_start
 from ..tenant_status import tenant_is_active
 from .. import start_dedup as _dedup
 from .base_service import BaseExtendedService
+# 2026-10-25 触发面收敛：纯时间函数/幂等键下沉 schedule_core（console
+# local_scheduler 不再为本四个符号拖进本模块整包）；此处再导出保持公开
+# import 路径守恒（既有测试与 console 兼容 import 均走本模块名）。
+from .schedule_core import (  # noqa: F401
+    build_dedup_key,
+    next_run_after,
+    normalized_due_ms,
+    validate_cron,
+)
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 from plaita.storage.base import ExecutionState
 from plaita.storage.redis import RedisExecutionStorage
@@ -132,77 +139,6 @@ def resolve_dispatch_queue_name(configured: Optional[str] = None) -> str:
     from plaita.runtime_config import resolve_dispatch_queue_name as _resolve
 
     return _resolve("schedule")
-
-# manual 键内序号：同一纳秒内的两次调用也必须拿到不同键（进程内单调）。
-_MANUAL_SEQ = itertools.count()
-
-
-# ---------- cron / 调度工具（console 后端复用） ----------
-
-def validate_cron(cron: str) -> bool:
-    """校验 cron 表达式（5 段，minute hour day month weekday）。"""
-    if not cron or not isinstance(cron, str):
-        return False
-    try:
-        croniter(cron, datetime.now())
-        return True
-    except (ValueError, KeyError) as e:
-        logger.debug("非法 cron 表达式 %r: %s", cron, _scrub_url_text(e))
-        return False
-
-
-def next_run_after(cron: str, dt: Optional[datetime] = None) -> int:
-    """cron 在 dt（默认现在，本地时区）之后的下一次触发，返回 epoch 毫秒。
-
-    注意必须走 get_next(datetime) + naive.timestamp()（按本地时区解释）；
-    get_next(float) 会把 naive 基准当 UTC，导致触发时间偏移时区。
-    """
-    it = croniter(cron, dt or datetime.now())
-    nxt = it.get_next(datetime)
-    return int(nxt.timestamp() * 1000)
-
-
-def normalized_due_ms(schedule: Dict[str, Any], due_at: Any = None) -> Optional[int]:
-    """本次到期时点的规范表示：epoch 毫秒整数，取不到返回 None。
-
-    优先取调用方显式传入的 ``due_at``（cron 侧即 ``_fire_if_due`` 判定用的
-    ``next_run_at``），其次取调度定义里的 ``next_run_at``。规范化固定为
-    ``int(float(...))``：同一 due 的等价写法（``"1791530071848"`` /
-    ``1791530071848`` / ``1791530071848.0``）必须得到同一个键。
-    """
-    for candidate in (due_at, schedule.get("next_run_at")):
-        if candidate is None or candidate == "":
-            continue
-        try:
-            return int(float(candidate))
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def build_dedup_key(
-    schedule_id: str,
-    trigger_kind: str,
-    due_ms: Optional[int],
-    wall_second: int,
-) -> str:
-    """构造派发幂等键（语义见模块 docstring）。
-
-    cron 以**本次到期时点**为基准（同一 due ⇒ 同一键）；manual 走独立且每次
-    调用唯一的键空间（不与 cron 同秒互吞）；cron 且无 due 时降级为墙钟秒。
-    """
-    if trigger_kind == "manual":
-        return "sched:{schedule_id}:manual:{ns}-{seq}".format(
-            schedule_id=schedule_id, ns=time.time_ns(), seq=next(_MANUAL_SEQ)
-        )
-    if due_ms is not None:
-        return "sched:{schedule_id}:due:{due_ms}".format(
-            schedule_id=schedule_id, due_ms=due_ms
-        )
-    return "sched:{schedule_id}:fired:{wall_second}".format(
-        schedule_id=schedule_id, wall_second=wall_second
-    )
-
 
 # queued 占位行的调用者标记（A43-04；worker 接管后按 trigger 归因落行
 # invoker=schedule 并透传 trigger——A2R44-02，归因不再被接管覆写断链）。

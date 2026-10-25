@@ -40,10 +40,13 @@ import time
 from typing import Any, Dict
 
 from .base_service import BaseExtendedService, ResumePublishError
+from .wake import WakeConsumeMixin
 from ...logger import logger
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 # 到期轮询/搬运周期（秒）。service_config.poll_interval 可覆盖。
+# 2026-10-25 起消费面共享原语（轮询壳/in-flight/线程壳/触发确认分流）收敛到
+# wake.py 骨架；常量与 _positive_poll_interval 保留给既有 import 面（同值委托）。
 DELAY_POLL_INTERVAL_SECONDS = 0.5
 # 每周期搬运/提交的最大条数（防单周期阻塞过久）。
 DELAY_CONVEY_BATCH = 200
@@ -59,26 +62,15 @@ DELAY_RETRY_BACKOFF_MAX_SECONDS = 30.0
 def _positive_poll_interval(value: Any) -> float:
     """``poll_interval`` 必须为有限正数；非正值具名拒绝（r39 A7）。
 
-    0/负值传给 ``threading.Event.wait(timeout=...)`` 会立即返回：消费线程
-    退化成忙轮询（吃满一个核并持续打 Redis）。这里不在构造期静默钳到某个
-    下限——配置写错应当 loud fail。
+    实现收敛到 wake.positive_poll_interval（2026-10-25 骨架合流）；本名保留
+    给既有 import 面。
     """
-    try:
-        interval = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "DelayService poll_interval must be a positive number of seconds "
-            f"(got {value!r})"
-        ) from exc
-    if not math.isfinite(interval) or interval <= 0:
-        raise ValueError(
-            "DelayService poll_interval must be a positive number of seconds "
-            f"(got {value!r}); 0/negative values would busy-poll"
-        )
-    return interval
+    from .wake import positive_poll_interval
+
+    return positive_poll_interval(value, service="DelayService")
 
 
-class DelayService(BaseExtendedService):
+class DelayService(WakeConsumeMixin, BaseExtendedService):
     """
     延迟服务
     负责处理延迟任务，在指定时间后触发事件
@@ -124,13 +116,8 @@ class DelayService(BaseExtendedService):
             self._retry_backoff_base,
             float((service_config or {}).get("retry_backoff_max", DELAY_RETRY_BACKOFF_MAX_SECONDS)),
         )
-        self._poll_interval = _positive_poll_interval(
-            (service_config or {}).get("poll_interval", DELAY_POLL_INTERVAL_SECONDS)
-        )
-        self._consumer_thread = None
-        # in-flight 去重（进程内）：同一 member 在处理期间不重复提交。
-        self._inflight: set = set()
-        self._inflight_lock = threading.Lock()
+        # 轮询周期/批量/in-flight/消费线程收敛到共享骨架（wake.py，2026-10-25）。
+        self._init_wake_consume(service_config)
 
     def get_service_type(self) -> str:
         """
@@ -199,7 +186,7 @@ class DelayService(BaseExtendedService):
                 self._submit_due_tasks()
             except Exception as e:
                 logger.error("延迟队列轮询失败: %s", _scrub_exception_text(e))
-            self._shutdown_event.wait(timeout=self._poll_interval)
+            self._wake_wait_tick()
 
     # ---- list → ZSET 搬运 ----
 
@@ -278,10 +265,8 @@ class DelayService(BaseExtendedService):
             rec = attempts.get(member)
             if rec and int(rec.get("next") or 0) > now_ms:
                 continue  # #35：退避窗口内，下轮再看
-            with self._inflight_lock:
-                if member in self._inflight:
-                    continue
-                self._inflight.add(member)
+            if not self._wake_inflight_try_add(member):
+                continue
             self._start_scheduled_task(member)
 
     def _load_attempts(self, members) -> Dict[str, Dict[str, Any]]:
@@ -326,46 +311,17 @@ class DelayService(BaseExtendedService):
     def _run_scheduled_task(self, member: str, task_config: Dict[str, Any]) -> None:
         """线程池内执行到期任务；**触发确认**后才 ZREM（at-least-once）。
 
-        #35：ResumePublishError（resume 发布失败）= 触发未确认——绝不出队
-        （出队即挂起执行永久失醒），走 _defer_scheduled 保留排程重试；
-        其余完成路径（含 handle_task 处理过但业务失败的 False 返回，已触发
-        错误事件兜底）按既有语义 ZREM。
+        线程壳/确认分流收敛到骨架 ``_run_wake_task``（2026-10-25）：独立
+        event loop + active_tasks 记账 + ResumePublishError → on_rejected
+        （= :meth:`_defer_scheduled`，不出队）+ 其余完成 → on_confirmed
+        （= :meth:`_finalize_scheduled`，ZREM）+ 停机中断 → 条目留 ZSET
+        下轮捡起。语义与拆分前逐项一致（#35）。
         """
-        task_id = self._generate_task_id(task_config)
-        self.active_tasks.add(task_id)
-        trigger_failed = False
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(self.handle_task(task_config))
-            finally:
-                try:
-                    loop.close()
-                except Exception as exc:
-                    logger.warning("event loop close failed during task cleanup: %s", _scrub_exception_text(exc))
-            logger.info("延迟任务 %s 执行完成: %s", task_id, result)
-        except ResumePublishError as e:
-            # #35：发布失败被上抛到这里。保留排程等重试，不出队、不触发
-            # delay_error（任务并未终态失败，重试成功还会 resume；每次抖动
-            # 都广播错误事件会把上游错误处理打成双跑）。
-            logger.error(
-                "延迟任务 %s 触发发布失败（保留排程待重试）: %s", task_id, _scrub_exception_text(e)
-            )
-            trigger_failed = True
-        except Exception as e:
-            logger.error("延迟任务 %s 执行失败: %s", task_id, _scrub_exception_text(e))
-            self._handle_task_error(task_config, e)
-        finally:
-            self.active_tasks.discard(task_id)
-            if self.is_shutdown_requested():
-                # shutdown 中断的任务留在 ZSET，下次启动由到期轮询捡起。
-                with self._inflight_lock:
-                    self._inflight.discard(member)
-            elif trigger_failed:
-                self._defer_scheduled(member)
-            else:
-                self._finalize_scheduled(member)
+        self._run_wake_task(
+            member, task_config,
+            on_confirmed=self._finalize_scheduled,
+            on_rejected=self._defer_scheduled,
+        )
 
     def _defer_scheduled(self, member: str) -> None:
         """#35：触发失败路径——条目留在排程 ZSET（不出队），登记重试态。

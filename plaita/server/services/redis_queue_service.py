@@ -76,7 +76,10 @@ class RedisQueueService(BaseExtendedService):
                 plaita:events:{type} 并尽力落盘用；None 时回退 event_bus.publish）。
                 registry/control 保持关闭（队列服务历史行为，不因拿到客户端而启用）。
         """
-        super().__init__(event_bus, redis_client=redis_client, enable_registry=False)
+        # 2026-10-25 点名闸依赖：受理门按注册键（plaita:registry:redis_queue:*）
+        # 判断本服务在不在岗——历史 enable_registry=False 会让 redis_queue 节点的
+        # 流程永远 422。无 redis_client 时基类自动关闭注册，行为不变。
+        super().__init__(event_bus, redis_client=redis_client, enable_registry=True)
         self.retry_config = retry_config or RetryConfig()
         self._connection_state = ConnectionState.DISCONNECTED
         self._active_clients: Dict[str, Any] = {}  # execution_id -> redis_client
