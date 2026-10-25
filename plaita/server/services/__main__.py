@@ -33,7 +33,7 @@ from .redis_queue_service import RedisQueueService
 from .approval_service import ApprovalService
 from .http_callback_service import HttpCallbackService
 from .wake import wake_source_classes
-from ...core.url_redaction import _scrub_url_text
+from ...core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 
 # 服务类映射
@@ -133,7 +133,7 @@ def main():
                     redis_client=redis_client,
                 ))
         except ValueError as exc:
-            logger.error("wake source 解析失败: %s", exc)
+            logger.error("wake source 解析失败: %s", _scrub_exception_text(exc))
             sys.exit(2)
     else:
         service_class = SERVICE_CLASSES[args.service_type]

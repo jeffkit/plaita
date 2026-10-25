@@ -238,7 +238,8 @@ def warn_local_schedules_inactive(store) -> int:
         logger.warning(
             "集群档未启动本地调度循环：SQLite 中仍有 %d 条本地单机档调度，"
             "它们不会执行、也不在集群调度列表中显示。需要继续运行请切回本地"
-            "单机档，或在集群档按相同 cron 重建后删除本地条目。",
+            "单机档，或调用 POST /api/schedules/import-local 一键迁入集群"
+            "（幂等，本地条目原地停用）。",
             len(rows),
         )
     return len(rows)

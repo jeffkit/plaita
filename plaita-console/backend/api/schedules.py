@@ -131,6 +131,12 @@ class ScheduleCreateRequest(StrictRequestModel):
     created_by: str = Field("", description="创建人")
 
 
+class ImportLocalSchedulesRequest(StrictRequestModel):
+    """「导入本地定时」入参（预留扩展位；当前无必填项）。"""
+
+    enabled_only: bool = Field(True, description="只迁移启用的本地条目（默认；停用条目视为已处理/手动搁置）")
+
+
 class ScheduleUpdateRequest(StrictRequestModel):
     name: Optional[str] = None
     version: Optional[str] = None
@@ -478,6 +484,124 @@ def create(req: ScheduleCreateRequest, request: Request, redis: Redis = Depends(
     _audit(request, "schedule.create", schedule["schedule_id"],
            _schedule_detail(schedule), tenant_id=tenant)
     return _view(schedule)
+
+
+@router.post("/schedules/import-local")
+def import_local_schedules(
+    request: Request,
+    redis: Redis = Depends(get_redis_or_none),
+    body: ImportLocalSchedulesRequest = None,
+):
+    """「导入本地定时」（迁移刀，2026-10-25）：把 SQLite 里的本地单机档调度
+    迁入集群 Redis（``plaita:schedules``），消掉部署文档「切集群后请按相同
+    cron 在集群档重建后删除本地条目」的手工账单。
+
+    语义：
+    - **集群档专用**：本地单机档（redis 不可达）无需迁移——本地调度本就在
+      本进程执行，409 可操作错误指路；
+    - 只处理**当前租户**的条目（平台管理员代迁其他租户走逐租户调用）；
+    - 逐条 ``hsetnx`` 写入（撞行 = 已导入过，幂等跳过不覆盖）；保留原
+      ``schedule_id`` 可追溯；``next_run_at`` 按导入时刻重算（跨机时钟差
+      安全），``runtime`` 与手动 start 同源盖章（#300 池路由）；
+    - 写入成功 → **原地停用**本地条目（enabled=False，保留行与触发历史——
+      切回本地档仍可见，不会静默丢排班）；
+    - 流程不存在/cron 非法的条目跳过并逐条点名（不挡整批）；
+    - 触发历史（``local_schedule_fires``）不迁移（历史留在本地表，切回可见）。
+    """
+    tenant = tenant_scope(request, required=True)
+    if (local := _get_local(request)) is not None or redis is None:
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail(
+                "local_mode",
+                "本地单机档无需导入：本地调度就在本进程执行。请接上 Redis"
+                "（重启为集群档）后再调用本端点",
+            ),
+        )
+    body = body or ImportLocalSchedulesRequest()
+    store = flow_store.get_flow_store()
+
+    try:
+        from ..services import schedule_store as local_schedule_store
+    except ImportError:
+        from services import schedule_store as local_schedule_store  # type: ignore
+
+    rows = local_schedule_store.list_schedules(store, tenant_id=tenant)
+    candidates = [r for r in rows if r.get("enabled") or not body.enabled_only]
+    imported: List[str] = []
+    skipped_existing: List[str] = []
+    skipped_invalid: List[dict] = []
+    for row in candidates:
+        sid = row["schedule_id"]
+        if body.enabled_only and not row.get("enabled"):
+            continue
+        if not validate_cron(row.get("cron") or ""):
+            skipped_invalid.append({"schedule_id": sid, "reason": "invalid_cron"})
+            continue
+        try:
+            _validate_flow(row["flow_id"], row.get("version") or None, tenant_id=tenant)
+        except HTTPException as e:
+            skipped_invalid.append({
+                "schedule_id": sid,
+                "reason": "flow_unavailable",
+                "detail": (e.detail or {}).get("message") if isinstance(e.detail, dict) else str(e.detail),
+            })
+            continue
+        record = {
+            # 保留原 id：撞行（hsetnx 失败）= 已导入过 → 幂等跳过，不覆盖
+            "schedule_id": sid,
+            "tenant_id": tenant,
+            "name": row.get("name") or sid,
+            "flow_id": row["flow_id"],
+            "version": row.get("version") or None,
+            "cron": row["cron"],
+            "params": row.get("params") or {},
+            "enabled": bool(row.get("enabled")),
+            "created_at": row.get("created_at") or _now_iso(),
+            "updated_at": _now_iso(),
+            "created_by": row.get("created_by") or "",
+            # 导入时刻重算（本地行的旧 next_run_at 可能已过期；服务侧本有
+            # 自愈兜底，这里给明确值避免首扫竞态——与 create 同口径）
+            "next_run_at": str(next_run_after(row["cron"])) if row.get("enabled") else "",
+            "runtime": _resolve_flow_runtime(
+                row["flow_id"], row.get("version") or None, tenant
+            ),
+        }
+        if redis.hsetnx(
+            SCHEDULES_KEY, sid, json.dumps(record, ensure_ascii=False)
+        ):
+            imported.append(sid)
+            # 原地停用（保行保历史，幂等重跑只看 enabled 行）；失败只告警——
+            # 集群侧已启用同 id 调度，重跑会走 skipped_existing 收敛
+            try:
+                disable = dict(row)
+                disable["enabled"] = False
+                disable["next_run_at"] = ""
+                local_schedule_store.update_schedule(store, sid, disable, tenant_id=tenant)
+            except Exception as e:  # noqa: BLE001 — 停用失败不回滚导入
+                logger.warning(
+                    "本地调度 %s 已导入集群但停用失败（重跑本端点会收敛）: %s", sid, e
+                )
+        else:
+            skipped_existing.append(sid)
+    _audit(
+        request, "schedule.import_local",
+        ",".join(imported)[:120] or "-",
+        {
+            "imported": imported,
+            "skipped_existing": skipped_existing,
+            "skipped_invalid": skipped_invalid,
+            "candidates": len(candidates),
+        },
+        tenant_id=tenant,
+    )
+    return {
+        "imported": imported,
+        "imported_count": len(imported),
+        "skipped_existing": skipped_existing,
+        "skipped_invalid": skipped_invalid,
+        "candidates": len(candidates),
+    }
 
 
 @router.get("/schedules/preview")
