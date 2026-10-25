@@ -223,6 +223,13 @@ class TestTierTable:
         assert profile_for_mode(ExecutionMode.DISTRIBUTED) == "managed"
         assert profile_for_mode("distributed") == "managed"
 
+    def test_custom_profile_rejects_unknown_token(self):
+        """fail-closed 守恒（旧 #331 口径）：自定义 token 集合含未知值具名拒——
+        防拼写错误静默折算成 inline 放行。"""
+        with pytest.raises(ValueError) as ei:
+            normalize_profile({"network", "service:approval"})
+        assert "service:approval" in str(ei.value)
+
     def test_unknown_profile_is_named_error(self):
         with pytest.raises(ValueError) as ei:
             normalize_profile("staging")

@@ -190,6 +190,15 @@ def normalize_profile(profile: ProfileSpec) -> str:
             f"旧名兼容: {sorted(_LEGACY_PROFILE_TIER)}）"
         )
     tokens = frozenset(profile)
+    unknown = sorted(t for t in tokens if not (isinstance(t, str) and t in LEGACY_CAPABILITY_TOKENS))
+    if unknown:
+        # fail-closed（旧 #331 口径守恒）：自定义环境里的未知 token 具名拒，
+        # 防拼写错误静默折算成 inline 放行。
+        raise ValueError(
+            f"自定义 profile 含未知 token {unknown}（旧词表已退役，合法值: "
+            f"{sorted(LEGACY_CAPABILITY_TOKENS)}；两语义下请直接用台阶名 "
+            f"{list(EXECUTION_TIERS)}）"
+        )
     return legacy_tokens_to_tier(tokens)
 
 
