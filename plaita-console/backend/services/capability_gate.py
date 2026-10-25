@@ -22,6 +22,13 @@ publish 在状态机 draft→published **之前**；start 在幂等认领/配额
 占位行/入队**之前**。不支持即拒绝，绝不产生「queued 行 + 永不执行」。
 
 本模块不做 HTTP（无 FastAPI 依赖），API 层负责异常→响应映射。
+
+plaita 队列服务现场盘点（2026-10-25「点名」）：:func:`queue_service_alive`
+——``managed:queue`` 台阶的环境侧不再"自报档位/假设在岗"，受理/发布时对
+集群档**真查**服务注册表（``plaita:registry:{service_type}:*``，TTL 30s
+心跳 10s——有未过期键即活着）；本地档无注册表，静态判不可用。失败面
+fail-open + WARNING（与 #300 池清单缺失同风格）：查不动时不拦流程，
+但「查不动」本身必须可观测——搁浅风险转告警链，不静默。
 """
 from __future__ import annotations
 
@@ -37,6 +44,41 @@ from plaita.server.capability import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: 台阶 → 服务注册表里的 service_type（节点自述的唤醒依赖 ↔ 守护进程身份）。
+#: wake 统一守护进程按 source 各自注册（registry 按各自 service_type 写键），
+#: 单进程旧形态与 wake 合并形态在注册面上不可区分——点名语义一致。
+TIER_SERVICE_TYPES: Dict[str, tuple] = {
+    "managed:queue": ("delay", "approval", "http_callback", "redis_queue", "kafka_queue"),
+}
+
+#: fail-open 的兜底口径：注册表查询失败（Redis 抖动等）时按放行处理并告警。
+QUEUE_SERVICE_PROBE_FAIL_OPEN_WARNING = (
+    "queue_service_probe_unavailable：队列服务注册表查询失败，点名按放行处理"
+    "（fail-open）——搁浅风险转告警链，请检查 Redis 连接"
+)
+
+
+def queue_service_alive(redis: Any, service_type: str) -> Optional[bool]:
+    """点名：``service_type`` 岗上有没有活着的实例（注册表有未过期键）。
+
+    返回 ``True``（有人）/ ``False``（没人）/ ``None``（查不动——fail-open，
+    调用方按放行 + 告警处理）。注册键 TTL 30s 心跳 10s：进程死了键最多
+    30s 后消失，点名结果至多滞后一个 TTL。
+    """
+    if redis is None:
+        return False  # 本地档：无注册表，岗位必空（静态判）
+    try:
+        keys = list(
+            redis.scan_iter(f"plaita:registry:{service_type}:*", count=100)
+        )
+        return len(keys) > 0
+    except Exception as e:  # noqa: BLE001 — 查不动 fail-open，转告警链
+        logger.warning(
+            "%s：service_type=%s（%s）",
+            QUEUE_SERVICE_PROBE_FAIL_OPEN_WARNING, service_type, type(e).__name__,
+        )
+        return None
 
 #: 兜底路径的具名 WARNING 片段（测试断言 + 运维检索锚点）。
 POOL_MANIFEST_MISSING_WARNING = "runtime pool 无能力清单"
