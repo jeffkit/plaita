@@ -98,7 +98,7 @@ def test_cluster_start_delay_rejected_when_service_absent(env):
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
     assert detail["code"] == "queue_service_absent"
-    assert detail["node_type"] == "delay"
+    assert detail["service_type"] == "delay"  # 两级模型：唤醒源= wake_service 接线
     assert "无人消费" in detail["message"]
 
 

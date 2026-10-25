@@ -485,15 +485,18 @@ def _gate_queue_service_presence(redis: Any, version_row: Any, *, flow_id: Any) 
             flow_id, type(exc).__name__,
         )
         return
+    # 两级模型（managed:queue 子档废除，tier 分支 fb36f085）：唤醒源=节点
+    # wake_service 接线字段；未带字段的历史定义按内置队列族名单兜底。
     needed: dict = {}
     for node in flow.nodes:
-        tier = getattr(node, "execution_tier", None) or (
-            "managed:queue" if getattr(node, "is_suspending", False) and
-            getattr(node, "node_type", None) in ("delay", "approval", "http_callback",
-                                                 "redis_queue", "kafka_queue") else None
+        node_type = str(getattr(node, "node_type", "?"))
+        svc = getattr(node, "wake_service", None) or (
+            node_type if node_type in (
+                "delay", "approval", "http_callback", "redis_queue", "kafka_queue"
+            ) else None
         )
-        if tier == "managed:queue":
-            needed.setdefault(str(getattr(node, "node_type", "?")), node)
+        if svc:
+            needed.setdefault(svc, node)
     if not needed:
         return
     for node_type in sorted(needed):
