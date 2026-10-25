@@ -99,10 +99,11 @@ def compile_flow(
     与 ``flow_from_source`` / ``FlowBuilder.build`` 走同一 ``validate_flow_ir`` 门，
     避免 Agent 自纠循环把「仅 AST 通过」当成编译成功。
 
-    ``profile``（plaita#331 作者期信号）：给内置执行档名（normal/generator/
-    distributed/local）即附非致命 ``execution_requirements``——**只读报告，
-    不改 ``ok``**（拒绝面在执行入口 / publish/start，作者期只提示）。未传
-    profile 时结果形状与历史逐字节一致。
+    ``profile``（plaita#331 作者期信号）：给目标环境（台阶名 inline/managed/
+    managed:queue，或旧档名 normal/generator/distributed/local——归一化兼容）即附
+    非致命 ``execution_requirements``——**只读报告，不改 ``ok``**（拒绝面在执行
+    入口 / publish/start，作者期只提示）。未传 profile 时结果形状与历史逐字节
+    一致。
     """
     try:
         ir = compile_source(source, flow_id=flow_id, **opts)
@@ -194,11 +195,12 @@ def _stable_error_type(exc: Exception) -> str:
 def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, Any]]:
     """List registered node types for Planner prompts / MCP introspection.
 
-    plaita#331：行内附作者期信号 ``requires``（声明的宿主能力 token，数据源 =
-    registry 声明面，list 时**不**重扫源码——A2 r61 评审 §4）与 ``suspends``
-    （is_suspending）。
+    plaita#331：行内附作者期信号 ``tier``（执行台阶，数据源 = registry 声明面，
+    list 时**不**重扫源码——A2 r61 评审 §4）与 ``suspends``（is_suspending，
+    台阶派生值）。台阶化 2026-10-25：旧 ``requires``（token 列表）退役为
+    ``tier`` 单值（inline/managed/managed:queue）。
     """
-    from plaita.node.capabilities import declared_requirements
+    from plaita.node.capabilities import declared_tier
 
     registry = get_default_registry()
     if discover_plugins:
@@ -212,9 +214,10 @@ def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, Any]]:
                 "node_type": node_type,
                 "placeholder": placeholder,
                 "node_name": getattr(cls, "node_name", node_type) if cls else node_type,
-                # plaita#331：requires/suspends 让作者在选节点时即看到宿主要求
-                # （suspend:root/event_bus/queue 族在 normal 下不可执行）。
-                "requires": sorted(declared_requirements(cls)) if cls else [],
+                # plaita#331：tier/suspends 让作者在选节点时即看到执行要求
+                # （managed 族在 inline 直跑下不可执行；managed:queue 族还
+                # 需要队列唤醒服务在场）。
+                "tier": declared_tier(cls) if cls else "inline",
                 "suspends": getattr(cls, "is_suspending", False) is True if cls else False,
             }
         )

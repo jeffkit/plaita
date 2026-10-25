@@ -406,25 +406,26 @@ class TestMcpServerTools(unittest.TestCase):
         self.assertEqual(data["flow_id"], "add_numbers")
 
     def test_flow_compile_profile_report_is_nonfatal_and_sparse(self):
-        """plaita#331：profile 给定 → execution_requirements（含挂起节点即
+        """plaita#331：profile 给定 → execution_requirements（含托管节点即
         missing 非空）且 ok 不变（作者期非致命）；不给 → 载荷无新键（形状
-        向后兼容，A2 r61 评审 §4）。"""
+        向后兼容，A2 r61 评审 §4）。台阶化 2026-10-25：missing = 台阶名。"""
         from plaita_ai.mcp.server import flow_compile
         legacy = json.loads(flow_compile(SIMPLE_FLOW))
         self.assertNotIn("execution_requirements", legacy)
         newer = json.loads(flow_compile(EVENT_FLOW, profile="normal"))
         self.assertTrue(newer["ok"])
         self.assertEqual(
-            newer["execution_requirements"]["missing"], ["event_bus", "suspend:root"]
+            newer["execution_requirements"]["missing"], ["managed"]
         )
 
-    def test_flow_list_nodes_rows_carry_requires_suspends(self):
-        """plaita#331：行内 requires/suspends（数据源 = registry 声明面）。"""
+    def test_flow_list_nodes_rows_carry_tier_suspends(self):
+        """plaita#331：行内 tier/suspends（数据源 = registry 声明面；台阶化
+        2026-10-25，旧 requires 键退役）。"""
         from plaita_ai.mcp.server import flow_list_nodes
         rows = {r["node_type"]: r for r in json.loads(flow_list_nodes())}
-        self.assertEqual(rows["event"]["requires"], ["event_bus", "suspend:root"])
+        self.assertEqual(rows["event"]["tier"], "managed")
         self.assertIs(rows["event"]["suspends"], True)
-        self.assertEqual(rows["start"]["requires"], [])
+        self.assertEqual(rows["start"]["tier"], "inline")
         self.assertIs(rows["start"]["suspends"], False)
 
     def test_flow_run_valid(self):

@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Type
 
 from .assignment import Assignment, AssignmentError
 from .basic import Node
-from .capabilities import declared_requirements, validate_execution_contract
+from .capabilities import declared_tier, validate_execution_contract
 from .child import InlineFlow, ReferenceFlow
 from .code import CodeNode
 from .concurrent import Parallel
@@ -166,17 +166,17 @@ class NodeRegistry:
     def list_types(self) -> List[str]:
         return list(self._nodes.keys())
 
-    def capability_matrix(self) -> Dict[str, List[str]]:
-        """注册面的执行能力矩阵（plaita#331 ⑤）：``node_type → sorted(声明 token)``。
+    def capability_matrix(self) -> Dict[str, str]:
+        """注册面的执行台阶矩阵（plaita#331 ⑤ → 台阶化 2026-10-25）：``node_type → 台阶``。
 
-        **空声明的节点同样入列**——差分断言（注册表新增 node_type 而矩阵未变
-        → ``added`` 非空 → 红，A2 r61 评审 §1.3 承重墙）靠全集覆盖才闭合。
-        治理互锁三处联动：本矩阵（生成源 :func:`shipped_capability_matrix`）↔
+        **所有节点同样入列**（含 inline）——差分断言（注册表新增 node_type 而
+        矩阵未变 → ``added`` 非空 → 红，A2 r61 评审 §1.3 承重墙）靠全集覆盖才
+        闭合。治理互锁三处联动：本矩阵（生成源 :func:`shipped_capability_matrix`）↔
         账本 ``docs/governance/architecture.yaml`` ``gov.capability_matrix`` ↔
         大仓根 ``docs/DOC_ASSERTIONS.yml`` ``gov/capability-matrix`` expected。
         """
         return {
-            node_type: sorted(declared_requirements(cls))
+            node_type: declared_tier(cls)
             for node_type, cls in sorted(self._nodes.items())
         }
 

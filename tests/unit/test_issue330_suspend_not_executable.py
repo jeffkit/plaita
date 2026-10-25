@@ -387,30 +387,33 @@ class TestRegistrationInvariant:
         assert "event_bas" in str(ei.value)
 
     def test_declared_suspending_node_registers(self, ):
+        # 台阶化 2026-10-25：旧 token 声明经 legacy 映射折算（注册闸幂等归一化）。
         _DeclaredSuspend.execution_requirements = ("suspend:root", "event_bus")
         reg = NodeRegistry()
         reg.register(_DeclaredSuspend)
         assert reg.get("r89_declared_suspend") is _DeclaredSuspend
 
     def test_builtin_suspending_family_declares(self):
-        """内置挂起族已声明（词表声明半边）：非空且含 suspend token。"""
+        """内置挂起族已声明（台阶化 2026-10-25）：execution_tier ≥ managed。"""
         from plaita.node import get_default_registry
-        from plaita.node.capabilities import SUSPEND_CAPABILITY_TOKENS
+        from plaita.core.capabilities import tier_rank
 
         registry = get_default_registry()
         for node_type in ("event",):
             cls = registry.get(node_type)
-            reqs = tuple(cls.execution_requirements)
-            assert reqs, f"{node_type} 缺 execution_requirements"
-            assert set(reqs) & SUSPEND_CAPABILITY_TOKENS
+            assert tier_rank(cls.execution_tier) >= 1, f"{node_type} 缺托管台阶"
 
     def test_extended_family_declares(self):
-        for cls in (ApprovalNode, DelayNode):
-            reqs = tuple(cls.execution_requirements)
-            assert reqs, f"{cls.node_type} 缺 execution_requirements"
+        # 两级模型（owner 第二轮裁决）：队列族台阶=managed，唤醒源在
+        # wake_service 字段（睡死坑防护移交点名闸）。
+        assert ApprovalNode.execution_tier == "managed"
+        assert DelayNode.execution_tier == "managed"
+        assert ApprovalNode.wake_service == "approval"
+        assert DelayNode.wake_service == "delay"
 
     def test_side_effect_family_declares(self):
-        """副作用族代表声明 network/sandbox token（HTTP/Redis/Code）。
+        """副作用族（HTTP/Redis/Code）台阶化后归 inline：出网/沙箱白名单是
+        运行期事实/环境配置闸，不设执行台阶。
 
         redis/code 不在默认 registry（code 是 opt-in、redis 非内置），按类断言。
         """
@@ -419,9 +422,9 @@ class TestRegistrationInvariant:
         from plaita.node.redis import RedisNode
 
         registry = get_default_registry()
-        assert registry.get("http").execution_requirements == ("network",)
-        assert RedisNode.execution_requirements == ("network",)
-        assert CodeNode.execution_requirements == ("sandbox",)
+        assert registry.get("http").execution_tier == "inline"
+        assert RedisNode.execution_tier == "inline"
+        assert CodeNode.execution_tier == "inline"
 
     def test_plugin_discovery_records_load_error_for_contract_violation(self, monkeypatch):
         """entry_points 插件路径：契约违规记入 _load_errors（#98 失败现场形制），

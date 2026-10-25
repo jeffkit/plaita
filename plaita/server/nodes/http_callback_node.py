@@ -25,6 +25,10 @@ class HttpCallbackNode(BaseExtendedNode):
 
     node_type: ClassVar[str] = "http_callback"
     node_name: ClassVar[str] = "HTTP回调节点"
+    # 回调等待走「队列 + http_callback_service 接线」机制（服务不在场则
+    # 回调登记永不发生）。两级模型：台阶=managed；唤醒源接线 → 点名。
+    execution_tier: ClassVar[str] = "managed"
+    wake_service: ClassVar[str] = "http_callback"
 
     # 运行时契约：固定订阅 http_callback 事件。历史上 event_type 必填而用户值
     # 必被 __init__ 覆盖（伪必填地雷，2026-09 表单评审）；现在由 _normalize_enums

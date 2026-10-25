@@ -80,13 +80,14 @@ def flow_compile(source: str, flow_id: Optional[str] = None, profile: Optional[s
     Args:
         source: Complete @flow source string (may include @childflow functions).
         flow_id: Optional main flow function name when multiple @flow defs exist.
-        profile: Optional execution profile name (normal/generator/distributed/
-            local). When given, the result carries a NON-FATAL
+        profile: Optional target environment: tier name (inline/managed/
+            managed:queue) or legacy profile name (normal/generator/distributed/
+            local, normalized). When given, the result carries a NON-FATAL
             ``execution_requirements`` report — ``{profile, required, missing}``
-            tokens the flow needs (recursively, incl. child/parallel/reference
-            flows) that the target host profile lacks. ``ok`` is unchanged:
-            a flow needing suspend/approval capabilities still compiles, but
-            you should route it to the distributed runtime (plaita#331).
+            execution tiers the flow needs (recursively, incl. child/parallel/
+            reference flows) that the target environment lacks. ``ok`` is
+            unchanged: a flow needing suspend/approval capabilities still
+            compiles, but you should route it to the managed runtime (plaita#331).
 
     Returns:
         JSON: {ok, flow_id, ir, errors:[{line, message}], execution_requirements?}
@@ -178,13 +179,14 @@ def flow_list_nodes() -> str:
 
     Custom nodes appear as UPPERCASE placeholders in @flow (e.g. llm -> LLM).
 
-    Each row also carries authoring-time host requirements (plaita#331):
-    ``requires`` = declared capability tokens (suspend:root / suspend:nested /
-    event_bus / queue / sandbox / network), ``suspends`` = whether the node
-    parks the flow (needs the distributed runtime to resume).
+    Each row also carries authoring-time execution requirements (plaita#331,
+    tier model 2026-10-25):
+    ``tier`` = execution tier (inline / managed / managed:queue; managed+ parks
+    the flow and needs the managed runtime, managed:queue additionally needs
+    the queue wakeup services), ``suspends`` = whether the node parks the flow.
 
     Returns:
-        JSON array: [{node_type, placeholder, node_name, requires, suspends}, ...]
+        JSON array: [{node_type, placeholder, node_name, tier, suspends}, ...]
     """
     return result_json(list_node_types())
 

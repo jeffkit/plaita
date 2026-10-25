@@ -26,6 +26,11 @@ class ApprovalNode(BaseExtendedNode):
 
     node_type: ClassVar[str] = "approval"
     node_name: ClassVar[str] = "审批节点"
+    # 审批走「队列 + approval_service 登记/决策转发」机制
+    # （plaita:approval:queue，服务不在场则待办永不创建、挂起永不唤醒）。
+    # 两级模型：台阶=managed；唤醒源接线 → 受理门点名 approval_service。
+    execution_tier: ClassVar[str] = "managed"
+    wake_service: ClassVar[str] = "approval"
 
     # 运行时契约：审批节点固定订阅 approval_decision 事件。历史上 event_type
     # 必填而用户值必被 __init__ 覆盖（伪必填地雷，2026-09 表单评审）；现在由

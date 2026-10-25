@@ -19,10 +19,11 @@ class DelayNode(BaseExtendedNode):
 
     node_type: ClassVar[str] = "delay"
     node_name: ClassVar[str] = "延迟节点"
-    # delay 需要「持久化队列 + 延迟排程」基础设施（delay_service：list→ZSET
-    # + 到期消费线程搬运并经事件总线唤醒）——queue token 定义句见
-    # plaita/node/capabilities.py（「不只是任务队列」防灰区）。
-    execution_requirements: ClassVar[tuple] = ("suspend:root", "event_bus", "queue")
+    # delay 挂起后靠「持久化队列 + 延迟排程」唤醒（delay_service：list→ZSET
+    # + 到期消费线程搬运并经事件总线唤醒）。两级模型：台阶=managed（托管面）；
+    # 唤醒源是接线元数据——受理门据此点名 delay_service 在不在岗。
+    execution_tier: ClassVar[str] = "managed"
+    wake_service: ClassVar[str] = "delay"
 
     # 延迟节点特有配置
     delay_seconds: Union[int, float, str] = Field(description="延迟秒数，支持变量引用")
