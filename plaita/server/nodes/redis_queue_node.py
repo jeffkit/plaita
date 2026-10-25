@@ -17,8 +17,8 @@ class RedisQueueNode(BaseExtendedNode):
     """
 
     node_type: ClassVar[str] = "redis_queue"
-    # 入队/消费走持久化队列 + 事件总线唤醒恢复。
-    execution_requirements: ClassVar[tuple] = ("suspend:root", "event_bus", "queue")
+    # 入队/消费走持久化队列 + redis_queue_service 唤醒恢复——队列服务族。
+    execution_tier: ClassVar[str] = "managed:queue"
     node_name: ClassVar[str] = "Redis队列节点"
 
     # 运行时契约：固定订阅 redis_message 事件。历史上 event_type 必填而用户值

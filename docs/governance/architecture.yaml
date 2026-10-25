@@ -46,35 +46,36 @@ gov:
   # 与 doctor 断言的字符串字面量比对口径一致）。
   review_by: '2027-01-31'
 
-  # 自带注册面的执行能力矩阵（plaita#331 ⑤；词表见
-  # docs/governance/execution-capabilities.md §1，5 token 封闭集）。
+  # 自带注册面的执行台阶矩阵（plaita#331 ⑤ → 台阶化 2026-10-25；两语义模型见
+  # docs/governance/execution-capabilities.md，三值台阶全序
+  # inline < managed < managed:queue；旧 5 token 词表退役）。
   # 事实源是注册表本身（plaita/node/capabilities.py
   # shipped_capability_matrix：内置 + 本仓 pyproject 声明的 plaita.nodes
-  # entry points + opt-in code）；**空声明节点同样入列**——差分断言
+  # entry points + opt-in code）；**inline 节点同样入列**——差分断言
   # 「注册表新增 node_type 而矩阵未变 → added 非空 → 红」靠全集覆盖。
   # 生成/校验：`python scripts/export_capability_matrix.py [--check|--json]`。
   capability_matrix:
-    approval: [event_bus, suspend:root]
-    assignment: []
-    case: []
-    child: []
-    code: [sandbox]
-    delay: [event_bus, queue, suspend:root]
-    end: []
-    event: [event_bus, suspend:root]
-    filter: []
-    find: []
-    http: [network]
-    http_callback: [event_bus, suspend:root]
-    if: []
-    kafka_queue: [event_bus, queue, suspend:root]
-    loop: []
-    map: []
-    mock: []
-    parallel: []
-    redis_queue: [event_bus, queue, suspend:root]
-    reduce: []
-    reference: []
-    start: []
-    switch: []
-    while: []
+    approval: managed:queue
+    assignment: inline
+    case: inline
+    child: inline
+    code: inline
+    delay: managed:queue
+    end: inline
+    event: managed
+    filter: inline
+    find: inline
+    http: inline
+    http_callback: managed:queue
+    if: inline
+    kafka_queue: managed:queue
+    loop: inline
+    map: inline
+    mock: inline
+    parallel: inline
+    redis_queue: managed:queue
+    reduce: inline
+    reference: inline
+    start: inline
+    switch: inline
+    while: inline

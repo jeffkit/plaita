@@ -80,13 +80,20 @@ class Node(BaseModel):
     # 是否为"挂起型"节点: 执行后暂停流程, 等待外部 resume (如 EventNode)。
     # 内核 DistributedStrategy 据此走 suspend 分支并调 resume(), 不再 isinstance
     # 具体节点类型, 从而切断 core -> plaita.node.event_node 的反向依赖。
+    # 2026-10-25 起为**派生值**（execution_tier ≠ inline 即挂起），节点类不再
+    # 手写——两处手写同一事实曾需注册不变量缝补（#330），一致改靠构造保证。
     is_suspending: ClassVar[bool] = False
-    # 执行能力声明（plaita#330 §4 / #331 前半）：节点需要哪些**宿主基础设施**
-    # 才能完成其功能面。空元组 = 纯计算/控制流（任何宿主可跑）。挂起族必须
-    # 至少声明一个 suspend token + 所需宿主（如 ("suspend:root", "event_bus")）；
-    # 词表与注册期不变量见 plaita.node.capabilities（is_suspending=True 且本值
-    # 为空的节点注册即红）。与 dry_run_safe（试跑安全三态）是同一问题的两个
-    # 投影，关系裁决见 docs/governance/execution-capabilities.md。
+    # 执行台阶声明（两语义模型，owner 裁决 2026-10-25）：全序
+    #   inline < managed < managed:queue（本体见 plaita.core.capabilities）
+    #   inline（默认）—— 任何宿主可跑：纯计算/控制流/出网/本机子进程；
+    #   managed        —— 会挂起、靠事件总线唤醒（event / hitl_await 等）；
+    #   managed:queue  —— 挂起后靠持久队列+配套唤醒服务（delay/approval/
+    #                     http_callback/queue 族）唤醒。
+    # 台阶是节点侧唯一声明：is_suspending 由 __init_subclass__ 据此推导；
+    # 只写 is_suspending=True 不写台阶 = 注册闸具名拒（plaita.node.capabilities）。
+    execution_tier: ClassVar[Optional[str]] = None
+    # 旧 token 声明（#330/#331 前半，已退役）：迁移兼容——未声明 execution_tier
+    # 时按 legacy_tokens_to_tier 折算（第三方插件不破）；新代码一律写台阶。
     execution_requirements: ClassVar[tuple] = ()
     # dry-run 能力声明（plaita#190）：console 试跑只放行「显式声明安全」的
     # 内置节点。三态语义：
@@ -104,6 +111,19 @@ class Node(BaseModel):
     LEGACY_KEYS: ClassVar[FrozenSet[str]] = frozenset(
         {"timeoutHandler", "timeout_handler", "errorHandler", "error_handler"}
     )
+
+    def __init_subclass__(cls, **kwargs):
+        """执行台阶归一化（单一真相）：显式台阶 > 旧 token 折算；推导 is_suspending。
+
+        冲突（只写 is_suspending=True 不写台阶）不在此改写语义——留给注册闸按
+        旧口径具名拒。见 plaita.node.capabilities.normalize_execution_tier。
+        """
+        super().__init_subclass__(**kwargs)
+        # 惰性导入：注册面模块与节点模块互引会成环（capabilities 在注册期
+        # 反查 NodeRegistry）；类创建期双方均已可导入。
+        from plaita.node.capabilities import normalize_execution_tier
+
+        normalize_execution_tier(cls)
 
     # Instance fields
     id: str = Field(..., description="Node identifier")

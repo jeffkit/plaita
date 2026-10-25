@@ -1231,8 +1231,9 @@ class CodeNode(Node):
 
     node_type: ClassVar[str] = "code"
     dry_run_safe: ClassVar[bool] = False
-    # 任意代码执行须在宿主沙箱档位内跑（sandbox_backend 白名单体系，plaita#22/#29）。
-    execution_requirements: ClassVar[tuple] = ("sandbox",)
+    # 任意代码执行受沙箱白名单体系约束（PLAITA_SANDBOX_ALLOWED_BACKENDS，
+    # plaita#22/#29，解析期 fail-closed）——那是环境配置闸，不是执行台阶。
+    execution_tier: ClassVar[str] = "inline"
     node_name: ClassVar[str] = "代码"
 
     language: Optional[str] = None

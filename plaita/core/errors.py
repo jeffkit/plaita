@@ -379,9 +379,9 @@ class SuspendNotExecutableError(FlowExecutionException):
 
     两个抛出面共用同一类与同一 ``error_type`` 字符串（#317 对拍锚不变）：
 
-    - **入口静态拒绝**（plaita#331，``stage="entry"``）：执行入口按
-      ``required_capabilities(flow, recursive=True)`` × 目标 profile 能力集判定，
-      park/resume 族 token 缺失即在**任何节点执行前**拒绝；错误体多出稀疏键
+    - **入口静态拒绝**（plaita#331，``stage="entry"``）：执行入口按 flow 执行
+      台阶闭包 × 宿主环境台阶判定（台阶模型 2026-10-25），托管族节点在无托管
+      能力的环境即在**任何节点执行前**拒绝；错误体多出稀疏键
       ``profile / required / missing``。NodeRunner 的 execute 前兜底断言
       （``stage="runner"``）同形——它本不应触达，触达即入口漏了（WARNING）。
     - **运行期根出口呈现**（plaita#330，``stage="runtime"``）：闸点
@@ -463,13 +463,13 @@ class SuspendNotExecutableError(FlowExecutionException):
 
 
 class ExecutionProfileError(FlowExecutionException):
-    """flow 的执行要求闭包里**非挂起族** token 不被目标 profile 满足（plaita#331）。
+    """flow 的执行台阶闭包里**非挂起族**要求不被目标环境满足（plaita#331，台阶化 2026-10-25）。
 
     与 :class:`SuspendNotExecutableError` 同为执行入口的拒绝面、同一判定函数
-    （``validate_for_profile``）产出，按缺失 token 的族分流：缺 park/resume 族
-    （suspend:*/event_bus/queue）且存在挂起节点 → ``SuspendNotExecutableError``
-    （#317 机器判据）；只缺 network/sandbox → 本类。内置三 profile 均含这两
-    token，本类只在自定义 profile（console 池 profile 等）上出现。
+    （``validate_for_profile``）产出。台阶模型下托管族缺失统一走
+    ``SuspendNotExecutableError``（#317 机器判据）；本类保留给非台阶维度
+    （自定义环境要求等），内置三档环境（inline/managed/managed:queue）下
+    当前不可达。
 
     错误体：``{error_type, message, profile, required, missing, flow_id, sites, fix}``。
     """

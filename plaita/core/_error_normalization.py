@@ -57,7 +57,10 @@ def surface_root_suspension(carrier: FlowSuspendedCarrier) -> SuspendNotExecutab
     from plaita.core.strategies import _scope_gate_blocker
 
     node = carrier.node
-    declared = tuple(getattr(node, "execution_requirements", ()) or ())
+    declared = (
+        getattr(node, "execution_tier", None) is not None
+        or tuple(getattr(node, "execution_requirements", ()) or ())
+    )
     cause = "environment" if declared else "undeclared"
 
     blocker = _scope_gate_blocker(carrier)

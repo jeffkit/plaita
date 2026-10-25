@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from plaita.node import NodeRegistry
+from plaita.node.basic import Node
 from plaita.node.start import Start
 from plaita.node.end import End
 from plaita.node.loop import Loop, Map, Filter, Find, Reduce
@@ -156,9 +157,13 @@ class TestNodeRegistryDiscoverEntryPoints(unittest.TestCase):
     @patch("plaita.node.entry_points")
     def test_discover_loads_plugin_nodes(self, mock_ep):
         """_1: sys.version_info >= (3, 10) 的语义应保持。"""
-        # 创建 mock entry point
-        fake_node_cls = MagicMock()
-        fake_node_cls.node_type = "fake_plugin_node"
+        # 台阶化 2026-10-25：注册闸读真类属性（normalize/validate），
+        # mock 自动属性会把 execution_tier 变成非 str 而被拒——夹具用真类。
+        fake_node_cls = type(
+            "FakePluginNode", (Node,),
+            {"node_type": "fake_plugin_node",
+             "execute": lambda self, execution: {"ok": True}},
+        )
         ep = MagicMock()
         ep.load.return_value = fake_node_cls
         mock_ep.return_value = [ep]
@@ -463,8 +468,11 @@ class TestDiscoverEntryPointsExtended(unittest.TestCase):
     @patch("plaita.node.entry_points")
     def test_loaded_plugin_class_stored_correctly(self, mock_ep):
         """_9: _nodes[cls.node_type] = None → 加载的插件类应被正确存储（非 None）。"""
-        fake_cls = MagicMock()
-        fake_cls.node_type = "test_plugin"
+        fake_cls = type(
+            "TestPluginNode", (Node,),
+            {"node_type": "test_plugin",
+             "execute": lambda self, execution: {"ok": True}},
+        )
         ep = MagicMock()
         ep.load.return_value = fake_cls
         mock_ep.return_value = [ep]

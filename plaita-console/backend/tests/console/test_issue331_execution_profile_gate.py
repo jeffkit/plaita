@@ -1,17 +1,22 @@
-"""#331 执行要求闸（console 面）：publish / start × 目标执行档 profile。
+"""#331 执行要求闸（console 面）：publish / start × 目标执行环境。
 
 负控（先红后绿；引擎侧执行入口四路 / 递归闭包 / runner 兜底 /
-矩阵差分在 plaita ``tests/unit/test_issue331_execution_profile.py``）：
+矩阵差分在 plaita ``tests/unit/test_issue331_execution_profile.py``）。
+台阶化 2026-10-25：``local`` 归一化为 ``managed``（托管·无队列服务）；错误体
+``required``/``missing`` 均为台阶名：
 
-1. **publish 格**：本地单机档（``redis=None`` → ``local`` profile：进程内事件
-   总线可挂起/恢复，**无**持久队列+延迟排程）发布含 ``delay`` 的 flow → 422
-   结构化拒（``error=suspend_not_executable``、``missing=["queue"]``、
-   ``profile=local``），版本保持 draft（publish 与 import-version 经
+1. **publish 格**：本地单机档（``redis=None``：托管面可挂起/恢复，**无**持久
+   队列+配套唤醒服务）发布含 ``delay`` 的 flow → 422 结构化拒
+   （``error=suspend_not_executable``、``missing=["managed:queue"]``、
+   ``profile=managed``），版本保持 draft（publish 与 import-version 经
    ``_publish_gates`` 同闸）。
 2. **start 格**：本地档 start 一个直置 published 的 delay flow（直置以隔离
    被测面）→ 422 且**不产生执行行**（绝不出现「suspended 行永不唤醒」）。
-3. 正控：approval flow（``event_bus + suspend:root ⊆ local``）本地 start
-   正常挂起（suspended 行）——闸只拒 queue 族，不误伤挂起面。
+3. **睡死坑修复钉**：approval 归 ``managed:queue`` 族（审批走队列 + 服务登记/
+   决策转发，服务不在场则待办永不创建）——旧 local 档从「放行→挂起→睡死」
+   反转为 start 即 422。
+4. 正控：event flow（``managed ⊆ managed``）本地 start 正常挂起（suspended
+   行）——闸只拒队列服务族，不误伤事件挂起面。
 """
 import json
 import sys
@@ -71,6 +76,17 @@ def _approval_def(flow_id="approved"):
     })
 
 
+def _event_def(flow_id="waiter"):
+    return json.dumps({
+        "flow_id": flow_id,
+        "nodes": [
+            {"type": "start", "id": "start", "next": "w"},
+            {"type": "event", "id": "w", "event_type": "go", "next": "end"},
+            {"type": "end", "id": "end", "output": "x"},
+        ],
+    })
+
+
 def _wait_suspended(client: TestClient, execution_id: str, timeout=10.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -82,7 +98,7 @@ def _wait_suspended(client: TestClient, execution_id: str, timeout=10.0) -> dict
 
 
 def test_local_publish_delay_flow_rejected_422(app, client):
-    """publish 格：local 档缺 ``queue``——delay flow 发布即结构化拒，版本保持
+    """publish 格：本地档缺队列唤醒服务——delay flow 发布即结构化拒，版本保持
     draft（改动前：本地档发布放行，start 后 delay 挂起永不唤醒）。"""
     store = flow_store.get_flow_store()
     store.ensure_flow("delayed", tenant_id="default")
@@ -92,9 +108,9 @@ def test_local_publish_delay_flow_rejected_422(app, client):
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
     assert detail["error"] == "suspend_not_executable"
-    assert detail["profile"] == "local"
-    assert detail["missing"] == ["queue"]
-    assert detail["required"] == ["event_bus", "queue", "suspend:root"]
+    assert detail["profile"] == "managed"  # 旧名 local 归一化
+    assert detail["missing"] == ["managed:queue"]
+    assert detail["required"] == ["managed:queue"]
     assert detail["node_id"] == "d"
     row = store.get_version("delayed", "1.0.0", tenant_id="default")
     assert row.status == "draft"
@@ -111,8 +127,8 @@ def test_local_start_delay_flow_rejected_422_no_execution_row(app, client):
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
     assert detail["error"] == "suspend_not_executable"
-    assert detail["missing"] == ["queue"]
-    assert detail["profile"] == "local"
+    assert detail["missing"] == ["managed:queue"]
+    assert detail["profile"] == "managed"
     assert list_local_execution_ids() == []
 
 
@@ -122,14 +138,31 @@ def list_local_execution_ids():
     return [e["execution_id"] for e in local_executor.list_local_executions()]
 
 
-def test_local_start_approval_flow_suspends_positive_control(app, client):
-    """正控：approval（event_bus+suspend:root ⊆ local）本地 start 正常挂起——
-    闸只拒 queue 族，挂起面不受牵连（ADR-001 §3.4 local 后端语义）。"""
+def test_local_start_approval_flow_rejected_422_sleep_death_fix(app, client):
+    """睡死坑修复钉（台阶化 2026-10-25）：approval 归 ``managed:queue`` 族——
+    旧 local 档从「放行→挂起→审批待办永不创建→睡死」反转为 start 即 422。
+    （改动前正控：approval 被放行、挂起、无人唤醒。）"""
     store = flow_store.get_flow_store()
     store.ensure_flow("approved", tenant_id="default")
     store.save_flow_definition("approved", "1.0.0", _approval_def(), status="published",
                                tenant_id="default")
     r = client.post("/api/executions", json={"flow_id": "approved"})
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert detail["error"] == "suspend_not_executable"
+    assert detail["missing"] == ["managed:queue"]
+    assert detail["node_type"] == "approval"
+    assert list_local_execution_ids() == []
+
+
+def test_local_start_event_flow_suspends_positive_control(app, client):
+    """正控：event flow（managed ⊆ managed）本地 start 正常挂起——闸只拒队列
+    服务族，事件挂起面不受牵连（进程内事件总线 + 手工 resume 可恢复）。"""
+    store = flow_store.get_flow_store()
+    store.ensure_flow("waiter", tenant_id="default")
+    store.save_flow_definition("waiter", "1.0.0", _event_def(), status="published",
+                               tenant_id="default")
+    r = client.post("/api/executions", json={"flow_id": "waiter"})
     assert r.status_code == 200, r.text
     body = _wait_suspended(client, r.json()["execution_id"])
     assert body["status"] == "suspended"
