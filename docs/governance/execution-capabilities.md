@@ -1,9 +1,10 @@
-# 节点执行台阶契约（两语义模型；#330 §4 / #331 全文 → 台阶化 2026-10-25）
+# 节点执行台阶契约（两语义模型终版；#330 §4 / #331 全文 → 台阶化 2026-10-25）
 
-- **状态**：台阶化落地（2026-10-25，owner 裁决）。#330（词表+声明+注册三路同闸）
-  与 #331（消费面：环境校验 / 递归闭包 / NodeRunner 兜底 / 矩阵治理）机制保持，
-  **词表换芯**：5 token 退役为三值台阶（本篇 §1）。#330 时代「token 两处手写 +
-  注册不变量缝补」的双写面同日退役（`is_suspending` 改为台阶派生值）
+- **状态**：两级终版（2026-10-25 第二轮 owner 裁决：**managed:queue 子档废除**，
+  只有 `inline` / `managed` 两级——「挂起后靠哪个唤醒源」是接线元数据
+  （节点 `wake_service` 字段）+ 受理门点名（现场盘点），不进模式词汇、
+  不设子 token）。#330（词表+声明+注册三路同闸）与 #331（消费面：环境校验 /
+  递归闭包 / NodeRunner 兜底 / 矩阵治理）机制保持，词表两值化
 - **落点**：`plaita/node/capabilities.py`（归一化 + 注册闸 + 矩阵生成源）、
   `plaita/core/capabilities.py`（台阶本体 + 闭包 + 环境闸 + runner 兜底）、
   `plaita/node/basic.py`（`Node.execution_tier` + `__init_subclass__` 派生）、
@@ -14,21 +15,27 @@
   #311（嵌套挂起 NS-M3——运行期作用域闸的原点，台阶化不改变其任何运行期行为）；
   #317（跨引擎对拍锚——决策分类锚，不锚文案）；#190（dry_run_safe，关系见 §5）
 
-## 1. 台阶（三值全序，封闭集）
+## 1. 台阶（两值全序，封闭集）
 
 执行语义只有两种（ADR-001）：**直跑**（inline，进程内当场跑完）与**托管**
-（managed，能停能续的执行面）。节点侧唯一声明 = 执行台阶：
+（managed，能停能续的执行面）。节点侧唯一**模式**声明 = 执行台阶：
 
-    inline < managed < managed:queue
+    inline < managed
 
 | 台阶 | 定义 |
 |---|---|
 | `inline`（默认） | 任何宿主可跑：纯计算 / 控制流 / 出网 / 本机子进程 / 沙箱白名单内代码 |
-| `managed` | 会挂起、靠**事件总线**唤醒（event、hitl_await 等）：宿主必须是托管面；进程内总线即可满足 |
-| `managed:queue` | 挂起后靠**持久队列 + 配套唤醒服务**恢复（delay / approval / http_callback / redis_queue / kafka_queue）：宿主必须是服务齐配的托管面 |
+| `managed` | 会挂起、经事件总线恢复（event / hitl_await / delay / approval / 回调与队列族）：宿主必须是托管面 |
 
 判定 = flow 台阶（站点台阶 max）≤ 环境台阶，一次比较。**错误报缺不报档**：
 说出缺的台阶、点名节点、给修法，不要求用户理解任何档位名词。
+
+**唤醒源接线（不是模式）**：挂起后靠 wake 进程哪个 source 唤醒，记在节点
+`wake_service` 字段（service_type 同名：delay→"delay"、approval→"approval"…
+None = 走通用事件总线）。服务在不在岗 = 受理门**点名**（现场盘点）：本地档
+静态无人（无 Redis），集群档查注册表 `plaita:registry:{service_type}:*` 活
+实例（TTL 30s）；不在岗 422 `queue_service_absent`（报缺什么服务、给修法）。
+睡死防护由台阶词汇移交该判据——物理区别保留，词汇两级。
 
 **退役词表**（5 token，仅迁移期兼容读取）：`suspend:root`/`suspend:nested` 合并的
 教训——帧结构限制是**图的结构规则**（归 NS-M3 作用域闸
@@ -55,18 +62,21 @@ class MyNode(Node):
 
 已声明面（2026-10-25 实况）：
 
-| 节点 | 台阶 |
-|---|---|
-| `event` | `managed` |
-| `hitl_await`（plaita-nodes，legacy 折算） | `managed` |
-| `delay` / `approval` / `http_callback` / `redis_queue` / `kafka_queue` | `managed:queue` |
-| `http` / `redis` / `code` / 全部控制流与计算节点 | `inline` |
+| 节点 | 台阶 | wake_service |
+|---|---|---|
+| `event` | `managed` | —（通用事件总线） |
+| `hitl_await`（plaita-nodes，legacy 折算） | `managed` | — |
+| `delay` | `managed` | `"delay"` |
+| `approval` | `managed` | `"approval"` |
+| `http_callback` | `managed` | `"http_callback"` |
+| `redis_queue` / `kafka_queue` | `managed` | 同名 |
+| `http` / `redis` / `code` / 全部控制流与计算节点 | `inline` | — |
 
-**approval / http_callback 的台阶修正**（2026-10-25，睡死坑）：两者挂起后走
+**approval / http_callback 的睡死坑修正**（2026-10-25）：两者挂起后走
 「队列 + 配套服务」（approval_service 登记待办/转发决策、http_callback_service
-接线回调）——服务不在场则待办/回调永不发生。旧声明只有 `(suspend:root,
-event_bus)` 会放过无服务环境；归 `managed:queue` 后，无服务环境在 publish/start
-即具名拒。
+接线回调）——服务不在场则待办/回调永不发生。防护载体历经两轮：台阶化一轮归
+`managed:queue` 子档；两级终版改为 `wake_service` 接线 + 点名判据（语义不变：
+无服务环境 publish/start 即具名拒）。
 
 ## 3. 注册期契约
 

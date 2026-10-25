@@ -2275,13 +2275,14 @@ async def get_execution(
 
 
 def _gate_local_execution_profile(store, flow_id: str, version: Optional[str], tenant: Optional[str]) -> None:
-    """本地档 start 的执行要求闸（plaita#331）：local profile = 进程内事件总线
-    （可挂起/恢复）但**无**持久队列+延迟排程——delay 族在本地档 start 即 422
-    具名拒，绝不产生「suspended 行永不唤醒」。版本解析与
-    engine_backend.start_execution 同源（``version=None`` = 最高已发布）；行不存在/
-    未发布时不在此判——交由既有 404/400 面，避免双报错形状。集群档 start 不经
-    本闸（distributed 全集恒过；真正执行入口在 worker 侧 ``run_distributed``
-    的引擎闸，与集群档 runtime 池的 #300 门并列）。"""
+    """本地档 start 的执行要求闸（plaita#331；两级模型 2026-10-25 第二轮）：
+    台阶半边（inline 环境拒 managed 流程）+ 唤醒源点名半边——本地档无 Redis
+    ⇒ wake 唤醒源必不在岗，凡声明 ``wake_service`` 的节点 start 即 422
+    （错误码与集群点名一致 ``queue_service_absent``），绝不产生「suspended 行
+    永不唤醒」。版本解析与 engine_backend.start_execution 同源
+    （``version=None`` = 最高已发布）；行不存在/未发布时不在此判——交由既有
+    404/400 面，避免双报错形状。集群档 start 的点名在 ``_admission_version_
+    row``（wake 分支，查注册表活实例）。"""
     try:
         from ..services.local_executor import _latest_published
     except ImportError:
@@ -2293,6 +2294,27 @@ def _gate_local_execution_profile(store, flow_id: str, version: Optional[str], t
     record = store.get_version(flow_id, resolved, tenant_id=tenant)
     if record is None or record.status != "published":
         return
+    # 唤醒源点名（静态）：managed:queue 子档废除，睡死防护由 wake_service
+    # 判据承接——本地档必不在岗，先于台阶闸报（错误信息更可操作）。
+    try:
+        from ..services.capability_gate import definition_wake_services
+    except ImportError:  # 平铺布局（cwd=backend）
+        from services.capability_gate import definition_wake_services  # type: ignore
+    wake = definition_wake_services(record.definition)
+    if wake:
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                "queue_service_absent",
+                (
+                    f"流程 {flow_id}@{resolved} 的节点挂起后需要唤醒服务"
+                    f"（{', '.join(wake)}），本地单机档没有唤醒服务进程——启动后"
+                    "将永久挂起。请接上 Redis 升级为集群档（集群档由点名闸核对"
+                    "服务在岗），或把对应节点换成立即可返回的写法"
+                ),
+                wake_services=wake,
+            ),
+        )
     try:
         gate_flow_execution_profile(
             record.definition, profile="local",
@@ -2307,8 +2329,8 @@ def _gate_local_execution_profile(store, flow_id: str, version: Optional[str], t
                 (
                     f"流程 {flow_id}@{resolved} 的执行要求 {detail.get('required')} "
                     f"不被本地执行档 {detail.get('profile')} 满足，缺少 "
-                    f"{detail.get('missing')}（本地档无持久队列/延迟排程，"
-                    "请发布到分布式池后启动）"
+                    f"{detail.get('missing')}（本地档不具备托管执行面之外的"
+                    "能力，请发布到分布式池后启动）"
                 ),
                 **detail,
             ),

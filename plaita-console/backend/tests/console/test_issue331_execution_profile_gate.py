@@ -5,16 +5,13 @@
 台阶化 2026-10-25：``local`` 归一化为 ``managed``（托管·无队列服务）；错误体
 ``required``/``missing`` 均为台阶名：
 
-1. **publish 格**：本地单机档（``redis=None``：托管面可挂起/恢复，**无**持久
-   队列+配套唤醒服务）发布含 ``delay`` 的 flow → 422 结构化拒
-   （``error=suspend_not_executable``、``missing=["managed:queue"]``、
-   ``profile=managed``），版本保持 draft（publish 与 import-version 经
-   ``_publish_gates`` 同闸）。
+1. **publish 格**：本地单机档发布含 ``delay`` 的 flow → 422
+   ``queue_service_absent``（wake_service 点名，先于台阶闸；publish 与
+   import-version 经 ``_publish_gates`` 同闸）。
 2. **start 格**：本地档 start 一个直置 published 的 delay flow（直置以隔离
    被测面）→ 422 且**不产生执行行**（绝不出现「suspended 行永不唤醒」）。
-3. **睡死坑修复钉**：approval 归 ``managed:queue`` 族（审批走队列 + 服务登记/
-   决策转发，服务不在场则待办永不创建）——旧 local 档从「放行→挂起→睡死」
-   反转为 start 即 422。
+3. **睡死坑修复钉**：approval 声明 ``wake_service="approval"``（审批走队列 +
+   服务登记/决策转发，服务不在场则待办永不创建）——本地档 start 即 422。
 4. 正控：event flow（``managed ⊆ managed``）本地 start 正常挂起（suspended
    行）——闸只拒队列服务族，不误伤事件挂起面。
 """
@@ -98,8 +95,8 @@ def _wait_suspended(client: TestClient, execution_id: str, timeout=10.0) -> dict
 
 
 def test_local_publish_delay_flow_rejected_422(app, client):
-    """publish 格：本地档缺队列唤醒服务——delay flow 发布即结构化拒，版本保持
-    draft（改动前：本地档发布放行，start 后 delay 挂起永不唤醒）。"""
+    """publish 格：本地档点名（静态，两级模型）——delay 声明 wake_service，
+    本地档无唤醒服务 → 422 queue_service_absent，版本保持 draft。"""
     store = flow_store.get_flow_store()
     store.ensure_flow("delayed", tenant_id="default")
     store.save_flow_definition("delayed", "1.0.0", _delay_def(), status="draft",
@@ -107,11 +104,8 @@ def test_local_publish_delay_flow_rejected_422(app, client):
     r = client.post("/api/flows/delayed/publish", json={"version": "1.0.0"})
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
-    assert detail["error"] == "suspend_not_executable"
-    assert detail["profile"] == "managed"  # 旧名 local 归一化
-    assert detail["missing"] == ["managed:queue"]
-    assert detail["required"] == ["managed:queue"]
-    assert detail["node_id"] == "d"
+    assert detail["code"] == "queue_service_absent"
+    assert detail["wake_services"] == ["delay"]
     row = store.get_version("delayed", "1.0.0", tenant_id="default")
     assert row.status == "draft"
 
@@ -126,9 +120,8 @@ def test_local_start_delay_flow_rejected_422_no_execution_row(app, client):
     r = client.post("/api/executions", json={"flow_id": "delayed"})
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
-    assert detail["error"] == "suspend_not_executable"
-    assert detail["missing"] == ["managed:queue"]
-    assert detail["profile"] == "managed"
+    assert detail["code"] == "queue_service_absent"
+    assert detail["wake_services"] == ["delay"]
     assert list_local_execution_ids() == []
 
 
@@ -139,9 +132,8 @@ def list_local_execution_ids():
 
 
 def test_local_start_approval_flow_rejected_422_sleep_death_fix(app, client):
-    """睡死坑修复钉（台阶化 2026-10-25）：approval 归 ``managed:queue`` 族——
-    旧 local 档从「放行→挂起→审批待办永不创建→睡死」反转为 start 即 422。
-    （改动前正控：approval 被放行、挂起、无人唤醒。）"""
+    """睡死坑修复钉（两级模型）：approval 声明 wake_service="approval"——
+    本地档点名静态拒，start 即 422（改动前正控：被放行、挂起、无人唤醒）。"""
     store = flow_store.get_flow_store()
     store.ensure_flow("approved", tenant_id="default")
     store.save_flow_definition("approved", "1.0.0", _approval_def(), status="published",
@@ -149,9 +141,8 @@ def test_local_start_approval_flow_rejected_422_sleep_death_fix(app, client):
     r = client.post("/api/executions", json={"flow_id": "approved"})
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
-    assert detail["error"] == "suspend_not_executable"
-    assert detail["missing"] == ["managed:queue"]
-    assert detail["node_type"] == "approval"
+    assert detail["code"] == "queue_service_absent"
+    assert detail["wake_services"] == ["approval"]
     assert list_local_execution_ids() == []
 
 

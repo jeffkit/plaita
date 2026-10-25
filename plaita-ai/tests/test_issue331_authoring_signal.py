@@ -56,11 +56,13 @@ def test_compile_profile_legacy_names_accepted():
     assert reported.ok
     assert reported.execution_requirements["missing"] == []
     assert reported.execution_requirements["required"] == "managed"
-    assert reported.execution_requirements["profile"] == "managed:queue"
+    assert reported.execution_requirements["profile"] == "managed"
 
 
-def test_compile_profile_queue_family_rejected_under_managed():
-    """睡死坑修复的作者期面：delay 在 managed（旧 local）下提示缺 managed:queue。"""
+def test_compile_profile_queue_family_passes_managed_tier():
+    """两级模型：delay 台阶=managed——managed 环境（旧 local）下台阶报告通过；
+    「唤醒服务在不在岗」由受理门点名承接（wake_service 接线在节点上，不在
+    编译期报告里）。"""
     src = '''
 @flow("later", input_type="object")
 def later(INPUT):
@@ -68,8 +70,8 @@ def later(INPUT):
     return "done"
 '''
     reported = compile_flow(src, profile="local")
-    assert reported.ok  # 作者期只提示不拦截
-    assert reported.execution_requirements["missing"] == ["managed:queue"]
+    assert reported.ok
+    assert reported.execution_requirements["missing"] == []
 
 
 def test_compile_profile_closure_is_recursive_over_childflow():
@@ -97,6 +99,6 @@ def test_flow_list_nodes_rows_carry_tier_and_suspends():
     assert rows["start"]["suspends"] is False
     assert rows["http"]["tier"] == "inline"
     assert rows["http"]["suspends"] is False
-    assert rows["delay"]["tier"] == "managed:queue"
+    assert rows["delay"]["tier"] == "managed"
     assert rows["delay"]["suspends"] is True
-    assert rows["approval"]["tier"] == "managed:queue"
+    assert rows["approval"]["tier"] == "managed"

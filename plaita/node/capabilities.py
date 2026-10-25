@@ -1,6 +1,6 @@
 """plaita.node.capabilities — 节点执行台阶契约的注册面（#330/#331 → 台阶化 2026-10-25）。
 
-词表 = 三值台阶（``inline`` < ``managed`` < ``managed:queue``，两语义模型，
+词表 = 两值台阶（``inline`` < ``managed``；owner 第二轮裁决废除 managed:queue 子档，
 owner 裁决），本体住在 :mod:`plaita.core.capabilities`（执行入口 / NodeRunner
 在 core 消费，core 不反向 import node 层）；本模块承担：
 
@@ -128,7 +128,7 @@ def validate_execution_contract(node_cls, *, context: str = "register") -> None:
     if getattr(node_cls, "is_suspending", False) is True and tier == "inline":
         problems.append(
             'is_suspending=True 但未声明执行台阶：请写 execution_tier = "managed"'
-            "（会挂起、靠事件总线唤醒）或 \"managed:queue\"（挂起后靠队列唤醒服务恢复）"
+            "（会挂起、靠事件总线唤醒）"
         )
     if not problems:
         return
@@ -163,7 +163,7 @@ def shipped_capability_matrix() -> Dict[str, str]:
 
     注册面 = 内置节点 + **本仓** ``pyproject.toml`` 声明的 ``plaita.nodes`` entry points
     （按 dist 名过滤为 ``plaita``，第三方插件如 plaita-nodes 的 22 节点归其自家账本）+
-    opt-in 的 ``code`` 节点。矩阵值 = 节点台阶（``inline``/``managed``/``managed:queue``）。
+    opt-in 的 ``code`` 节点。矩阵值 = 节点台阶（``inline``/``managed``）。
     """
     from importlib.metadata import entry_points
 

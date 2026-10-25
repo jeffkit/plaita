@@ -83,15 +83,20 @@ class Node(BaseModel):
     # 2026-10-25 起为**派生值**（execution_tier ≠ inline 即挂起），节点类不再
     # 手写——两处手写同一事实曾需注册不变量缝补（#330），一致改靠构造保证。
     is_suspending: ClassVar[bool] = False
-    # 执行台阶声明（两语义模型，owner 裁决 2026-10-25）：全序
-    #   inline < managed < managed:queue（本体见 plaita.core.capabilities）
+    # 执行台阶声明（两语义模型终版，owner 裁决 2026-10-25 第二轮：只有两级，
+    # 不设子档——本体见 plaita.core.capabilities）
     #   inline（默认）—— 任何宿主可跑：纯计算/控制流/出网/本机子进程；
-    #   managed        —— 会挂起、靠事件总线唤醒（event / hitl_await 等）；
-    #   managed:queue  —— 挂起后靠持久队列+配套唤醒服务（delay/approval/
-    #                     http_callback/queue 族）唤醒。
-    # 台阶是节点侧唯一声明：is_suspending 由 __init_subclass__ 据此推导；
-    # 只写 is_suspending=True 不写台阶 = 注册闸具名拒（plaita.node.capabilities）。
+    #   managed        —— 会挂起、靠事件总线唤醒（event/hitl_await/delay/
+    #                     approval/回调与队列族）。
+    # 台阶是节点侧唯一**模式**声明：is_suspending 由 __init_subclass__ 据此
+    # 推导；只写 is_suspending=True 不写台阶 = 注册闸具名拒。
     execution_tier: ClassVar[Optional[str]] = None
+    # 唤醒源接线（**不是模式**，两级模型下没有 managed:queue 子档）：挂起后
+    # 靠 wake 进程哪个 source 唤醒（service_type 同名，如 delay→"delay"）。
+    # None = 走通用事件总线唤醒（event/hitl_await 等）。受理门据此点名
+    # （capability_gate.queue_service_alive）——服务不在岗 422，睡死防护
+    # 从台阶词汇移交给运行时事实检查。自定义节点接自定义唤醒源：直接填名。
+    wake_service: ClassVar[Optional[str]] = None
     # 旧 token 声明（#330/#331 前半，已退役）：迁移兼容——未声明 execution_tier
     # 时按 legacy_tokens_to_tier 折算（第三方插件不破）；新代码一律写台阶。
     execution_requirements: ClassVar[tuple] = ()

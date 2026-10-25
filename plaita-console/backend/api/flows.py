@@ -283,6 +283,30 @@ def _gate_execution_profile(redis: Optional[Redis], row, *, where: str) -> None:
     池维度节点支持性由 #300 门负责（同一发布面的两个输入）。
     """
     profile = "local" if redis is None else "distributed"
+    # 本地档点名（静态）：两级模型下 managed:queue 子档废除——本地档无 Redis
+    # ⇒ wake 唤醒源必不在岗，凡声明 wake_service 的节点发布即 422（错误码与
+    # 集群点名一致 queue_service_absent）；集群档发布不点名（先发布后起服务
+    # 的时序合法，点名在受理门）。本地档早期拒绝 UX 由此保留。
+    if redis is None:
+        try:
+            from ..services.capability_gate import definition_wake_services
+        except ImportError:  # 平铺布局（cwd=backend）
+            from services.capability_gate import definition_wake_services  # type: ignore
+        wake = definition_wake_services(row.definition)
+        if wake:
+            raise HTTPException(
+                status_code=422,
+                detail=error_detail(
+                    "queue_service_absent",
+                    (
+                        f"流程 {row.flow_id}@{row.version} 的节点挂起后需要唤醒服务"
+                        f"（{', '.join(wake)}），本地单机档没有唤醒服务进程——发布后"
+                        "将无法启动（启动即永久挂起）。请接上 Redis 升级为集群档，"
+                        "或把对应节点换成立即可返回的写法"
+                    ),
+                    wake_services=wake,
+                ),
+            )
     try:
         gate_flow_execution_profile(
             row.definition, profile=profile,

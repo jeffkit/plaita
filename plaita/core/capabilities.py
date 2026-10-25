@@ -1,22 +1,20 @@
-"""plaita.core.capabilities — 节点执行台阶契约（两语义模型，owner 裁决 2026-10-25）。
+"""plaita.core.capabilities — 节点执行台阶契约（两语义模型终版，owner 裁决 2026-10-25）。
 
 执行语义只有两种（ADR-001）：**直跑**（inline，进程内一口气跑完，进程退即流程
-亡）与**托管**（managed，能停能续的执行面）。节点侧唯一声明 = 执行台阶
-（``execution_tier``，全序）：
+亡）与**托管**（managed，能停能续的执行面）。节点侧唯一模式声明 = 执行台阶
+（``execution_tier``，两值）：
 
-    ``inline`` < ``managed`` < ``managed:queue``
+    ``inline`` < ``managed``
 
 - ``inline``（默认）—— 纯计算/控制流/出网/本机子进程：任何宿主可跑；
-- ``managed`` —— 会挂起、靠**事件总线**唤醒（event / hitl_await 等）：
-  宿主必须具备挂起-恢复（托管面）；进程内事件总线即可满足；
-- ``managed:queue`` —— 挂起后靠**持久队列 + 配套唤醒服务**唤醒（delay 定时、
-  approval 登记+决策转发、http_callback 接线、redis/kafka 消费器）：
-  宿主必须是带齐队列服务的托管面。托管面内「队列服务接没接」是**部署事实**
-  （``managed`` vs ``managed:queue``），不是第三种语义——环境侧不贴档位名，
-  现场报告自己的台阶。
+- ``managed`` —— 会挂起、靠事件总线唤醒（event / hitl_await / delay /
+  approval / 回调与队列族）：宿主必须具备挂起-恢复（托管面）。
 
-判定 = flow 台阶（站点台阶的 max）≤ 环境台阶，一次比较；差了报**缺什么**
-（节点、需要的台阶、当前环境台阶、修法），不报「你在哪个档」。
+**没有子档**（owner 第二轮裁决：managed:queue 废除）——「挂起后靠哪个唤醒
+源」是**接线元数据**不是模式：节点 ``wake_service`` 字段（如 delay→"delay"）
++ 受理门点名（:func:`plaita-console capability_gate.queue_service_alive`，
+本地档静态无人、集群档查注册表）。判定 = flow 台阶（站点 max）≤ 环境台阶，
+一次比较；差了报**缺什么**，不报「你在哪个档」。
 
 **旧 token 词表已退役**（suspend:root/nested、event_bus、queue、sandbox、
 network；#330/#331 前半）：network/sandbox 从不区分任何真实宿主（沙箱白名单
@@ -62,9 +60,11 @@ from plaita.core.errors import (
 
 logger = logging.getLogger("plaita.core.capabilities")
 
-#: 执行台阶全集（全序，索引即高度；封闭集：新台阶 = 执行形态面变更，
-#: 须改这里 + 治理文档 + 账本，且要有真实部署形态背书——不为假想环境加词）。
-EXECUTION_TIERS: Tuple[str, ...] = ("inline", "managed", "managed:queue")
+#: 执行台阶全集（两语义模型终版，owner 裁决 2026-10-25 第二轮：**只有两级**，
+#: 不设子档——"唤醒源是哪个岗"是接线元数据（:data:`WAKE_SERVICE_NODE_TYPES`
+#: + 节点 ``wake_service`` 字段）+ 受理门点名（现场盘点），不进模式词汇。
+#: 封闭集：新台阶须真实部署形态背书 + ADR）。
+EXECUTION_TIERS: Tuple[str, ...] = ("inline", "managed")
 
 _TIER_RANK: Dict[str, int] = {tier: idx for idx, tier in enumerate(EXECUTION_TIERS)}
 
@@ -81,12 +81,13 @@ LEGACY_CAPABILITY_TOKENS: FrozenSet[str] = frozenset(
 )
 
 #: 旧 token → 台阶高度（sandbox/network 从不区分宿主 → inline；
-#: suspend:*/event_bus → managed；queue → managed:queue）。
+#: suspend:*/event_bus/queue → managed——旧 queue 家族的"要配套服务"半边
+#: 由 wake_service 字段 + 点名闸承接，不进台阶）。
 _LEGACY_TOKEN_RANK: Dict[str, int] = {
     "suspend:root": 1,
     "suspend:nested": 1,
     "event_bus": 1,
-    "queue": 2,
+    "queue": 1,
     "sandbox": 0,
     "network": 0,
 }
@@ -95,7 +96,7 @@ _LEGACY_TOKEN_RANK: Dict[str, int] = {
 _LEGACY_PROFILE_TIER: Dict[str, str] = {
     "normal": "inline",
     "generator": "inline",
-    "distributed": "managed:queue",
+    "distributed": "managed",
     "local": "managed",
 }
 
@@ -106,7 +107,7 @@ _MODE_TO_PROFILE = {
     None: "inline",
     "normal": "inline",
     "generator": "inline",
-    "distributed": "managed:queue",
+    "distributed": "managed",
 }
 
 #: 挂起作用域闸放行的帧类型（v1：只有 child/reference 调用链内的挂起可穿透到
@@ -114,6 +115,15 @@ _MODE_TO_PROFILE = {
 #: 与入口静态闭包的 ``fix=restructure`` 判定共用。**帧结构限制不是能力词**：
 #: 全面放开嵌套挂起时只松本闸，词表零变化。
 SUSPEND_ALLOWED_FRAME_NODE_TYPES: FrozenSet[str] = frozenset({"child", "reference"})
+
+
+#: 挂起后靠**队列唤醒服务**（wake 进程 source）恢复的内置节点族——它们的
+#: ``wake_service`` 字段值 = service_type 同名（delay→delay、approval→approval…）。
+#: 单源用途：console 本地档静态拒（无 Redis ⇒ 唤醒服务必不在）与点名闸的
+#: 兜底集。自定义节点要接自定义唤醒源：直接声明 ``wake_service = "<名>"``。
+WAKE_SERVICE_NODE_TYPES: FrozenSet[str] = frozenset(
+    {"delay", "approval", "http_callback", "redis_queue", "kafka_queue"}
+)
 
 
 def is_valid_tier(tier: Any) -> bool:
@@ -191,9 +201,9 @@ def profile_name(profile: ProfileSpec) -> str:
 def profile_for_mode(mode: Any) -> str:
     """执行模式 → 台阶（``ExecutionMode`` 枚举 / 字符串 / None 均可，鸭子读 ``.value``）。
 
-    ``distributed`` → ``managed:queue``：模式根默认按集群档（服务齐配）判；
-    本地档由 console 在 publish/start 前置闸拒绝，或经 ``execution_profile``
-    显式降为 ``managed``。
+    ``distributed`` → ``managed``：模式根按托管面判；队列唤醒服务在不在岗
+    不由台阶判——受理门对带 ``wake_service`` 的节点现场点名（managed:queue
+    子档已于 2026-10-25 第二轮裁决废除）。
     """
     value = getattr(mode, "value", mode)
     try:
@@ -366,7 +376,6 @@ def check_execution_requirements(
 
 _TIER_HELP = {
     "managed": "托管执行面（能停能续：console 发布，或 FlowExecution.run_distributed 逐步驱动）",
-    "managed:queue": "带齐队列唤醒服务的托管面（delay/approval/http_callback/queue 族的配套服务进程在跑）",
 }
 
 
@@ -389,17 +398,6 @@ def _suspend_error(
                 f"挂起节点位于 {getattr(blocker, 'node_type', '?')!r} 帧 {getattr(blocker, 'id', '?')!r} 内："
                 "v1 仅支持 child/reference 调用链内挂起，分布式运行时同样具名拒绝；"
                 "请把挂起节点移出迭代/并行帧"
-            ),
-        }
-    elif tier_rank(site.tier) > tier_rank(env_tier) >= 1:
-        # 托管面内缺队列服务：报「缺什么服务」，不报「你在哪个档」。
-        fix = {
-            "action": "attach_queue_services",
-            "call": None,
-            "message": (
-                f"节点 {site.node_type!r} 挂起后靠队列唤醒服务恢复"
-                f"（{_TIER_HELP[site.tier]}），当前环境只到 {env_tier!r}："
-                "把配套服务进程跑起来（console 集群页），或换成立即可返回的写法"
             ),
         }
     else:

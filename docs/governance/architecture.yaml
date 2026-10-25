@@ -46,34 +46,34 @@ gov:
   # 与 doctor 断言的字符串字面量比对口径一致）。
   review_by: '2027-01-31'
 
-  # 自带注册面的执行台阶矩阵（plaita#331 ⑤ → 台阶化 2026-10-25；两语义模型见
-  # docs/governance/execution-capabilities.md，三值台阶全序
-  # inline < managed < managed:queue；旧 5 token 词表退役）。
+  # 自带注册面的执行台阶矩阵（plaita#331 ⑤ → 台阶化 2026-10-25；两语义终版见
+  # docs/governance/execution-capabilities.md，两值台阶 inline/managed——
+  # managed:queue 子档已废除，唤醒源在节点 wake_service 字段 + 点名闸）。
   # 事实源是注册表本身（plaita/node/capabilities.py
   # shipped_capability_matrix：内置 + 本仓 pyproject 声明的 plaita.nodes
   # entry points + opt-in code）；**inline 节点同样入列**——差分断言
   # 「注册表新增 node_type 而矩阵未变 → added 非空 → 红」靠全集覆盖。
   # 生成/校验：`python scripts/export_capability_matrix.py [--check|--json]`。
   capability_matrix:
-    approval: managed:queue
+    approval: managed
     assignment: inline
     case: inline
     child: inline
     code: inline
-    delay: managed:queue
+    delay: managed
     end: inline
     event: managed
     filter: inline
     find: inline
     http: inline
-    http_callback: managed:queue
+    http_callback: managed
     if: inline
-    kafka_queue: managed:queue
+    kafka_queue: managed
     loop: inline
     map: inline
     mock: inline
     parallel: inline
-    redis_queue: managed:queue
+    redis_queue: managed
     reduce: inline
     reference: inline
     start: inline

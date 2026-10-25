@@ -404,9 +404,12 @@ class TestRegistrationInvariant:
             assert tier_rank(cls.execution_tier) >= 1, f"{node_type} 缺托管台阶"
 
     def test_extended_family_declares(self):
-        # 台阶化 2026-10-25：approval/http_callback 修正归队列服务族。
-        assert ApprovalNode.execution_tier == "managed:queue"
-        assert DelayNode.execution_tier == "managed:queue"
+        # 两级模型（owner 第二轮裁决）：队列族台阶=managed，唤醒源在
+        # wake_service 字段（睡死坑防护移交点名闸）。
+        assert ApprovalNode.execution_tier == "managed"
+        assert DelayNode.execution_tier == "managed"
+        assert ApprovalNode.wake_service == "approval"
+        assert DelayNode.wake_service == "delay"
 
     def test_side_effect_family_declares(self):
         """副作用族（HTTP/Redis/Code）台阶化后归 inline：出网/沙箱白名单是

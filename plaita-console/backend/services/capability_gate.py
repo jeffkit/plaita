@@ -233,6 +233,31 @@ class ExecutionProfileUnsatisfiedError(Exception):
         self.detail = detail
 
 
+def definition_wake_services(definition: Any) -> List[str]:
+    """flow 定义里声明的唤醒源集合（wake_service 字段；两级模型的接线面）。
+
+    供本地静态拒（无 Redis ⇒ 唤醒服务必不在）与点名闸共用。定义解析失败
+    返回空表（合法性由定义闸具名，此处跳过留痕由调用方负责）。
+    """
+    try:
+        from plaita.core.flow import Flow as _Flow
+
+        data = (
+            __import__("json").loads(definition)
+            if isinstance(definition, (str, bytes))
+            else definition
+        )
+        flow = _Flow.model_validate(data)
+    except Exception:  # noqa: BLE001 — 定义合法性由定义闸具名
+        return []
+    out: List[str] = []
+    for node in flow.nodes:
+        svc = getattr(node, "wake_service", None)
+        if svc:
+            out.append(str(svc))
+    return sorted(set(out))
+
+
 def gate_flow_execution_profile(
     definition: Any,
     *,

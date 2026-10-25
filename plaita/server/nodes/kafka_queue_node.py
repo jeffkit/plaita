@@ -17,9 +17,10 @@ class KafkaQueueNode(BaseExtendedNode):
     """
 
     node_type: ClassVar[str] = "kafka_queue"
-    # 入队/消费走持久化队列 + kafka_queue_service 唤醒恢复（外部 broker 是运行期
-    # 配置事实，不进台阶）——队列服务族。
-    execution_tier: ClassVar[str] = "managed:queue"
+    # 入队/消费走持久化队列 + kafka_queue_service 唤醒恢复（外部 broker 是
+    # 运行期配置事实，不进台阶词汇）。
+    execution_tier: ClassVar[str] = "managed"
+    wake_service: ClassVar[str] = "kafka_queue"
     node_name: ClassVar[str] = "Kafka队列节点"
 
     # 运行时契约：固定订阅 kafka_message 事件。历史上 event_type 必填而用户值

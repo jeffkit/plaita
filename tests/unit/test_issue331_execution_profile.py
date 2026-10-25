@@ -192,40 +192,42 @@ def _approval_root():
 
 class TestTierTable:
     def test_tier_ladder_is_total_order(self):
-        assert EXECUTION_TIERS == ("inline", "managed", "managed:queue")
-        assert [tier_rank(t) for t in EXECUTION_TIERS] == [0, 1, 2]
+        """两语义终版（owner 第二轮裁决）：只有两级，managed:queue 子档废除——
+        「唤醒源是哪个岗」= wake_service 接线 + 点名闸，不进模式词汇。"""
+        assert EXECUTION_TIERS == ("inline", "managed")
+        assert [tier_rank(t) for t in EXECUTION_TIERS] == [0, 1]
 
     def test_legacy_names_map_per_adr_001(self):
-        """旧四 profile 名 → 台阶：normal/generator=inline（直跑）；local=managed
-        （托管·进程内后端）；distributed=managed:queue（托管·服务齐配）。"""
+        """旧四 profile 名 → 台阶：normal/generator=inline；local/distributed
+        同折 managed（distributed 曾折 managed:queue，子档废除后并级）。"""
         assert normalize_profile("normal") == "inline"
         assert normalize_profile("generator") == "inline"
         assert normalize_profile("local") == "managed"
-        assert normalize_profile("distributed") == "managed:queue"
+        assert normalize_profile("distributed") == "managed"
 
     def test_legacy_token_sets_collapse_to_tiers(self):
         """旧 token 集合 → 台阶折算：sandbox/network 从不区分宿主（inline）；
-        suspend:root/nested、event_bus 同折 managed；queue 折 managed:queue。
-        suspend 两分（root/nested）合并——帧结构限制归作用域闸，不是能力词。"""
+        suspend:root/nested、event_bus、queue 同折 managed——旧 queue 家族的
+        「要配套服务」半边由 wake_service 接线 + 点名闸承接，不进台阶。"""
         assert normalize_profile({"network", "sandbox"}) == "inline"
         assert normalize_profile({"network"}) == "inline"
         assert normalize_profile(frozenset()) == "inline"
         assert normalize_profile({"suspend:root"}) == "managed"
         assert normalize_profile({"suspend:nested", "event_bus"}) == "managed"
-        assert normalize_profile({"suspend:root", "event_bus", "queue"}) == "managed:queue"
+        assert normalize_profile({"suspend:root", "event_bus", "queue"}) == "managed"
 
     def test_profile_for_mode(self):
         assert profile_for_mode(None) == "inline"
         assert profile_for_mode(ExecutionMode.NORMAL) == "inline"
         assert profile_for_mode(ExecutionMode.GENERATOR) == "inline"
-        assert profile_for_mode(ExecutionMode.DISTRIBUTED) == "managed:queue"
-        assert profile_for_mode("distributed") == "managed:queue"
+        assert profile_for_mode(ExecutionMode.DISTRIBUTED) == "managed"
+        assert profile_for_mode("distributed") == "managed"
 
     def test_unknown_profile_is_named_error(self):
         with pytest.raises(ValueError) as ei:
             normalize_profile("staging")
         assert "staging" in str(ei.value)
-        assert "managed:queue" in str(ei.value)  # 合法台阶点名
+        assert "managed" in str(ei.value)  # 合法台阶点名
 
     def test_vocabulary_single_source_reexported_by_node_layer(self):
         """台阶表住 core（入口在 core 消费）；``plaita.node.capabilities`` 公开路径
@@ -286,7 +288,7 @@ class TestRecursiveClosure:
             flow_id="root",
             registry=_registry(DelayNode),
         )
-        assert required_tier(root) == "managed:queue"
+        assert required_tier(root) == "managed"
         assert required_tier(root, recursive=False) == "inline"
 
     def test_sites_carry_frame_path_root_to_leaf(self):
@@ -471,7 +473,7 @@ class TestEntryGate:
                 {"type": "end", "id": "end", "output": "x"},
             ]
         )
-        assert validate_for_profile(flow, "managed:queue")["missing"] == []
+        assert validate_for_profile(flow, "managed")["missing"] == []
         with pytest.raises(Exception) as ei:
             FlowExecution().run_distributed(flow, {"items": [1]})
         assert "frame boundary" in str(ei.value)
@@ -492,19 +494,23 @@ class TestEntryGate:
         assert "'loop'" in fix["message"]
         assert ei.value.frame_path == ["loop(loop)", "wait(event)"]
 
-    def test_queue_family_sleep_death_gate(self):
-        """睡死坑修复钉（2026-10-25）：approval/delay 归 managed:queue——managed
-        环境（旧 local 档）下从「放行→挂起→无人唤醒」反转为**入口即拒**，fix 点名
-        ``attach_queue_services``；managed:queue 环境放行。"""
-        for flow, node_type in ((_approval_root(), "approval"), (_delay_root(), "delay")):
-            with pytest.raises(SuspendNotExecutableError) as ei:
-                validate_for_profile(flow, "managed", stage="publish")
-            body = ei.value.to_dict()
-            assert body["missing"] == ["managed:queue"]
-            assert body["node_type"] == node_type
-            assert body["fix"]["action"] == "attach_queue_services"
-            # 服务齐配的托管面放行
-            assert validate_for_profile(flow, "managed:queue", stage="publish")["missing"] == []
+    def test_queue_family_passes_tier_gate_wake_service_wired(self):
+        """两级模型钉（owner 第二轮裁决）：delay/approval 台阶=managed——托管
+        环境下**台阶闸放行**（不再有 managed:queue 子档拒绝）；「唤醒服务在
+        不在岗」由 wake_service 接线 + 受理门点名承接（console 面测试，
+        test_queue_service_presence_probe / test_issue331_execution_profile_
+        gate 的本地静态拒）。节点 wake_service 接线在此钉。"""
+        from plaita.core.capabilities import WAKE_SERVICE_NODE_TYPES
+        for flow, node_type, svc in (
+            (_approval_root(), "approval", "approval"),
+            (_delay_root(), "delay", "delay"),
+        ):
+            assert validate_for_profile(flow, "managed", stage="publish")["missing"] == []
+            with pytest.raises(SuspendNotExecutableError):
+                validate_for_profile(flow, "inline", stage="publish")
+            assert node_type in WAKE_SERVICE_NODE_TYPES
+        assert DelayNode.wake_service == "delay"
+        assert ApprovalNode.wake_service == "approval"
 
     def test_execution_profile_propagates_to_children(self):
         ex = FlowExecution()
@@ -514,7 +520,7 @@ class TestEntryGate:
 
     def test_builtin_environments_satisfy_side_effect_family(self):
         """http（inline 台阶）在所有内置环境（含旧名与空 token 集合）下恒过。"""
-        for p in ("inline", "managed", "managed:queue", "normal", "generator", "distributed", "local", frozenset()):
+        for p in ("inline", "managed", "normal", "generator", "distributed", "local", frozenset()):
             assert validate_for_profile(_http_root(), p)["missing"] == []
 
     def test_child_execution_skips_entry_gate_and_propagates_carrier(self):
@@ -682,12 +688,26 @@ class TestCapabilityMatrix:
     def test_shipped_matrix_covers_declared_families(self):
         matrix = shipped_capability_matrix()
         assert matrix["event"] == "managed"
-        # 睡死坑修复钉：approval 归队列服务族
-        assert matrix["approval"] == "managed:queue"
-        assert matrix["delay"] == "managed:queue"
+        # 两级模型：队列族台阶=managed，唤醒源在 wake_service 字段（不在矩阵）
+        assert matrix["approval"] == "managed"
+        assert matrix["delay"] == "managed"
         assert matrix["http"] == "inline"
         assert matrix["code"] == "inline"
         assert matrix["start"] == "inline"
+
+    def test_wake_service_wiring_on_queue_family(self):
+        """唤醒源接线单源钉：队列族 wake_service=service_type 同名；event 无
+        唤醒源（走通用事件总线）。"""
+        assert DelayNode.wake_service == "delay"
+        assert ApprovalNode.wake_service == "approval"
+        from plaita.server.nodes.http_callback_node import HttpCallbackNode
+        from plaita.server.nodes.redis_queue_node import RedisQueueNode
+        from plaita.server.nodes.kafka_queue_node import KafkaQueueNode
+        assert HttpCallbackNode.wake_service == "http_callback"
+        assert RedisQueueNode.wake_service == "redis_queue"
+        assert KafkaQueueNode.wake_service == "kafka_queue"
+        from plaita.node.event_node import EventNode
+        assert EventNode.wake_service is None
 
     def test_export_script_check_mode(self, tmp_path):
         """脚本 ``--check``：账本一致 rc=0；篡改账本副本 rc=1 且 stdout 点名差分。"""
