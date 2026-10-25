@@ -7,6 +7,11 @@
     python -m plaita.server.services redis_queue_service
     python -m plaita.server.services approval_service
     python -m plaita.server.services http_callback_service
+    python -m plaita.server.services wake --sources delay,approval
+
+``wake``（2026-10-25）：唤醒面统一守护进程——一个进程托管多个队列消费
+source（默认 delay,approval），各 source 独立消费线程/注册身份/故障域；
+旧服务名保留为单 source 等价运行（存量部署零破坏）。
 """
 import argparse
 import asyncio
@@ -27,6 +32,7 @@ from .schedule_service import ScheduleService
 from .redis_queue_service import RedisQueueService
 from .approval_service import ApprovalService
 from .http_callback_service import HttpCallbackService
+from .wake import wake_source_classes
 from ...core.url_redaction import _scrub_url_text
 
 
@@ -72,15 +78,20 @@ def main():
     parser = argparse.ArgumentParser(description='Plaita 扩展服务启动器')
     parser.add_argument(
         'service_type',
-        choices=list(SERVICE_CLASSES.keys()),
-        help='要启动的服务类型'
+        choices=list(SERVICE_CLASSES.keys()) + ['wake'],
+        help="要启动的服务类型（wake = 唤醒面统一守护进程）"
+    )
+    parser.add_argument(
+        '--sources',
+        default='delay,approval',
+        help="wake 模式的唤醒 source 列表（逗号分隔；可选 delay/approval）"
     )
     parser.add_argument(
         '--redis-url',
         default=resolve_redis_url("services"),
         help='Redis 连接 URL（PLAITA_REDIS_URL > REDIS_URL）'
     )
-    
+
     args = parser.parse_args()
     
     # 连接 Redis
@@ -107,54 +118,76 @@ def main():
     service_config = {
         'instance_id': instance_id,
     }
-    
+
     # 根据服务类型创建服务实例（不同服务有不同的初始化参数）
-    service_class = SERVICE_CLASSES[args.service_type]
-    
-    if args.service_type in ('delay_service', 'schedule_service'):
-        # 两者均继承自 BaseExtendedService，支持 redis_client
-        service = service_class(
-            event_bus=event_bus,
-            redis_client=redis_client,
-            service_config=service_config
-        )
-    elif args.service_type == 'redis_queue_service':
-        # RedisQueueService 只接受 event_bus 和 retry_config
-        service = service_class(event_bus=event_bus)
-    elif args.service_type in ('http_callback_service', 'approval_service'):
-        # 两者构造器已对齐基类 (event_bus, service_config, redis_client)
-        # （Track C 统一过）——必须接 redis_client：审批/回调记录跨实例共享
-        # 与 resume 事件直发频道都依赖它，缺了整体回退进程内存（Track P2）。
-        service = service_class(
-            event_bus=event_bus,
-            service_config=service_config,
-            redis_client=redis_client,
-        )
+    services = []
+    if args.service_type == 'wake':
+        # 唤醒面统一守护进程：一个进程托管多个队列消费 source——各 source
+        # 独立消费线程/注册身份（registry 按各自 service_type 注册）/故障域；
+        # 任一 source 构造失败整体退出（fail-fast，不带病托管半个唤醒面）。
+        try:
+            for cls in wake_source_classes([s.strip() for s in args.sources.split(',') if s.strip()]):
+                services.append(cls(
+                    event_bus=event_bus,
+                    service_config=service_config,
+                    redis_client=redis_client,
+                ))
+        except ValueError as exc:
+            logger.error("wake source 解析失败: %s", exc)
+            sys.exit(2)
     else:
-        # 默认尝试通用初始化
-        service = service_class(event_bus=event_bus)
-    
+        service_class = SERVICE_CLASSES[args.service_type]
+        if args.service_type in ('delay_service', 'schedule_service'):
+            # 两者均继承自 BaseExtendedService，支持 redis_client
+            services.append(service_class(
+                event_bus=event_bus,
+                redis_client=redis_client,
+                service_config=service_config
+            ))
+        elif args.service_type == 'redis_queue_service':
+            # RedisQueueService 只接受 event_bus 和 retry_config
+            services.append(service_class(event_bus=event_bus))
+        elif args.service_type in ('http_callback_service', 'approval_service'):
+            # 两者构造器已对齐基类 (event_bus, service_config, redis_client)
+            # （Track C 统一过）——必须接 redis_client：审批/回调记录跨实例共享
+            # 与 resume 事件直发频道都依赖它，缺了整体回退进程内存（Track P2）。
+            services.append(service_class(
+                event_bus=event_bus,
+                service_config=service_config,
+                redis_client=redis_client,
+            ))
+        else:
+            # 默认尝试通用初始化
+            services.append(service_class(event_bus=event_bus))
+
     # 信号处理
     running = True
-    
+
     def signal_handler(sig, frame):
         nonlocal running
         logger.info("收到信号 %s，正在停止服务...", sig)
         running = False
-        service.stop_service()
-    
+        for svc in services:
+            svc.stop_service()
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # 启动服务
     logger.info("启动服务: %s (实例ID: %s)", args.service_type, instance_id)
-    
-    if not service.start_service():
+
+    if not all(svc.start_service() for svc in services):
         logger.error("服务启动失败")
+        for svc in services:
+            svc.stop_service()
         sys.exit(1)
-    
-    logger.info("服务 %s 已启动，按 Ctrl+C 停止", args.service_type)
-    
+
+    logger.info(
+        "服务 %s 已启动（sources: %s），按 Ctrl+C 停止",
+        args.service_type,
+        ",".join(svc.get_service_type() for svc in services),
+    )
+
     # 主循环
     import time
     try:
@@ -163,7 +196,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        service.stop_service()
+        for svc in services:
+            svc.stop_service()
         logger.info("服务已停止")
 
 

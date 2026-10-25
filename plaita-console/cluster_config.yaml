@@ -55,6 +55,26 @@ services:
     max_instances: 3
     process:
       command: python -m plaita.server.services delay_service
+  # 唤醒面统一守护进程（2026-10-25）：一个进程托管 delay+approval 队列消费，
+  # 各 source 独立消费线程/注册身份/故障域。与 delay_service/approval_service
+  # 单进程模板二选一（同队列双消费安全但白耗）。历史 gap 顺带修复：
+  # approval_service 之前没有独立模板，集群页拉不起来。
+  wake_service:
+    default_instances: 1
+    display_name: 唤醒服务（延迟+审批）
+    env:
+      PLAITA_REDIS_URL: ${redis.url}
+    max_instances: 3
+    process:
+      command: python -m plaita.server.services wake --sources delay,approval
+  approval_service:
+    default_instances: 1
+    display_name: 审批服务
+    env:
+      PLAITA_REDIS_URL: ${redis.url}
+    max_instances: 3
+    process:
+      command: python -m plaita.server.services approval_service
   event_filter:
     default_instances: 1
     display_name: 事件恢复器
