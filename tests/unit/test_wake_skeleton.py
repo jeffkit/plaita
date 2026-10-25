@@ -177,9 +177,13 @@ class TestWakeSourceClasses(unittest.TestCase):
     def test_known_sources_resolve(self):
         from plaita.server.services.delay_service import DelayService
         from plaita.server.services.approval_service import ApprovalService
+        from plaita.server.services.http_callback_service import HttpCallbackService
+        from plaita.server.services.redis_queue_service import RedisQueueService
 
-        self.assertEqual(wake_source_classes(["delay", "approval"]),
-                         [DelayService, ApprovalService])
+        self.assertEqual(
+            wake_source_classes(["delay", "approval", "http_callback", "redis_queue"]),
+            [DelayService, ApprovalService, HttpCallbackService, RedisQueueService],
+        )
 
 
 if __name__ == "__main__":

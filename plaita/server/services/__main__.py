@@ -127,11 +127,17 @@ def main():
         # 任一 source 构造失败整体退出（fail-fast，不带病托管半个唤醒面）。
         try:
             for cls in wake_source_classes([s.strip() for s in args.sources.split(',') if s.strip()]):
-                services.append(cls(
-                    event_bus=event_bus,
-                    service_config=service_config,
-                    redis_client=redis_client,
-                ))
+                if cls is RedisQueueService:
+                    # redis_queue 构造签名 (event_bus, retry_config, redis_client)——
+                    # 无 service_config 形参（基类默认面即其全部配置）；registry
+                    # 保持其历史关闭语义（enable_registry=False）。
+                    services.append(cls(event_bus=event_bus, redis_client=redis_client))
+                else:
+                    services.append(cls(
+                        event_bus=event_bus,
+                        service_config=service_config,
+                        redis_client=redis_client,
+                    ))
         except ValueError as exc:
             logger.error("wake source 解析失败: %s", _scrub_exception_text(exc))
             sys.exit(2)

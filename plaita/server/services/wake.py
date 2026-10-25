@@ -291,11 +291,29 @@ class WakeConsumeMixin:
 
 
 def wake_source_classes(sources: List[str]) -> List[type]:
-    """source 名 → 服务类（统一守护进程用）；未知 source 具名拒绝。"""
+    """source 名 → 服务类（统一守护进程用）；未知 source 具名拒绝。
+
+    2026-10-25 第二步扩容：http_callback（HTTP 认领 intake，发布半场/注册/
+    控制面全走基类）与 redis_queue（替单次执行长驻外部监听；构造签名
+    (event_bus, service_config, redis_client) 兼容——service_config 进基类
+    默认面，redis_client 用于 resume 直发，registry 保持其历史关闭语义）。
+    两家不挂 WakeConsumeMixin（它们的 intake 不是 list 队列轮询——机制级
+    差异，硬塞只会得到满是 if 的假内核）；wake 进程对它们只是**同值班室**
+    （一个进程、一套启停、一套注册身份），不是同循环。
+    kafka 默认 disabled（cluster_config 未启用、broker 是外部依赖），不进
+    默认白名单；真要并跑时显式点名即可。
+    """
     from .delay_service import DelayService
     from .approval_service import ApprovalService
+    from .http_callback_service import HttpCallbackService
+    from .redis_queue_service import RedisQueueService
 
-    known = {"delay": DelayService, "approval": ApprovalService}
+    known = {
+        "delay": DelayService,
+        "approval": ApprovalService,
+        "http_callback": HttpCallbackService,
+        "redis_queue": RedisQueueService,
+    }
     unknown = [s for s in sources if s not in known]
     if unknown:
         raise ValueError(f"未知唤醒 source {unknown}（合法: {sorted(known)}）")
