@@ -151,8 +151,9 @@ def main():
                 service_config=service_config
             ))
         elif args.service_type == 'redis_queue_service':
-            # RedisQueueService 只接受 event_bus 和 retry_config
-            services.append(service_class(event_bus=event_bus))
+            # RedisQueueService 只接受 event_bus 和 retry_config；redis_client
+            # 供 resume 直发与注册（点名闸依赖，2026-10-25）。
+            services.append(service_class(event_bus=event_bus, redis_client=redis_client))
         elif args.service_type in ('http_callback_service', 'approval_service'):
             # 两者构造器已对齐基类 (event_bus, service_config, redis_client)
             # （Track C 统一过）——必须接 redis_client：审批/回调记录跨实例共享

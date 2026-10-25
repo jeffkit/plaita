@@ -57,7 +57,7 @@ class KafkaQueueService(BaseExtendedService):
         # 并尽力落盘；None 回退 event_bus.publish。registry/control 保持关闭
         # （队列服务历史行为，不因拿到客户端而启用）。
         super().__init__(event_bus, service_config, redis_client=redis_client,
-                         enable_registry=False)
+                         enable_registry=True)  # 点名闸依赖（同 redis_queue，2026-10-25）
         self.consumer_groups: Dict[str, ConsumerGroupInfo] = {}
         self.admin_client: Optional[Any] = None
         self._health_check_task: Optional[asyncio.Task] = None
