@@ -7,6 +7,14 @@
 的只有 :class:`BaseExtendedService`（注册/控制/线程池/resume 发布），不在本
 骨架范围。event_filter 是事件总线侧正确性守卫，同样不进。
 
+**2026-10-26 修订（递送线补桥）**：上段勘定把「任务递送」与「任务体」混为
+一谈——http_callback/redis_queue/kafka 的**任务递送**同样是
+``plaita:{subtype}:queue`` LIST 轮询（worker 挂起时 RPUSH），此前面上全仓
+无消费者＝挂起执行睡死。三家已接入本骨架承接递送（``_wake_queue_key`` →
+LIST → ``handle_task``）；「机制差异」收窄到**任务体**（注册回调记录 / 长驻
+外部监听——长监听占本服务线程池一坑，停机由监听循环的 shutdown 检查退出、
+条目保留待下次启动重读）。kafka 仍不进默认白名单（外部 broker 依赖）。
+
 本模块收敛 Delay/Approval 两套实现逐行互抄的六件共享原语（C4-2/#35 与 #56
 两案的历史合流）：
 
@@ -293,15 +301,14 @@ class WakeConsumeMixin:
 def wake_source_classes(sources: List[str]) -> List[type]:
     """source 名 → 服务类（统一守护进程用）；未知 source 具名拒绝。
 
-    2026-10-25 第二步扩容：http_callback（HTTP 认领 intake，发布半场/注册/
-    控制面全走基类）与 redis_queue（替单次执行长驻外部监听；构造签名
-    (event_bus, service_config, redis_client) 兼容——service_config 进基类
-    默认面，redis_client 用于 resume 直发，registry 保持其历史关闭语义）。
-    两家不挂 WakeConsumeMixin（它们的 intake 不是 list 队列轮询——机制级
-    差异，硬塞只会得到满是 if 的假内核）；wake 进程对它们只是**同值班室**
-    （一个进程、一套启停、一套注册身份），不是同循环。
+    2026-10-25 第二步扩容 + 10-26 修订：http_callback 与 redis_queue 进
+    值班室，且两家**已挂 WakeConsumeMixin 承接任务递送**（消费各自的
+    ``plaita:{subtype}:queue``——10-25 的「不挂骨架」判断混淆了任务递送与
+    任务体，递送面三家同形，任务体才是机制差异：回调注册快任务 / 长驻外部
+    监听占线程池一坑）。redis_queue 构造签名 (event_bus, retry_config,
+    redis_client) 兼容——无 service_config 形参，基类默认面即其全部配置。
     kafka 默认 disabled（cluster_config 未启用、broker 是外部依赖），不进
-    默认白名单；真要并跑时显式点名即可。
+    默认白名单；单跑/显式点名时同样消费自己的任务 LIST。
     """
     from .delay_service import DelayService
     from .approval_service import ApprovalService

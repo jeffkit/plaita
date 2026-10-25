@@ -42,6 +42,7 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from .base_service import BaseExtendedService
+from .wake import WakeConsumeMixin
 from ...logger import logger
 # plaita#161：本文件每个 ``except Exception as e`` 都把 e 交给 ``logger.error``。
 # e 可能是 redis/第三方 HTTP 客户端抛的异常——文本可能带 ``url: …``（requests/
@@ -89,10 +90,14 @@ return v
 CALLBACK_CLAIM_TTL_MS = 30_000
 
 
-class HttpCallbackService(BaseExtendedService):
+class HttpCallbackService(WakeConsumeMixin, BaseExtendedService):
     """
     HTTP回调服务
     负责注册HTTP回调路径并等待回调触发
+
+    任务递送（2026-10-26 补桥）：消费 plaita:http_callback:queue——worker
+    挂起时 RPUSH 的回调注册任务此前全仓无消费者，注册记录不落、外部回调
+    POST 到达时查无记录＝挂起执行睡死。
     """
 
     def __init__(self, event_bus, service_config=None, redis_client=None):
@@ -116,6 +121,8 @@ class HttpCallbackService(BaseExtendedService):
         )
         self._claims_in_progress: set = set()
         self._claim_lock = threading.Lock()
+        # 任务递送桥：LIST → handle_task（注册回调记录，快任务；确认后出队）。
+        self._init_wake_consume(service_config)
 
     @property
     def _use_redis(self) -> bool:
@@ -337,6 +344,11 @@ class HttpCallbackService(BaseExtendedService):
         """获取服务类型"""
         return "http_callback"
 
+    def _wake_queue_key(self) -> str:
+        """任务递送 LIST——与 worker ``_dispatch_service_task`` 投递的
+        ``plaita:{subtype}:queue`` 对齐。"""
+        return "plaita:http_callback:queue"
+
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发事件：带 correlation_id（=execution_id），EventFilter 才能关联到挂起执行。
 
@@ -352,6 +364,7 @@ class HttpCallbackService(BaseExtendedService):
         """启动HTTP回调服务"""
         try:
             self.is_running = True
+            self._start_wake_consumer()
             logger.info("HTTP回调服务已启动")
             return True
         except Exception as e:  # noqa: BLE001 — 启动失败只告警不扩散
@@ -362,6 +375,7 @@ class HttpCallbackService(BaseExtendedService):
         """停止HTTP回调服务"""
         try:
             self.is_running = False
+            self._stop_wake_consumer()
             # 只清进程内存回退态；Redis 注册是跨实例共享的持久态，停机不清
             # （带 TTL 自清理）。
             self.registered_callbacks.clear()

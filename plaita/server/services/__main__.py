@@ -129,8 +129,7 @@ def main():
             for cls in wake_source_classes([s.strip() for s in args.sources.split(',') if s.strip()]):
                 if cls is RedisQueueService:
                     # redis_queue 构造签名 (event_bus, retry_config, redis_client)——
-                    # 无 service_config 形参（基类默认面即其全部配置）；registry
-                    # 保持其历史关闭语义（enable_registry=False）。
+                    # 无 service_config 形参（基类默认面即其全部配置）。
                     services.append(cls(event_bus=event_bus, redis_client=redis_client))
                 else:
                     services.append(cls(
@@ -153,6 +152,10 @@ def main():
         elif args.service_type == 'redis_queue_service':
             # RedisQueueService 只接受 event_bus 和 retry_config；redis_client
             # 供 resume 直发与注册（点名闸依赖，2026-10-25）。
+            services.append(service_class(event_bus=event_bus, redis_client=redis_client))
+        elif args.service_type == 'kafka_queue_service':
+            # kafka 单跑也接 redis_client：注册键（点名闸）+ 任务 LIST 消费
+            # （2026-10-26 递送线补桥后，无客户端＝递送线断）。
             services.append(service_class(event_bus=event_bus, redis_client=redis_client))
         elif args.service_type in ('http_callback_service', 'approval_service'):
             # 两者构造器已对齐基类 (event_bus, service_config, redis_client)

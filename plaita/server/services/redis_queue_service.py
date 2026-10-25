@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 from .base_service import BaseExtendedService
+from .wake import WakeConsumeMixin
 from ...logger import logger
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
@@ -52,16 +53,19 @@ class RetryConfig:
         return min(delay, self.max_delay)
 
 
-class RedisQueueService(BaseExtendedService):
+class RedisQueueService(WakeConsumeMixin, BaseExtendedService):
     """
     Redis队列服务
     负责监听Redis队列消息并触发相应事件
-    
+
     特性:
     - 支持多种队列类型 (list, stream, pubsub)
     - 自动重连机制
     - 指数退避重试
     - 优雅关闭
+    - 任务递送（2026-10-26 补桥）：消费 plaita:redis_queue:queue——worker
+      挂起时 RPUSH 的监听任务此前全仓无消费者，条目永躺 LIST、挂起执行
+      睡死（点名闸只防「整岗缺席」，防不了「岗在≠线通」）
     """
     
     def __init__(self, event_bus=None, retry_config: Optional[RetryConfig] = None,
@@ -84,10 +88,18 @@ class RedisQueueService(BaseExtendedService):
         self._connection_state = ConnectionState.DISCONNECTED
         self._active_clients: Dict[str, Any] = {}  # execution_id -> redis_client
         self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+        # 任务递送桥：LIST → handle_task（长驻监听在本服务线程池跑；停机时
+        # 监听循环的 shutdown 检查自行退出，条目保留在 LIST 待下次启动重读）。
+        self._init_wake_consume(self.service_config)
     
     def get_service_type(self) -> str:
         """获取服务类型"""
         return "redis_queue"
+
+    def _wake_queue_key(self) -> str:
+        """任务递送 LIST——与 worker ``_dispatch_service_task`` 投递的
+        ``plaita:{subtype}:queue`` 对齐。"""
+        return "plaita:redis_queue:queue"
 
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发事件：带 ``correlation_id``（=execution_id），EventFilter 才能关联。
@@ -114,6 +126,7 @@ class RedisQueueService(BaseExtendedService):
         try:
             self.is_running = True
             self._connection_state = ConnectionState.DISCONNECTED
+            self._start_wake_consumer()
             logger.info("Redis队列服务已启动")
             return True
         except Exception as e:
@@ -124,17 +137,25 @@ class RedisQueueService(BaseExtendedService):
         """停止Redis队列服务"""
         try:
             self.is_running = False
-            
+            self._stop_wake_consumer()
+
             # 取消所有重连任务
             for task in self._reconnect_tasks.values():
                 if not task.done():
                     task.cancel()
             self._reconnect_tasks.clear()
-            
-            # 关闭所有活跃连接
+
+            # 关闭所有活跃连接。旧实现 ``asyncio.get_event_loop()`` 在无线程
+            # 循环的上下文（停机路径必经）py3.10+ 会抛 DeprecationWarning/
+            # RuntimeError——每连接独立新循环兜底；连接本就绑定在（已关闭的）
+            # 任务循环上时 close 失败由 except 收敛，不挡停机。
             for execution_id, client in list(self._active_clients.items()):
                 try:
-                    asyncio.get_event_loop().run_until_complete(client.close())
+                    loop = asyncio.new_event_loop()
+                    try:
+                        loop.run_until_complete(client.close())
+                    finally:
+                        loop.close()
                 except Exception as exc:
                     logger.warning("redis client close failed during stop (execution_id=%s): %s", execution_id, _scrub_exception_text(exc))
             self._active_clients.clear()
