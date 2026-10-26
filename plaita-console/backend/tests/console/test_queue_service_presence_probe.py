@@ -7,8 +7,12 @@
 2. 注册表**有**活实例（TTL 内键）→ 放行（正控，入队照常）；
 3. event flow（managed 台阶，不依赖队列服务）→ 点名不触发、放行——
    不误伤事件挂起面；
-4. 本地档：静态拒（_gate_local_execution_profile 既有格）不变——点名
-   只接管集群档，两档行为各自稳定。
+4. 本地档：静态拒由 wake_service 接线接管——两级终版（2026-10-25
+   tier+wake 并树后）五节点带上 ``wake_service`` 字段，本地档（无 Redis ⇒
+   唤醒服务必不在）对 delay 族先于台阶闸报 ``queue_service_absent``
+   （owner 裁决：错误报缺不报档）。旧格期望 ``suspend_not_executable`` 是
+   wake 单分支时期的契约（彼时节点尚无 wake_service 字段，静态点名空转、
+   落到台阶闸）——tier 并树后由本格更新收口（main 预存红）。
 
 fail-open（probe 查不动放行 + WARNING）由单元级直接断言；注册键 TTL 30s
 滞后为已知精度（docstring 声明）。
@@ -129,8 +133,10 @@ def test_probe_fail_open_on_redis_error(env, monkeypatch):
     assert r.status_code == 200, r.text  # fail-open 放行
 
 
-def test_local_tier_static_rejection_unchanged(tmp_path, monkeypatch):
-    """本地档静态拒不变：delay flow 在 redis=None 下仍走 local 档具名拒。"""
+def test_local_mode_static_reject_reports_wake_service(tmp_path, monkeypatch):
+    """本地档静态拒（两级终版）：delay flow（wake_service="delay"）在
+    redis=None 下报 queue_service_absent，wake_services 具名 delay——
+    「本地档没有唤醒服务进程，启动后永久挂起」报缺不报档。"""
     monkeypatch.setattr("config.get_settings", lambda: _settings())
     monkeypatch.setattr("auth.get_settings", lambda: _settings())
     flow_store.init_engine(f"sqlite:///{tmp_path / 'local-unchanged.db'}")
@@ -147,4 +153,7 @@ def test_local_tier_static_rejection_unchanged(tmp_path, monkeypatch):
     r = client.post("/api/executions", json={"flow_id": "delayed"},
                     headers={"X-Admin-API-Key": ADMIN_KEY})
     assert r.status_code == 422, r.text
-    assert r.json()["detail"]["code"] == "suspend_not_executable"
+    detail = r.json()["detail"]
+    assert detail["code"] == "queue_service_absent"
+    assert detail["wake_services"] == ["delay"]
+    assert "本地单机档没有唤醒服务进程" in detail["message"]

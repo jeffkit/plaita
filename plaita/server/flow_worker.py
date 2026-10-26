@@ -5262,7 +5262,8 @@ class FlowWorker:
         delay/approval 等节点的任务永远不会被服务接走，执行会永久挂起。
         service_config 通常埋在 ``context.$NODE.{最后节点}.service_config``，
         顶层偶有直接携带；任务按 subtype 投递到 ``plaita:{subtype}:queue``，
-        由对应外延服务消费（DelayService 等）。
+        由对应外延服务消费（wake 值班室四岗 delay/approval/http_callback/
+        redis_queue 全接消费骨架；kafka 单跑/显式点名时同）。
         无 redis 客户端（单测/纯内存派生类）时跳过投递。
         """
         service_config, subtype = self._resolve_service_task(result, context)

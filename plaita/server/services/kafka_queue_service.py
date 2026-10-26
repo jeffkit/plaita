@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Callable, Awaitable
 from dataclasses import dataclass, field
 
 from .base_service import BaseExtendedService
+from .wake import WakeConsumeMixin
 from ...logger import logger
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
@@ -40,7 +41,7 @@ class ConsumerGroupInfo:
     offsets: Dict[int, int] = field(default_factory=dict)  # partition -> offset
 
 
-class KafkaQueueService(BaseExtendedService):
+class KafkaQueueService(WakeConsumeMixin, BaseExtendedService):
     """
     Kafka队列服务
     负责监听Kafka主题消息并触发相应事件
@@ -62,6 +63,10 @@ class KafkaQueueService(BaseExtendedService):
         self.admin_client: Optional[Any] = None
         self._health_check_task: Optional[asyncio.Task] = None
         self._lock = threading.Lock()
+        # 任务递送桥（2026-10-26）：消费 plaita:kafka_queue:queue——与
+        # redis_queue/http_callback 同病同修。kafka 仍不进 wake 默认白名单
+        # （外部 broker 依赖），但服务一旦跑起来（单跑/显式点名）递送线必须通。
+        self._init_wake_consume(service_config)
         
         # 配置参数
         config = service_config or {}
@@ -73,6 +78,11 @@ class KafkaQueueService(BaseExtendedService):
     def get_service_type(self) -> str:
         """获取服务类型"""
         return "kafka_queue"
+
+    def _wake_queue_key(self) -> str:
+        """任务递送 LIST——与 worker ``_dispatch_service_task`` 投递的
+        ``plaita:{subtype}:queue`` 对齐。"""
+        return "plaita:kafka_queue:queue"
 
     async def trigger_event(self, event_type: str, event_data: Dict[str, Any]):
         """触发事件：带 ``correlation_id``（=execution_id），EventFilter 才能关联。
@@ -93,10 +103,11 @@ class KafkaQueueService(BaseExtendedService):
             
         try:
             self.is_running = True
-            
+            self._start_wake_consumer()
+
             # 尝试初始化管理客户端
             self._init_admin_client()
-            
+
             logger.info("Kafka队列服务已启动")
             return True
         except Exception as e:
@@ -122,7 +133,8 @@ class KafkaQueueService(BaseExtendedService):
         """停止Kafka队列服务"""
         try:
             self.is_running = False
-            
+            self._stop_wake_consumer()
+
             # 关闭所有消费者组
             self._close_all_consumer_groups()
             
