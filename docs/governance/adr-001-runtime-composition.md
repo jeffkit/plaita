@@ -1,6 +1,7 @@
 # ADR-001：Runtime 组合裁定——Python reference / Go frozen / Rust oracle / local backend
 
 - **状态**：已接受（Accepted）——owner 拍板 2026-10-23（plaita#325，#329 tracking 的 D1）
+- **修订**：2026-10-25 **Go 解冻**（frozen → evolving companion，跟随 Python 进化）→ **ADR-002**（`adr-002-go-unfreeze.md`）；本篇 §3 为点时写实不回改，§6 冻结后果清单由 ADR-002 §3 逐条接管
 - **落点**：`docs/governance/adr-001-runtime-composition.md`（与治理账本 `architecture.yaml` 同址）
 - **证据基线**：plaita `45e7611` · plaita-go `df0a938` · plaita-rs `6c01ffc`（2026-10-23 各自 main）
 - **关联**：#325（裁定源）；#329（A–F 架构改造 tracking，本篇为其 D1 锚）；#317（范围随本篇缩围）；plaita-go#24（冻结注记 owner 已留言）；plaita-rs#17（WK-M1）
