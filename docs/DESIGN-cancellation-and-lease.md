@@ -198,3 +198,29 @@ worker A                          Redis                         worker B
 ## 8. 生态关联
 
 同族语义对齐：agentproc Python SDK 的超时终止已实现「进程组 SIGTERM → kill_grace_secs 宽限 → killpg SIGKILL」的分级击杀（../agentproc/sdk/python/src/agentproc/runner.py:27 契约、:1132-1138 实现），本设计的「软中断默认 + code 沙箱 killpg 例外」（§3.3）与之同构，跨仓取消语义保持一致口径。
+
+
+## 9. 落地状态（2026-10-26 补记）
+
+四个波次已全部落地并合入 main（本节为收口补记，上文保留设计时的现状描述）：
+
+| 波次 | 落地面 | 关键锚点 |
+|---|---|---|
+| ① 取消可达 | 标志键 + 步间/resume 入口检查 + 本地档 | `flow_worker._cancel_requested` / `resume_flow` 入口取消检查（cancelled_at_resume_entry） |
+| ② 看门狗 + fencing | TTL/3 续租线程 + 世代号 acquire + fenced CAS 写 | `execution_lease.py`（fencegen 独立计数器防 ABA）/ `RedisFlowWorker._lease_watchdog_loop` |
+| ③ 引擎传播 | 双 Event + `cancel()` + 取消监视线程（1s 轮询） | `flow_worker._cancel_watch_loop` / `PLAITA_DISABLE_CANCEL_INTERRUPT` 回滚开关 |
+| ④ EventNode 超时 | `subscription_timeout` 透传 + checker 宿主 event_filter | `SubscriptionTimeoutChecker` + `resume_type=timeout` + SET NX 去重 |
+
+跨仓贯通：agentproc Python SDK `RunOptions.cancel_event`（c7185a2，spawn 与
+executor 两条执行路径均在等待循环消费，≤0.5s 探测，进程组分级击杀 →
+`EXIT_CANCELLED`）；plaita-nodes `AgentRunNode` 透传
+`execution.cancel_event`，取消实弹测试（plaita-nodes PR #22：真子进程 60s
+长跑在取消后快速死亡、负控自然完成、cancel_event 缺席不误杀）；
+capture/gate/hitl 同款负控在 plaita-nodes test_a2r8_cancel.py。
+
+§7 开放问题执行情况：①②维持拍板（软中断默认、终态不可 resume）；③随
+全量滚动自然归零；④⑤维持不做/单独立项。历史观测「取消延迟最长 28 分钟」
+（2026-10-08）早于波次③与 agentproc cancel_event（c7185a2，2026-10-06 起
+贯通、plaita-nodes 随后接线），当前链路的取消延迟上界 ≈ 取消监听轮询（1s）
++ agentproc 探测（0.5s）+ 击杀宽限（kill_grace_secs），与节点时长解耦；
+非协作节点（LLM/HTTP 单请求）维持 §7.1 软中断拍板。
