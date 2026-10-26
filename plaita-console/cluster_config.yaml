@@ -99,6 +99,20 @@ services:
     max_instances: 10
     process:
       command: python -m plaita.server.flow_worker
+  # Go worker（生产可选 runtime，ADR-002 修订 2026-10-27）：runtime=go 的流程
+  # 派发到 plaita:flow:queue:go（resolve_runtime_queue）。二进制运维自建
+  # （plaita-go/cmd/plaita-worker，仓库不发布——同 Docker 模板纪律）；节点
+  # 覆盖面由 #300 能力门按 go 池 manifest 把关（knownUnsupported 七型在列的
+  # 流程发布即 422）。
+  go_worker:
+    default_instances: 1
+    display_name: Go 流程执行器
+    env:
+      PLAITA_QUEUE_NAME: plaita:flow:queue:go
+      PLAITA_REDIS_URL: ${redis.url}
+    max_instances: 5
+    process:
+      command: /usr/local/bin/plaita-worker
   http_callback_service:
     default_instances: 1
     display_name: HTTP 回调服务

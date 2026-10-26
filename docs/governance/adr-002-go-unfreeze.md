@@ -1,6 +1,7 @@
 # ADR-002：Go 解冻——evolving companion（跟随 Python 进化）
 
 - **状态**：已接受（Accepted）——owner 拍板 2026-10-25
+- **修订**：2026-10-27 **§5.1 已裁决——Go 恢复生产可选 runtime**（owner 指示「go 需要成为生产可选的 runtime」）。E1 反向修正：`VALID_RUNTIMES` 三值（go/python/rust）**为准绳而非遗留**，不再收敛 python-only；E2（runtime 单真相=DB 列）保留，动机改为多运行时单真相。`runtime=go` 的发布/受理/派发链（#300 能力门 × go 池清单 → `resolve_runtime_queue` → `plaita:flow:queue:go`）即为生产面。
 - **裁定源**：owner 指示「go 不应该再是冻结，可以跟随 python 一起进化了」（2026-10-25，执行台阶两级终版并树当日）
 - **关联**：ADR-001（本篇修订其 Go= frozen 裁定，其余裁定——Python reference / Rust oracle / local engine backend——**全部维持**）；plaita-go#24（Wave 2 覆盖清单，owner 留言「待 Go 引擎解冻（若发生）再评」——**本篇即解冻事件**）
 
@@ -41,6 +42,6 @@
 
 ## 5. Open questions（留 owner）
 
-1. Go 是否恢复为**生产可选 runtime**（E1 收敛反向修正，`VALID_RUNTIMES` 恢复 go）——解冻是前置条件而非充分条件；涉及 §4 正交性与存量 go flow 迁移面，另拍。
+1. ~~Go 是否恢复为**生产可选 runtime**~~ → **已裁决（2026-10-27）：是**。E1 反向修正（见修订注记）；落地配套：cluster_config 补 `go_worker` 模板（部署面）、E2 多运行时单真相实施（候选单）、#24 Wave 2 节点覆盖扩展（calculate 等七型从「永不补」转「按生产需求评估」）、worker 池点名（wake 点名的姊妹格：runtime=go 流程 start 时查 go 池有无活 worker，防「入队无人消费」同族搁浅）——均为候选/跟进单，非本篇实施。
 2. fresh-run parity 回退臂追平（§3.5）是否立项——候选，另拍。
 3. Rust 是否在 oracle 之外获得任何跟随义务——本篇明确**否**，除非 owner 另裁。
