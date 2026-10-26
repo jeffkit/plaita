@@ -181,7 +181,10 @@ class ClusterRegistry:
         "event_filter": {
             "display_name": "事件恢复器",
             "process": {"module": "plaita.server.event_filter"},
-            "max_instances": 1,
+            # 多实例安全（2026-10-26 验证）：pubsub 推送每实例各收一份（SET NX
+            # 去重）；回扫器共享游标 + 单调守卫 + 幂等回放，双实例交错不丢不退；
+            # 超时检查器/索引清扫天然幂等。跑 2-3 个 = 唤醒面去单点。
+            "max_instances": 3,
         },
         "schedule_service": {
             "display_name": "调度服务",

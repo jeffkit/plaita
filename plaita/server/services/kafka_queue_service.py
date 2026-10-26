@@ -376,19 +376,22 @@ class KafkaQueueService(WakeConsumeMixin, BaseExtendedService):
             # 创建任务完成标记
             task_complete = False
             
-            # 创建Redis客户端以存储任务完成状态(可选)
+            # 任务完成标记（2026-10-26 去硬编码）：优先复用服务的同步
+            # redis_client（构造注入，连的是部署真实的 Redis；线程池新 event
+            # loop 里同步客户端线程安全）。旧实现硬编码 localhost:6379 的
+            # aioredis 连接——远程 Redis 部署下标记打错库，读者永远看不到
+            # 完成位；无注入客户端时回退进程内标记（原 ImportError 分支语义）。
             redis_client = None
             task_complete_key = None
-            
-            try:
-                # 尝试导入Redis客户端，用于存储任务状态
-                import redis.asyncio as aioredis
-                redis_client = aioredis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+            if getattr(self, "_redis_client", None) is not None:
                 task_complete_key = f"task_complete:kafka:{execution_id}"
-                await redis_client.set(task_complete_key, "0", ex=60)
-            except ImportError:
-                logger.info("Redis客户端不可用，将使用内存状态跟踪任务完成情况")
-                
+                try:
+                    self._redis_client.set(task_complete_key, "0", ex=60)
+                except Exception as e:  # noqa: BLE001 — 标记失败回退内存跟踪
+                    logger.warning("任务完成标记写入失败（回退内存跟踪）: %s", _scrub_url_text(e))
+                    task_complete_key = None
+            
             # 执行Kafka监听任务
             try:
                 await self._listen_kafka_topic(
@@ -412,8 +415,7 @@ class KafkaQueueService(WakeConsumeMixin, BaseExtendedService):
                 await self.trigger_event(task_config.get("event_type"), error_event_data)
                 
                 if redis_client and task_complete_key:
-                    await redis_client.set(task_complete_key, "1")
-                    await redis_client.close()
+                    redis_client.set(task_complete_key, "1")
                     
                 return False
                 
@@ -495,10 +497,10 @@ class KafkaQueueService(WakeConsumeMixin, BaseExtendedService):
         self._flow_completion_callbacks.append(callback)
         
     async def _mark_task_complete(self, task_complete_key: str, redis_client) -> None:
-        """标记任务完成"""
+        """标记任务完成（redis_client = 服务共享的同步客户端，绝不可 close）"""
         if redis_client and task_complete_key:
             try:
-                await redis_client.set(task_complete_key, "1")
+                redis_client.set(task_complete_key, "1")
             except Exception as e:
                 logger.warning("标记任务完成失败: %s", _scrub_url_text(e))
     
@@ -544,22 +546,17 @@ class KafkaQueueService(WakeConsumeMixin, BaseExtendedService):
         # 记录任务是否完成
         task_completed = False
         
+        # 任务完成标记：同 handle_task——复用服务 redis_client，去 localhost
+        # 硬编码；无客户端时 None（内存跟踪）。
         redis_client = None
         task_complete_key = None
-        
-        try:
-            # 尝试导入Redis客户端，如果可用，用于标记任务完成
-            import redis.asyncio as aioredis
-            redis_client = aioredis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-            
-            # 设置任务完成标志键
+        if getattr(self, "_redis_client", None) is not None:
             task_complete_key = f"task_complete:kafka:{execution_id}"
-            await redis_client.set(task_complete_key, "0", ex=60)
-            
-        except ImportError:
-            logger.info("Redis客户端不可用，将使用内存状态跟踪任务完成情况")
-            redis_client = None
-            task_complete_key = None
+            try:
+                self._redis_client.set(task_complete_key, "0", ex=60)
+            except Exception as e:  # noqa: BLE001 — 标记失败回退内存跟踪
+                logger.warning("任务完成标记写入失败（回退内存跟踪）: %s", _scrub_url_text(e))
+                task_complete_key = None
         
         # 创建Kafka消费者配置
         consumer_kwargs = {
@@ -700,13 +697,11 @@ class KafkaQueueService(WakeConsumeMixin, BaseExtendedService):
             except asyncio.CancelledError:
                 pass
             
-            if redis_client:
-                await redis_client.close()
-                
+            # 共享客户端不 close——连接归服务生命周期（stop_service）管，
+            # 这里关掉会让后续任务的完成标记静默失效。
+            
         except Exception as e:
             logger.error("Kafka消息监听错误: %s", _scrub_exception_text(e))
-            if redis_client:
-                await redis_client.close()
             raise
     
     def _parse_message(self, message: str, message_format: str) -> Any:
