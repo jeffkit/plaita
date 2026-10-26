@@ -453,6 +453,12 @@ def _admission_version_row(redis: Optional[Redis], flow_id: Any,
                     **detail,
                 ),
             ) from e
+        # worker 池点名（2026-10-27，wake 点名姊妹格，Go 生产可选 ADR-002 修订
+        # 配套）：目标 runtime 池没有活 worker → 422——堵「发布成功、启动入队、
+        # 池内零消费者 → 执行永远 pending」的同族搁浅（#300 门对空池 fail-open
+        # 是发布面兼容取舍，受理面有版本行在手、可以具名拒）。cron 定时服务
+        # （fire_schedule 直连入队）不经本闸，与其既有 A2R24 触发契约一致。
+        _gate_worker_pool_presence(redis, version_row, flow_id=flow_id)
         # 队列服务点名（2026-10-25「现场盘点」）：flow 需要队列服务唤醒
         # （managed:queue 台阶节点，如 delay/approval/http_callback/queue 族）
         # 而对应守护进程不在场（注册表无活实例）→ 422 具名拒——集群档从
@@ -462,6 +468,36 @@ def _admission_version_row(redis: Optional[Redis], flow_id: Any,
         # 自动同闸；失败转具名 WARNING（A2R24 触发契约由调用方维护）。
         _gate_queue_service_presence(redis, version_row, flow_id=flow_id)
     return version_row
+
+
+def _gate_worker_pool_presence(redis: Any, version_row: Any, *, flow_id: Any) -> None:
+    """目标 runtime 池点名：池内零活 worker → 422 worker_pool_absent。
+
+    runtime 口径与 #300 门同源（version_row.runtime 列，空 = 默认 python）；
+    fail-open（probe 查不动）/旧 build 不可分类条目的取舍见
+    :func:`capability_gate.runtime_pool_alive`。"""
+    try:
+        from ..services.capability_gate import runtime_pool_alive as _probe
+    except ImportError:
+        from services.capability_gate import runtime_pool_alive as _probe  # type: ignore
+
+    runtime = getattr(version_row, "runtime", None) or "python"
+    alive = _probe(redis, str(runtime))
+    if alive is False:
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail(
+                "worker_pool_absent",
+                (
+                    f"流程 {flow_id}@{getattr(version_row, 'version', '')} 的目标 "
+                    f"runtime 池（{runtime}）没有任何活 worker——启动后任务将无人"
+                    f"消费、执行将永远 pending。请拉起对应 worker（集群页"
+                    f"{'go_worker' if runtime == 'go' else 'flow_worker'} 模板），"
+                    "或把流程切换到有 worker 在跑的 runtime"
+                ),
+                runtime=str(runtime),
+            ),
+        )
 
 
 def _gate_queue_service_presence(redis: Any, version_row: Any, *, flow_id: Any) -> None:

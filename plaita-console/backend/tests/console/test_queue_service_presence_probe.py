@@ -73,6 +73,16 @@ def env(tmp_path, monkeypatch):
         store.save_flow_definition(fid, "1.0.0", _def(fid, nt), status="published",
                                    tenant_id="default")
     redis = FakeRedis(decode_responses=True)
+    # worker 池点名（2026-10-27）前置：本文件测队列服务点名，python 池在场
+    # 是其前置条件（delayed/waiter 流程都是 runtime=python）。
+    redis.set("plaita:registry:flow_worker:py-default", json.dumps({
+        "instance_id": "py-default",
+        "metadata": {"capability_manifest": {
+            "engine": "python", "ir_contract_version": "2026-10-22.4",
+            "supported_node_types": ["start", "end", "delay", "event", "approval"],
+            "unsupported_node_types": [], "features": ["suspend"],
+        }},
+    }), ex=30)
     app = FastAPI()
     app.state.redis = redis
     app.state.local_mode = False
