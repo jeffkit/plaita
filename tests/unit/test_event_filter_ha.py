@@ -72,6 +72,15 @@ def _make(events_n=5, batch_size=2, fail_on=(), redis=None):
     return rec, filt, events
 
 
+def _run(coro):
+    """py3.12+ 无隐式 event loop——测试自管循环（CI 隔离 chunk 无既有 loop）。"""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _cursor(raw):
     if raw is None:
         return None
@@ -89,17 +98,17 @@ class TestMultiInstanceReconciler(unittest.TestCase):
         r2, f2, _ = _make(events_n=5, batch_size=2, redis=self.redis)
 
         # 实例 1 首轮：E1,E2 → 游标推到已消费位点
-        asyncio.get_event_loop().run_until_complete(r1.scan_once())
+        _run(r1.scan_once())
         c1 = _cursor(self.redis.get(EventReconciler.CURSOR_KEY))
         self.assertIsNotNone(c1)
 
         # 实例 2 从共享游标续：E3,E4 → 游标前进
-        asyncio.get_event_loop().run_until_complete(r2.scan_once())
+        _run(r2.scan_once())
         c2 = _cursor(self.redis.get(EventReconciler.CURSOR_KEY))
         self.assertGreater(c2, c1)
 
         # 实例 1 再轮：E5 → 窗口排空
-        asyncio.get_event_loop().run_until_complete(r1.scan_once())
+        _run(r1.scan_once())
         c3 = _cursor(self.redis.get(EventReconciler.CURSOR_KEY))
         self.assertGreater(c3, c2)
 
@@ -113,12 +122,12 @@ class TestMultiInstanceReconciler(unittest.TestCase):
         r2, f2, _ = _make(events_n=5, batch_size=10, redis=self.redis)
 
         with self.assertRaises(RuntimeError):
-            asyncio.get_event_loop().run_until_complete(r1.scan_once())
+            _run(r1.scan_once())
         # 失败轮：e0,e1 已处理但游标不动（#153 语义在多实例下同样成立）
         self.assertEqual(set(f1.handled), {"e0", "e1"})
 
         # 实例 2 独立收口：全 5 事件处理、游标推进
-        asyncio.get_event_loop().run_until_complete(r2.scan_once())
+        _run(r2.scan_once())
         self.assertEqual(set(f2.handled), {e.event_id for e in events})
         c = _cursor(self.redis.get(EventReconciler.CURSOR_KEY))
         self.assertIsNotNone(c)
@@ -126,7 +135,7 @@ class TestMultiInstanceReconciler(unittest.TestCase):
     def test_cursor_write_monotonic_guard(self):
         """慢实例的陈旧游标写被单调守卫拒绝——不得拖回游标整窗重扫。"""
         r1, _, events = _make(events_n=3, batch_size=10, redis=self.redis)
-        asyncio.get_event_loop().run_until_complete(r1.scan_once())
+        _run(r1.scan_once())
         before = self.redis.get(EventReconciler.CURSOR_KEY)
 
         # 伪造「慢实例」拿着旧事件位点写游标（比当前游标老）
@@ -142,9 +151,9 @@ class TestMultiInstanceReconciler(unittest.TestCase):
         r1, f1, events = _make(events_n=4, batch_size=10, redis=self.redis)
         r2, f2, _ = _make(events_n=4, batch_size=10, redis=self.redis)
 
-        asyncio.get_event_loop().run_until_complete(r1.scan_once())
+        _run(r1.scan_once())
         after1 = _cursor(self.redis.get(EventReconciler.CURSOR_KEY))
-        asyncio.get_event_loop().run_until_complete(r2.scan_once())
+        _run(r2.scan_once())
         after2 = _cursor(self.redis.get(EventReconciler.CURSOR_KEY))
         self.assertIsNotNone(after1)
         self.assertIsNotNone(after2)
