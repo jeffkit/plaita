@@ -178,7 +178,7 @@ def main():
         logger.info("收到信号 %s，正在停止服务...", sig)
         running = False
         for svc in services:
-            svc.stop_service()
+            svc.shutdown()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -186,10 +186,16 @@ def main():
     # 启动服务
     logger.info("启动服务: %s (实例ID: %s)", args.service_type, instance_id)
 
-    if not all(svc.start_service() for svc in services):
+    # start_with_registry（非裸 start_service）：点名闸（3171cad0）按
+    # plaita:registry:{service_type}:* 活键判「唤醒岗在不在」——启动器旧路
+    # 只调 start_service，注册键**从不落盘**：服务在跑、消费在转，集群档带
+    # 唤醒节点的流程却一律 422 queue_service_absent（main 预存红，E2E
+    # 启动审批/延迟流程三红同源）。注册失败按基类语义降级告警不拦启动
+    # （降级必须可观测，与既有口径一致）。
+    if not all(svc.start_with_registry() for svc in services):
         logger.error("服务启动失败")
         for svc in services:
-            svc.stop_service()
+            svc.shutdown()
         sys.exit(1)
 
     logger.info(
@@ -207,7 +213,7 @@ def main():
         pass
     finally:
         for svc in services:
-            svc.stop_service()
+            svc.shutdown()
         logger.info("服务已停止")
 
 
