@@ -972,6 +972,10 @@ def preflight_security_and_limits(environ: Optional[Mapping[str, str]] = None) -
     readers still fail closed (security) or WARN (optional) so a library
     embedder never loses observability, but a real deployment refuses to start
     on an invalid identity/security/resource value.
+
+    队列名分裂（PLAITA_CONSOLE_TASK_QUEUE × PLAITA_QUEUE_NAME/QUEUE_NAME 同设
+    且不同值）默认拒启；多池共存合法拓扑经 PLAITA_ALLOW_QUEUE_SPLIT=1 放行
+    （降 WARNING）。见函数体「队列名分裂闸」注释。
     """
     env: Mapping[str, str] = os.environ if environ is None else environ
     errors: list = []
@@ -1076,6 +1080,44 @@ def preflight_security_and_limits(environ: Optional[Mapping[str, str]] = None) -
             errors.append(
                 f"{name}: empty value is not allowed (identity/routing)"
             )
+
+    # 队列名分裂闸（2026-10-26，A56-02 运行期警告的前移 + 升格）：同主机 env
+    # 同时设了 console 侧任务流（PLAITA_CONSOLE_TASK_QUEUE）与 worker 侧任务流
+    # （PLAITA_QUEUE_NAME/QUEUE_NAME）且值不同 = 进程组对「消息在哪个 Stream」
+    # 各执一词——console/调度按前者派发，worker/event_filter 按后者消费，
+    # 消息落入无人消费的队列（静默搁浅）。启动即拒（宁可 loud fail，不可带病
+    # 入队）；确属多池共存合法拓扑（如 :go/:ctrl 池 worker 与 console 同机）
+    # 设 PLAITA_ALLOW_QUEUE_SPLIT=1 显式放行（降级 WARNING——降级必须可观测）。
+    _split_console = str(env.get("PLAITA_CONSOLE_TASK_QUEUE", "") or "").strip()
+    _split_worker, _split_worker_src = "", None
+    for _name in ("PLAITA_QUEUE_NAME", "QUEUE_NAME"):
+        _present, _value = _env_text(env, _name)
+        if _present and _value:
+            _split_worker, _split_worker_src = _value, _name
+            break
+    if _split_console and _split_worker and _split_console != _split_worker:
+        _split_detail = (
+            f"队列名分裂：PLAITA_CONSOLE_TASK_QUEUE={_split_console!r} 与 "
+            f"worker 侧 {_split_worker_src}={_split_worker!r} 不同——同主机 "
+            "console/调度派发与 worker/event_filter 消费将落在不同 Stream，"
+            "消息会进入无人消费的队列（静默搁浅）。两选一：①统一两侧 env"
+            "（迁移时必须一起改）；②确属多池共存拓扑（如 :go/:ctrl 池与主池"
+            "同机）则设 PLAITA_ALLOW_QUEUE_SPLIT=1 显式放行（降级为 WARNING）"
+        )
+        if "PLAITA_ALLOW_QUEUE_SPLIT" in env and str(env.get("PLAITA_ALLOW_QUEUE_SPLIT", "")).strip():
+            try:
+                _allow_split = parse_bool(
+                    env.get("PLAITA_ALLOW_QUEUE_SPLIT"), "PLAITA_ALLOW_QUEUE_SPLIT"
+                )
+            except ConfigError as exc:
+                errors.append(str(exc))
+            else:
+                if _allow_split:
+                    warnings.append(f"{_split_detail}（已按旋钮显式放行，WARN）")
+                else:
+                    errors.append(_split_detail)
+        else:
+            errors.append(_split_detail)
 
     for warning in warnings:
         _warn_once("preflight", warning, warning, "配置预检：%s", warning)
