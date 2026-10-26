@@ -292,6 +292,21 @@ class TestManualTriggerGateAndRouting:
         client = _client(redis)
         _publish_python_flow(client, "f1")
         _register_go_worker(redis)
+        # worker 池点名（2026-10-27）：python flow 触发也要求 python 池有活
+        # worker——本测主旨是路由（落默认池非 go 池），补注册满足前置。
+        from plaita.server.capability import build_capability_manifest as _bcm
+
+        redis.setex(
+            "plaita:registry:flow_worker:py-1", 30,
+            json.dumps({
+                "instance_id": "py-1",
+                "service_type": "flow_worker",
+                "metadata": {"capability_manifest": _bcm(
+                    ["start", "end", "assignment", "event", "delay"],
+                    engine="python",
+                )},
+            }),
+        )
         view, _row = _create_schedule(client, redis)
         resp = client.post(
             f"/api/schedules/{view['schedule_id']}/trigger", headers=_headers()

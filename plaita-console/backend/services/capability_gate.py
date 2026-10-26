@@ -53,6 +53,11 @@ TIER_SERVICE_TYPES: Dict[str, tuple] = {
 }
 
 #: fail-open 的兜底口径：注册表查询失败（Redis 抖动等）时按放行处理并告警。
+WORKER_POOL_PROBE_FAIL_OPEN_WARNING = (
+    "worker_pool_probe_degraded：worker 注册表查询异常，池点名按放行处理"
+    "（fail-open）——搁浅风险转告警链"
+)
+
 QUEUE_SERVICE_PROBE_FAIL_OPEN_WARNING = (
     "queue_service_probe_unavailable：队列服务注册表查询失败，点名按放行处理"
     "（fail-open）——搁浅风险转告警链，请检查 Redis 连接"
@@ -191,6 +196,78 @@ def collect_pool_manifests(redis: Any, runtime: str) -> Dict[str, Dict[str, Any]
         instance_id = str(info.get("instance_id") or key)
         manifests[instance_id] = manifest
     return manifests
+
+
+def runtime_pool_alive(redis: Any, runtime: str) -> Optional[bool]:
+    """worker 池点名（wake 点名 :func:`queue_service_alive` 的姊妹格，2026-10-27
+    Go 生产可选 ADR-002 修订配套）：目标 runtime 池有没有活 worker。
+
+    判据（扫 ``WORKER_REGISTRY_PATTERN``，与 :func:`collect_pool_manifests`
+    同 pattern 同界）：
+
+    - 任一 worker 的 manifest 分类到本 runtime（``runtime_for_engine``）→
+      ``True``（在岗）；
+    - 池内**零 worker 键** → ``False``（确定无人消费——入队必搁浅）；
+    - 有 worker 键但**无一可分类**到本 runtime：分两种——①有别的 runtime 的
+      可分类 worker（如只有 python worker 在跑，go 流程来了）→ ``False``；
+      ②存在**不可分类**条目（旧 build 无 manifest/坏值）→ ``True`` +
+      WARNING（与 #300 对同一人群的 fail-open 取舍一致：不能证明它不在，
+      不拦——旧 build worker 照样消费队列）；
+
+    返回 ``None`` = Redis 读不动（fail-open，调用方按放行 + WARNING）。
+    TTL 滞后与 :func:`queue_service_alive` 同口径（注册键过期前结果不翻转）。
+    """
+    if redis is None:
+        return False  # 本地档：无集群 worker 注册面（admission 不经此路径，纯防御）
+    keys: List[Any] = []
+    try:
+        for key in redis.scan_iter(WORKER_REGISTRY_PATTERN, count=_SCAN_COUNT):
+            keys.append(key)
+            if len(keys) >= _MAX_KEYS:
+                logger.warning(
+                    "worker 池点名扫描触界（%d 键），结果可能不完整", _MAX_KEYS,
+                )
+                break
+    except Exception as exc:  # noqa: BLE001 — 读不动 fail-open
+        logger.warning(
+            "%s：registry 扫描失败（%s: %s），点名按放行处理",
+            WORKER_POOL_PROBE_FAIL_OPEN_WARNING, type(exc).__name__, exc,
+        )
+        return None
+    if not keys:
+        return False
+    matched = 0
+    unclassifiable = 0
+    for key in keys:
+        try:
+            raw = redis.get(key)
+        except Exception:  # noqa: BLE001 — 单键读失败按不可分类计（fail-open）
+            unclassifiable += 1
+            continue
+        if not raw:
+            unclassifiable += 1
+            continue
+        try:
+            info = json.loads(raw)
+        except Exception:  # noqa: BLE001 — 坏条目按不可分类计
+            unclassifiable += 1
+            continue
+        manifest = manifest_from_metadata(info.get("metadata"))
+        if manifest is None:
+            unclassifiable += 1
+            continue
+        if runtime_for_engine(manifest.get("engine", "")) == runtime:
+            matched += 1
+    if matched > 0:
+        return True
+    if unclassifiable > 0:
+        logger.warning(
+            "%s：runtime=%s 池无已分类 worker，但存在 %d 个不可分类条目"
+            "（旧 build/坏值）——按 fail-open 放行（点名不能证明其不在岗）",
+            WORKER_POOL_PROBE_FAIL_OPEN_WARNING, runtime, unclassifiable,
+        )
+        return True
+    return False
 
 
 def _pooled_supported(manifests: Dict[str, Dict[str, Any]]) -> set:
