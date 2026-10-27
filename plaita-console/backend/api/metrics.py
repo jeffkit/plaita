@@ -11,6 +11,8 @@ worker 自己暴露的 ``/metrics`` 只有本进程的队列计数器；「worke
 鉴权：随管理面挂载（``X-Admin-API-Key``）——Prometheus 抓取配置里带上即可。
 """
 import logging
+import json
+import os
 import threading
 import time
 from typing import Any, Dict, List, Set
@@ -261,10 +263,146 @@ def collect_cluster_metrics(redis: Redis) -> List[Metric]:
     return metrics
 
 
+def collect_queued_age_metrics(redis: Redis) -> List[Metric]:
+    """超龄 queued 行点名（plaita#345，ADR-002 修订跟进单）。
+
+    场景：worker 停机窗口入队是合法运维模式（chaos-wr 契约，受理面放行），
+    但 worker 一直没拉起 ⇒ queued 行静默滞留——投递成功无人消费零信号（#300
+    门对空池 fail-open、受理面 2026-10-27 起为 WARNING+放行）。本收集器在
+    抓取时补上这块观测：扫执行索引 ZSET（score=start epoch 秒）里超过阈值
+    的候选、读状态确认为 queued、按目标 runtime 分组输出 gauge
+    ``plaita_queued_aged_rows{runtime}``；对应 runtime 池零活 worker 时按
+    抓取频率限流 WARNING（复用 _warn_degradation 形状）。
+
+    runtime 口径：状态行 flow_id+flow_version → console 版本行 runtime 列
+    （E2 单真相面；解析不到按 python 缺省，与受理面同口径）。上限
+    ``PLAITA_QUEUED_AGE_SCAN_MAX``（缺省 200）——超限置 metrics_truncated。
+    任何 Redis 读失败走 degradation（整页 0 值不可信语义）。
+    """
+    try:
+        threshold = float(os.environ.get("PLAITA_QUEUED_AGE_WARN_SECONDS", "900") or 900)
+    except ValueError:
+        threshold = 900.0
+    try:
+        scan_max = int(os.environ.get("PLAITA_QUEUED_AGE_SCAN_MAX", "200") or 200)
+    except ValueError:
+        scan_max = 200
+    namespace = os.environ.get("PLAITA_NAMESPACE", "plaita")
+    now = time.time()
+    cutoff = now - max(0.0, threshold)
+    index_key = f"{namespace}:execution:index"
+    metrics: List[Metric] = []
+    degradation = _Degradation()
+    try:
+        candidates = redis.zrangebyscore(
+            index_key, "-inf", cutoff, start=0, num=scan_max
+        ) or []
+        total_in_window = redis.zcount(index_key, "-inf", cutoff) or 0
+    except Exception:  # noqa: BLE001 — 读失败按降级计，整页不 500
+        degradation.record("queued_age_index")
+        return degradation.metrics() + metrics
+
+    aged_by_runtime: Dict[str, int] = {}
+    checked = 0
+    for member in candidates:
+        if checked >= scan_max:
+            break
+        execution_id = member.decode() if isinstance(member, bytes) else str(member)
+        checked += 1
+        try:
+            raw = redis.get(f"{namespace}:execution:{execution_id}")
+        except Exception:  # noqa: BLE001 — 单键读失败降级计
+            degradation.record("queued_age_state")
+            continue
+        if not raw:
+            continue  # 终态 TTL 已清/键不存在——索引陈旧成员，非滞留
+        try:
+            state = json.loads(raw)
+        except Exception:  # noqa: BLE001 — 坏条目跳过
+            continue
+        if str(state.get("status") or "") != "queued":
+            continue  # 只有 queued 是「无人消费」的滞留形态
+        runtime = "python"
+        flow_id = state.get("flow_id")
+        version = state.get("flow_version")
+        try:
+            from ..services import flow_store as _fs
+        except ImportError:  # 平铺布局（cwd=backend）
+            from services import flow_store as _fs  # type: ignore
+        try:
+            row = _fs.get_flow_store().get_version(
+                str(flow_id), str(version), tenant_id=None
+            ) if (flow_id and version) else None
+            if row is not None and getattr(row, "runtime", None):
+                runtime = str(row.runtime)
+        except Exception:  # noqa: BLE001 — runtime 解析失败按缺省池
+            pass
+        aged_by_runtime[runtime] = aged_by_runtime.get(runtime, 0) + 1
+
+    for runtime in sorted(aged_by_runtime):
+        count = aged_by_runtime[runtime]
+        metrics.append(
+            Metric(
+                "queued_aged_rows",
+                count,
+                {"runtime": runtime},
+                "gauge",
+                "排队时长超过阈值的 queued 行数（超龄 = 可能无人消费）",
+            )
+        )
+    if aged_by_runtime:
+        try:
+            try:
+                from ..services.capability_gate import runtime_pool_alive
+            except ImportError:  # 平铺布局（cwd=backend）
+                from services.capability_gate import runtime_pool_alive  # type: ignore
+
+            for runtime in sorted(aged_by_runtime):
+                if runtime_pool_alive(redis, runtime) is False:
+                    _warn_queued_aged(runtime, aged_by_runtime[runtime])
+        except Exception:  # noqa: BLE001 — 点名失败不炸指标页
+            pass
+    if total_in_window > checked:
+        metrics.append(
+            Metric(
+                "metrics_truncated",
+                1,
+                {"kind": "queued_age"},
+                "gauge",
+                "指标扫描触界（结果不完整，见 WARNING）",
+            )
+        )
+    return degradation.metrics() + metrics
+
+
+#: 超龄 queued 告警限流窗口（秒）：对齐 _DEGRADED_WARN_INTERVAL_SECONDS。
+_QUEUED_AGED_WARN_INTERVAL_SECONDS = 300.0
+_queued_aged_warn_lock = threading.Lock()
+_last_queued_aged_warn_at: Dict[str, float] = {}
+
+
+def _warn_queued_aged(runtime: str, count: int) -> None:
+    global _last_queued_aged_warn_at
+    now = time.monotonic()
+    with _queued_aged_warn_lock:
+        last = _last_queued_aged_warn_at.get(runtime, 0.0)
+        if last and now - last < _QUEUED_AGED_WARN_INTERVAL_SECONDS:
+            return
+        _last_queued_aged_warn_at[runtime] = now
+    logger.warning(
+        "queued_aged_rows（放行待消费）：runtime=%s 池有 %d 条排队超过阈值"
+        "（PLAITA_QUEUED_AGE_WARN_SECONDS）的执行且**该池零活 worker**——任务"
+        "将无人消费。请拉起对应 worker（集群页模板）或切换 runtime；若为有计划"
+        "的停机缓冲请忽略本告警",
+        runtime, count,
+    )
+
+
 @router.get("/metrics", response_class=PlainTextResponse)
 async def metrics(request: Request, redis: Redis = Depends(get_redis)) -> PlainTextResponse:
     """Prometheus 文本：队列积压 / 死信堆积 / worker 存活（#26）。"""
-    body = render_prometheus(collect_cluster_metrics(redis))
+    metrics_out = collect_cluster_metrics(redis) + collect_queued_age_metrics(redis)
+    body = render_prometheus(metrics_out)
     return PlainTextResponse(
         content=body, media_type="text/plain; version=0.0.4; charset=utf-8"
     )
