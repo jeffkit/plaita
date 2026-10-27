@@ -268,29 +268,65 @@ class ExecutionTimelineCallback(FlowCallback):
     # 节点事件
     # ------------------------------------------------------------------
 
-    def on_node_start(self, flow, node, **kwargs) -> None:  # noqa: ARG002 — 回调契约
+    def on_node_start(self, flow, node, span=None, **kwargs) -> None:  # noqa: ARG002 — 回调契约
         try:
             node_id = str(node.id)
-            self._open[node_id] = self._clock()
-            self._attempts[node_id] = self._attempts.get(node_id, 0) + 1
-            self._mark("node_start", node_id=node_id, attempt=self._attempts[node_id])
+            # plaita#344 span 模型：配对键 = span_id（实例唯一，并发帧不互踩）；
+            # attempt 键 = (frame_path, iteration, node_id)——同帧重入（resume
+            # 形状的重试）递增，循环轮次由 iteration 表达、不使 attempt 膨胀。
+            # 无 span（旧宿主直调/resume 收尾腿）回退 node_id 键（历史形状）。
+            if span is not None:
+                span_key = span.span_id
+                frame_path = list(span.frame_path)
+                iteration = span.iteration
+                parent_span_id = span.parent_span_id
+                attempt_key = (tuple(span.frame_path), span.iteration, node_id)
+            else:
+                span_key = node_id
+                frame_path, iteration, parent_span_id = [], None, None
+                attempt_key = ((), None, node_id)
+            self._open[span_key] = self._clock()
+            self._attempts[attempt_key] = self._attempts.get(attempt_key, 0) + 1
+            self._mark(
+                "node_start",
+                node_id=node_id,
+                attempt=self._attempts[attempt_key],
+                span_id=span_key,
+                parent_span_id=parent_span_id,
+                frame_path=frame_path,
+                iteration=iteration,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "时间线 on_node_start 失败: %s: %s",
                 _node_label(node), _scrub_exception_text(exc),
             )
 
-    def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:  # noqa: ARG002
+    def on_node_end(self, flow, node, result=None, error=None, exception=None, span=None, **kwargs) -> None:  # noqa: ARG002
         try:
             node_id = str(node.id)
-            started = self._open.pop(node_id, None)
+            if span is not None:
+                span_key = span.span_id
+                frame_path = list(span.frame_path)
+                iteration = span.iteration
+                parent_span_id = span.parent_span_id
+                attempt_key = (tuple(span.frame_path), span.iteration, node_id)
+            else:
+                span_key = node_id
+                frame_path, iteration, parent_span_id = [], None, None
+                attempt_key = ((), None, node_id)
+            started = self._open.pop(span_key, None)
             ended = self._clock()
             duration_ms = max(0, int((ended - started) * 1000)) if started is not None else None
             fields: Dict[str, Any] = {
                 "node_id": node_id,
-                "attempt": self._attempts.get(node_id, 1),
+                "attempt": self._attempts.get(attempt_key, 1),
                 "ok": not (error or exception),
                 "error": _error_text(error, exception),
+                "span_id": span_key,
+                "parent_span_id": parent_span_id,
+                "frame_path": frame_path,
+                "iteration": iteration,
             }
             if duration_ms is not None:
                 fields["duration_ms"] = duration_ms

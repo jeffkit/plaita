@@ -60,29 +60,37 @@ class NodeTimingCallback(FlowCallback):
     """
     """采集节点开始/结束时间；``snapshot()`` 返回可直接序列化的字典。"""
 
+    # 每节点保留的逐轮明细上限（plaita#344）：万轮 loop 不撑爆快照；截断计数
+    # 可观测（occurrences_truncated）。
+    MAX_OCCURRENCES_PER_NODE = 200
+
     def __init__(self, clock=time.time) -> None:
         # clock 可注入（测试用假时钟），默认墙钟
         self._clock = clock
+        # 配对键 = span_id（plaita#344 span 模型）；无 span（旧宿主直调）回退
+        # node_id——两种键同池不撞（span_id 含随机后缀）。
         self._open: Dict[str, float] = {}
         self._timings: Dict[str, Dict[str, Any]] = {}
 
-    def on_node_start(self, flow, node, **kwargs) -> None:  # noqa: ARG002 — 回调契约
+    def on_node_start(self, flow, node, span=None, **kwargs) -> None:  # noqa: ARG002 — 回调契约
         try:
-            self._open[str(node.id)] = self._clock()
+            key = span.span_id if span is not None else str(node.id)
+            self._open[key] = self._clock()
         except Exception as exc:  # noqa: BLE001 — 观测失败绝不影响执行
             logger.warning("节点耗时采集 on_node_start 失败: %s: %s", _node_label(node), _scrub_exception_text(exc))
 
-    def on_node_end(self, flow, node, result=None, error=None, exception=None, **kwargs) -> None:  # noqa: ARG002
+    def on_node_end(self, flow, node, result=None, error=None, exception=None, span=None, **kwargs) -> None:  # noqa: ARG002
         try:
             node_id = str(node.id)
-            started = self._open.pop(node_id, None)
+            key = span.span_id if span is not None else node_id
+            started = self._open.pop(key, None)
             if started is None:
-                # 没见过 start（回调中途接管/老 worker）：只记结束时间，不编造耗时
+                # 没见过 start（回调中途接管/老 worker/resume 收尾腿）：只记结束时间，不编造耗时
                 ended = self._clock()
-                self._record(node_id, ended, ended, None, error or exception)
+                self._record(node_id, ended, ended, None, error or exception, span=span)
                 return
             ended = self._clock()
-            self._record(node_id, started, ended, max(0, int((ended - started) * 1000)), error or exception)
+            self._record(node_id, started, ended, max(0, int((ended - started) * 1000)), error or exception, span=span)
         except Exception as exc:  # noqa: BLE001
             logger.warning("节点耗时采集 on_node_end 失败: %s: %s", _node_label(node), _scrub_exception_text(exc))
 
@@ -93,6 +101,7 @@ class NodeTimingCallback(FlowCallback):
         ended: float,
         duration_ms: Optional[int],
         error: Any,
+        span: Any = None,
     ) -> None:
         prev = self._timings.get(node_id)
         attempts = int(prev.get("attempts", 0)) + 1 if prev else 1
@@ -110,6 +119,25 @@ class NodeTimingCallback(FlowCallback):
         if duration_ms is not None:
             entry["duration_ms"] = duration_ms
             entry["total_duration_ms"] = total
+        # 逐轮明细（plaita#344，additive）：每执行实例一条；聚合字段语义不变。
+        # 注意 entry 每次重建——occurrences 必须自 prev 带过来再追加。
+        occ = list(prev.get("occurrences") or []) if prev else []
+        occ.append({
+            "span_id": span.span_id if span is not None else None,
+            "iteration": span.iteration if span is not None else None,
+            "frame_path": list(span.frame_path) if span is not None else [],
+            "started_at": _iso(started),
+            "ended_at": _iso(ended),
+            "duration_ms": duration_ms,
+            "failed": bool(error),
+        })
+        truncated = int(prev.get("occurrences_truncated", 0)) if prev else 0
+        if len(occ) > self.MAX_OCCURRENCES_PER_NODE:
+            occ.pop(0)
+            truncated += 1
+        if truncated:
+            entry["occurrences_truncated"] = truncated
+        entry["occurrences"] = occ
         self._timings[node_id] = entry
 
     def snapshot(self) -> Dict[str, Dict[str, Any]]:
