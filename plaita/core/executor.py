@@ -296,8 +296,7 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
         # 宿主身份随执行链继承（判定以 host_profile 沿根链读取为准，副本供
         # 节点/宿主直读；plaita#331）。
         child.execution_profile = self.execution_profile
-        # span 帧传播（plaita#344，字段说明见 plaita/core/spans.py）：路径延长
-        # 一层、parent span 继承当前复合节点盖章；限定符由 bind_child_step 绑。
+        # span 帧传播（plaita#344，字段见 plaita/core/spans.py；限定符 bind_child_step 绑）
         if getattr(self, "current_frame_node_id", None):
             child.frame_path = tuple(getattr(self, "frame_path", ())) + (
                 str(self.current_frame_node_id),)
