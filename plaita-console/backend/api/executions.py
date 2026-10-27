@@ -471,10 +471,13 @@ def _admission_version_row(redis: Optional[Redis], flow_id: Any,
 
 
 def _gate_worker_pool_presence(redis: Any, version_row: Any, *, flow_id: Any) -> None:
-    """目标 runtime 池点名：池内零活 worker → 422 worker_pool_absent。
+    """目标 runtime 池点名：池内零活 worker → **具名 WARNING + 放行**。
 
-    runtime 口径与 #300 门同源（version_row.runtime 列，空 = 默认 python）；
-    fail-open（probe 查不动）/旧 build 不可分类条目的取舍见
+    降级史（2026-10-27 晚）：首版 422 worker_pool_absent 与 chaos-wr 契约
+    （停机窗口入队合法、拉起后消费）直接冲突——worker 全停时 start 被拒、
+    任务不入队、重启后无可消费。故集群档改具名 WARNING（观测不静默），硬拒
+    只保留「永久缺席」面（本地档静态拒）；搁浅防护后续 = queued 行龄告警
+    （跟进单）。runtime 口径与 #300 门同源；fail-open/旧 build 取舍见
     :func:`capability_gate.runtime_pool_alive`。"""
     try:
         from ..services.capability_gate import runtime_pool_alive as _probe
@@ -484,19 +487,12 @@ def _gate_worker_pool_presence(redis: Any, version_row: Any, *, flow_id: Any) ->
     runtime = getattr(version_row, "runtime", None) or "python"
     alive = _probe(redis, str(runtime))
     if alive is False:
-        raise HTTPException(
-            status_code=422,
-            detail=error_detail(
-                "worker_pool_absent",
-                (
-                    f"流程 {flow_id}@{getattr(version_row, 'version', '')} 的目标 "
-                    f"runtime 池（{runtime}）没有任何活 worker——启动后任务将无人"
-                    f"消费、执行将永远 pending。请拉起对应 worker（集群页"
-                    f"{'go_worker' if runtime == 'go' else 'flow_worker'} 模板），"
-                    "或把流程切换到有 worker 在跑的 runtime"
-                ),
-                runtime=str(runtime),
-            ),
+        logger.warning(
+            "worker_pool_absent（放行）：flow=%s@%s 的目标 runtime 池（%s）没有"
+            "活 worker——任务入队后将等待 worker 拉起；请拉起对应 worker"
+            "（集群页 %s 模板）或切换 runtime",
+            flow_id, getattr(version_row, "version", ""), runtime,
+            "go_worker" if runtime == "go" else "flow_worker",
         )
 
 
@@ -535,24 +531,17 @@ def _gate_queue_service_presence(redis: Any, version_row: Any, *, flow_id: Any) 
             needed.setdefault(svc, node)
     if not needed:
         return
-    for node_type in sorted(needed):
-        alive = queue_service_alive(redis, node_type)
+    for service_type in sorted(needed):
+        alive = queue_service_alive(redis, service_type)
         if alive is False:
-            raise HTTPException(
-                status_code=422,
-                detail=error_detail(
-                    "queue_service_absent",
-                    (
-                        f"流程 {flow_id}@{getattr(version_row, 'version', '')} 的节点 "
-                        f"{node_type!r} 挂起后需要队列唤醒服务（{node_type}_service/"
-                        "wake 进程对应 source），但注册表里没有活实例——任务投递后"
-                        "将无人消费、执行将永久挂起。请拉起对应服务（console 集群页"
-                        "或 python -m plaita.server.services wake）后重试，或把该"
-                        "节点换成不需要队列服务的写法"
-                    ),
-                    node_type=node_type,
-                    service_type=node_type,
-                ),
+            # 与 worker 池点名同口径（2026-10-27 晚降级）：服务停机窗口内入队
+            # 会由重启后的服务消费（队列持久化），硬拒打断该合法模式——具名
+            # WARNING 留观测；本地档硬拒不受影响（永久缺席面）。
+            logger.warning(
+                "queue_service_absent（放行）：flow=%s@%s 的节点需要队列唤醒服务 "
+                "%s（wake 进程对应 source），注册表无活实例——任务入队后将等待"
+                "服务拉起；请拉起对应服务进程，或换不需要唤醒服务的写法",
+                flow_id, getattr(version_row, "version", ""), service_type,
             )
 
 
