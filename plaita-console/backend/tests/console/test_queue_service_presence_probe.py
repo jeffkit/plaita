@@ -105,19 +105,24 @@ def _register(redis, service_type):
     redis.set(f"plaita:registry:{service_type}:i1", "{}", ex=30)
 
 
-def test_cluster_start_delay_rejected_when_service_absent(env):
-    """负格：delay flow × 注册表无 delay 实例 → 422 queue_service_absent。"""
+def test_cluster_start_delay_warns_and_admits_when_service_absent(env, caplog):
+    """负格降级（2026-10-27 晚，停机缓冲契约）：delay flow × 注册表无 delay
+    实例 → **具名 WARNING + 放行**（任务入队等 worker/服务拉起）——硬拒与
+    chaos-wr 停机缓冲契约冲突，worker 池同口径。"""
+    import logging
+
     client, redis, headers = env
-    r = client.post("/api/executions", json={"flow_id": "delayed"}, headers=headers)
-    assert r.status_code == 422, r.text
-    detail = r.json()["detail"]
-    assert detail["code"] == "queue_service_absent"
-    assert detail["service_type"] == "delay"  # 两级模型：唤醒源= wake_service 接线
-    assert "无人消费" in detail["message"]
+    with caplog.at_level(logging.WARNING):
+        r = client.post("/api/executions", json={"flow_id": "delayed"}, headers=headers)
+    assert r.status_code == 200, r.text  # 放行（入队等拉起）
+    assert any("queue_service_absent" in r.message for r in caplog.records)
 
 
 def test_cluster_start_delay_passes_when_service_registered(env):
-    """正格：注册表有 delay 活实例 → 放行（入队/受理照常）。"""
+    """正格：注册表有 delay 活实例 → 放行且**无**缺席告警（点名安静面）。"""
+    import logging
+
+    caplog_handler = None
     client, redis, headers = env
     _register(redis, "delay")
     r = client.post("/api/executions", json={"flow_id": "delayed"}, headers=headers)

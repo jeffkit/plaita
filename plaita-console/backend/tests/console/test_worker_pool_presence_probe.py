@@ -101,17 +101,17 @@ def _register_worker(redis, engine, instance="i1"):
     redis.set(f"plaita:registry:flow_worker:{instance}", _worker(engine), ex=30)
 
 
-def test_go_flow_start_rejected_when_go_pool_empty(env):
-    """负格（主诉求）：go 流程 × 注册表只有 python worker → 422
-    worker_pool_absent，点名 go 池、给拉起指引。"""
+def test_go_flow_start_warns_and_admits_when_go_pool_empty(env, caplog):
+    """负格降级（2026-10-27 晚，停机缓冲契约）：go 流程 × go 池空 → 具名
+    WARNING + 放行（任务入队等 worker 拉起——chaos-wr 契约优先于硬拒）。"""
+    import logging
+
     client, redis, headers = env
     _register_worker(redis, "python", "py-1")
-    r = client.post("/api/executions", json={"flow_id": "goflow"}, headers=headers)
-    assert r.status_code == 422, r.text
-    detail = r.json()["detail"]
-    assert detail["code"] == "worker_pool_absent"
-    assert detail["runtime"] == "go"
-    assert "go_worker" in detail["message"]
+    with caplog.at_level(logging.WARNING):
+        r = client.post("/api/executions", json={"flow_id": "goflow"}, headers=headers)
+    assert r.status_code == 200, r.text  # 放行（入队等拉起）
+    assert any("worker_pool_absent" in r.message for r in caplog.records)
 
 
 def test_go_flow_start_passes_when_go_worker_registered(env):
@@ -122,13 +122,15 @@ def test_go_flow_start_passes_when_go_worker_registered(env):
     assert r.status_code == 200, r.text
 
 
-def test_python_flow_start_rejected_when_pool_empty(env):
-    """Python 池同样受闸（同一搁浅族的新行为钉）：零 worker → 422。"""
+def test_python_flow_warns_when_pool_empty(env, caplog):
+    """Python 池同口径：零 worker → WARNING + 放行（停机缓冲契约，观测不静默）。"""
+    import logging
+
     client, redis, headers = env
-    r = client.post("/api/executions", json={"flow_id": "pyflow"}, headers=headers)
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"]["code"] == "worker_pool_absent"
-    assert r.json()["detail"]["runtime"] == "python"
+    with caplog.at_level(logging.WARNING):
+        r = client.post("/api/executions", json={"flow_id": "pyflow"}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert any("worker_pool_absent" in r.message for r in caplog.records)
 
 
 def test_python_flow_passes_with_python_worker(env):
