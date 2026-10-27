@@ -90,6 +90,16 @@ def bind_child_step(parent: Any, child: Any, sub_key: Any) -> None:
     所有权面放大成替身层的 TypeError）+ 本函数绑定。替身子执行缺
     ``bind_step`` 时静默跳过：所有权是观测与收据面，绝不打断节点执行。
     """
+    # span 帧限定符（plaita#344）：sub_key = 迭代索引（loop 族）或分支名
+    # （parallel）——与 frame_path（get_child_execution 传播）合成每轮唯一
+    # 归属。观测面绝不阻断执行：鸭子赋值，替身缺写入能力时静默跳过。
+    try:
+        child.frame_key = sub_key
+    except Exception as exc:  # noqa: BLE001 — 观测面不阻断执行
+        logger.debug(
+            "子执行 frame 限定符绑定失败（忽略，帧归属退化到 frame_path）: sub_key=%r: %s",
+            sub_key, _scrub_exception_text(exc),
+        )
     binder = getattr(child, "bind_step", None)
     if not callable(binder):
         return

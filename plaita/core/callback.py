@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from plaita.core.url_redaction import _scrub_exception_text, _scrub_url_text
 
 if TYPE_CHECKING:
@@ -97,6 +97,10 @@ class CallbackManager(BaseCallbackManager):
     ) -> None:
         self.handlers = list(handlers)
         self.parent = parent
+        # span kwarg 签名能力缓存（plaita#344）：按 (handler id, method) 记录
+        # handler 是否接受 span kwarg（**kwargs 或具名 span）——严格签名
+        # handler（无 **kwargs）不带 span 调用，零破坏。
+        self._span_capability: Dict[Tuple[int, str], bool] = {}
         if parent and inherit_handlers:
             self.handlers.extend(parent.handlers)
 
@@ -106,10 +110,32 @@ class CallbackManager(BaseCallbackManager):
     def remove_handler(self, handler: FlowCallback) -> None:
         self.handlers.remove(handler)
 
+    def _accepts_span(self, handler: Any, handler_method: str) -> bool:
+        key = (id(handler), handler_method)
+        cached = self._span_capability.get(key)
+        if cached is None:
+            try:
+                import inspect
+
+                sig = inspect.signature(getattr(handler, handler_method))
+                cached = any(
+                    param.kind is param.VAR_KEYWORD or param.name == "span"
+                    for param in sig.parameters.values()
+                )
+            except (TypeError, ValueError):
+                cached = True  # 内省不了按接受处理（分发器逐 handler 吞异常兜底）
+            self._span_capability[key] = cached
+        return cached
+
     def _call_handlers(self, handler_method: str, *args, **kwargs) -> None:
+        span = kwargs.get("span") if kwargs else None
         for handler in self.handlers:
             try:
-                getattr(handler, handler_method)(*args, **kwargs)
+                if span is not None and not self._accepts_span(handler, handler_method):
+                    filtered = {k: v for k, v in kwargs.items() if k != "span"}
+                    getattr(handler, handler_method)(*args, **filtered)
+                else:
+                    getattr(handler, handler_method)(*args, **kwargs)
             except Exception as e:
                 logger.warning("Error in %s callback: %s", handler_method, _scrub_exception_text(e))
 

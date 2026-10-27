@@ -256,6 +256,16 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
         # get_child_execution() 的新实例, 不受影响。
         self._running = False
 
+        # 执行 trace span 上下文（plaita#344，两语义模型观测面）：frame_* 由
+        # get_child_execution 沿复合帧传播、bind_child_step 绑迭代/分支限定符；
+        # current_* 由 NodeRunner.run_node 每次节点执行前盖章。只读消费方 =
+        # 记录器（node_timings / execution_timeline）与 spans.build_node_span。
+        self.frame_path: tuple = ()
+        self.frame_key: Any = None
+        self.frame_parent_span: Optional[str] = None
+        self.current_span_id: Optional[str] = None
+        self.current_frame_node_id: Optional[str] = None
+
         if callback_manager:
             self.callback_manager = callback_manager
             for handler in callback_handlers or []:
@@ -295,6 +305,14 @@ class FlowExecution(ExpressNamespaceMixin, OwnershipMixin, CompatRunMixin):
         # 宿主身份随执行链继承（判定以 host_profile 沿根链读取为准，副本供
         # 节点/宿主直读；plaita#331）。
         child.execution_profile = self.execution_profile
+        # span 帧上下文传播（plaita#344）：盖章的 current_frame_node_id 即当前
+        # 复合节点（loop/parallel/child 的 get_child_execution 都发生在其
+        # execute 内）——frame_path 延长一层、parent span 继承之。迭代/分支
+        # 限定符由 bind_child_step 绑（frame_key）。
+        frame_node = self.current_frame_node_id
+        if frame_node:
+            child.frame_path = tuple(self.frame_path) + (str(frame_node),)
+            child.frame_parent_span = self.current_span_id
         return child
 
     @property

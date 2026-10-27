@@ -553,8 +553,32 @@ class NodeRunner:
         Triggers callback_manager.on_node_start/on_node_end.
         Updates context with last_node_id, last_branch, and node result.
         """
+        # plaita#344：节点执行实例身份（span）——每执行实例唯一，随回调下发
+        # （span= kwarg，按 handler 签名能力分发）；同时盖章到执行上下文供
+        # 复合节点绑子帧（get_child_execution 读 current_*）。生成失败降级为
+        # None（记录器按 node_id 回退配对，与历史行为一致）——观测面绝不
+        # 阻断执行。
+        span = None
+        span_host = self.node_execution or self.context
+        try:
+            from plaita.core.spans import build_node_span
+
+            span = build_node_span(span_host, node)
+            span_host.current_span_id = span.span_id
+            span_host.current_frame_node_id = node.id
+        except Exception as exc:  # noqa: BLE001 — 观测面不阻断执行
+            logger.debug(
+                "节点 span 生成失败（观测退化 node_id 配对）: node=%s: %s",
+                getattr(node, "id", "?"), _scrub_exception_text(exc),
+            )
+            span = None
+
         if callback_manager:
-            callback_manager.on_node_start(flow, node)
+            try:
+                callback_manager.on_node_start(flow, node, span=span)
+            except TypeError:
+                # 非 plaita 管理器（严格签名）回退无 span 形状。
+                callback_manager.on_node_start(flow, node)
 
         try:
             result = await self._execute_with_retry(flow, node, max_timeout_ms)
@@ -568,13 +592,20 @@ class NodeRunner:
             # `except BaseException` 是为了把取消（CancelledError/
             # FlowCancelledException）也收进时间线——它们同样是终态事件。
             if callback_manager:
-                callback_manager.on_node_end(
-                    flow, node, None, _node_error_payload(exc), exception=exc,
-                    # 收口批①（裁决 B）：这条是 **abort/取消/超时** 的补发路径 ⇒ 用
-                    # **路径标记**告诉带 span 的观测端「标注错误但保持 span 打开」。
-                    # 直接错误钩子不带此标记 ⇒ 仍按既有契约终结 span。
-                    keep_span_open=True,
-                )
+                try:
+                    callback_manager.on_node_end(
+                        flow, node, None, _node_error_payload(exc), exception=exc,
+                        # 收口批①（裁决 B）：这条是 **abort/取消/超时** 的补发路径 ⇒ 用
+                        # **路径标记**告诉带 span 的观测端「标注错误但保持 span 打开」。
+                        # 直接错误钩子不带此标记 ⇒ 仍按既有契约终结 span。
+                        keep_span_open=True,
+                        span=span,
+                    )
+                except TypeError:
+                    callback_manager.on_node_end(
+                        flow, node, None, _node_error_payload(exc), exception=exc,
+                        keep_span_open=True,
+                    )
             raise
 
         self.context.last_node_id = node.id
@@ -586,7 +617,10 @@ class NodeRunner:
         self.context.update_node_result(node, result)
 
         if callback_manager:
-            callback_manager.on_node_end(flow, node, result)
+            try:
+                callback_manager.on_node_end(flow, node, result, span=span)
+            except TypeError:
+                callback_manager.on_node_end(flow, node, result)
 
         logger.debug("branch: %s", branch)
         return result, branch
