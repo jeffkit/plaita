@@ -1,6 +1,6 @@
 ---
 name: flow-coder
-version: 0.4.0
+version: 0.4.1
 description: 用 plaita 的 @flow DSL 把自然语言需求编译成可执行流程并运行。当用户要求"用 @flow 实现"、"生成一个 flow"、"编排一个流程/Agent/工作流并执行"、"写业务编排/迁移到 plaita"、"发布 flow 到 console"时使用本技能。技能指导 AI 产出 @flow 源码 → 编译期校验 → 运行期执行 → 错误回灌自纠，形成闭环；业务场景（plaita-nodes 节点、项目结构、console 发布）见 authoring-spec 规范。
 ---
 
@@ -329,6 +329,13 @@ flow_from_source(src).run(q="plaita 是什么")
 ### 第 1 步：理解需求
 
 把用户需求拆成：输入字段、输出形态、步骤（条件/循环/调用/并行）、是否需要子流程。若信息不足以确定行为，**先向用户提问**，不要猜。
+
+**形态两问（决定节点选择，先答再写，#348）**：
+
+1. 流程要不要**挂起**——等人审批、定时等待、等外部消息/回调？要挂起，方案里就会出现挂起类节点（`tier=managed`、`suspends=true`：`delay`/`approval`/`hitl_await`/`event`/`*_queue` 族；同步阻塞的 `hitl` 是 inline 例外）；
+2. 要挂起的话，目标宿主是 **console 托管面**还是嵌入直跑（inline）？——挂起类节点在直跑宿主**不可执行**（发布成功、调度必败）；答不出来就向用户确认目标环境，不要默认。
+
+选节点时用 `flow_list_nodes` 行内的 `tier` / `suspends` 字段核对形态；写完后用 `flow_compile(src, profile=<目标环境>)` 自检——返回**非致命** `execution_requirements={profile, required, missing}` 报告，`missing` 非空即该 flow 需要的台阶目标环境不具备（详见 authoring-spec §7「先定形态」）。
 
 ### 第 2 步：生成 @flow 源码
 
