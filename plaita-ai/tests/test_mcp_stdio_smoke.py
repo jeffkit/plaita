@@ -18,8 +18,13 @@ if _PLAITA_AI not in sys.path:
     sys.path.insert(0, _PLAITA_AI)
 
 try:
-    import mcp.server.fastmcp  # noqa: F401
-    _REAL_MCP = True
+    import mcp.server.fastmcp as _fastmcp  # noqa: F401
+
+    # `import mcp` 成功 ≠ 真包在场：全量收集时兄弟测试模块（test_mcp_integration
+    # 等）会先注入最小 stub 兜底，`import` 探针会被撑过 skip 条件、随后握手对
+    # stub 跑必炸（本机无 mcp 的全量 suite 实证）。真包经 pip 安装必有 __spec__，
+    # types.ModuleType 手搓的 stub 恒为 None——以它区分，别把 stub 当真包。
+    _REAL_MCP = getattr(_fastmcp, "__spec__", None) is not None
 except ImportError:
     _REAL_MCP = False
 
