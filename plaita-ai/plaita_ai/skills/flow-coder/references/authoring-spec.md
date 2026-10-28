@@ -236,7 +236,29 @@ mediaflow 验证过的结构，新业务仓照抄：
 
 ## 7. 发布 plaita-console
 
-链路（参照 mediaflow `publish_console.py`）：`compile_source` 出 IR → console 建条目 → 存 IR draft → publish → API dry-run 验证。
+### 7.0 先定形态（发布链路第 0 步，#348）
+
+写 flow 之前先确定目标环境——节点选错形态，**发布成功、调度必败**（挂起类节点在直跑宿主不可执行）。形态两问与节点选择指引见 SKILL.md 第 1 步；这里给目标环境词汇表与自检方法：
+
+| 目标环境（`profile=`） | 节点行 `tier` 词汇 | 能跑什么 |
+|---|---|---|
+| `inline`（嵌入直跑：业务进程内 `flow_from_source`） | `inline` | 纯计算/控制流/HTTP/agentrun 等无挂起流程 |
+| `managed`（console 托管面） | `managed` | 可挂起：`approval`/`hitl_await`/`event`/`http_callback` 等，靠事件总线唤醒 |
+| `managed:queue`（托管 + 队列唤醒） | `managed` | 再加定时/队列族（`delay`/`kafka_queue`/`redis_queue`），**需队列唤醒服务在场**（受理门点名，服务不在岗 422） |
+
+> 节点行 `tier` 只有两值（inline/managed，两级模型，owner 裁决 2026-10-25）；`managed:queue` 是**目标环境**词汇——队列唤醒需求记在节点 `wake_service` 上，由运行时受理门检查，不是节点行字段。
+
+**自检（非致命，不改 `ok`）**：`flow_compile(src, profile=<目标环境>)` 返回 `execution_requirements={profile, required, missing}`（递归含子流程/并行/引用流）。`missing` 非空 = 该 flow 需要的台阶目标环境不具备——换宿主或换节点，**不要**硬发。旧档名（normal/generator/distributed/local）归一化兼容（normal→inline）。含 `DELAY` 的 flow 对 `inline` 自检的实测形状：
+
+```python
+# flow_compile(src, profile="inline") ->
+# {"ok": true, "execution_requirements": {"profile": "inline",
+#  "required": ["managed"], "missing": ["managed"]}}   # missing 非空：该去托管面
+```
+
+### 7.1 发布链路
+
+链路（参照 mediaflow `publish_console.py`）：`compile_source` 出 IR → console 建条目 → 存 IR draft → publish → API dry-run 验证。挂起类 flow 发布前先过 §7.0 自检。
 
 **发布前必查**：console 拉起的 flow_worker **不会自动加载你业务 venv 里的节点**。worker 侧须注入：
 
