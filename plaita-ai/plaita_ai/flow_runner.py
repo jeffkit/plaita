@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from importlib import resources
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 
 from plaita.core.errors import SuspendNotExecutableError
 from plaita.dsl.codeflow import compile_source, flow_from_source
@@ -17,14 +17,60 @@ from plaita.node import get_default_registry
 
 _CODEFLOW_ERR = re.compile(r"^\[codeflow\] 第 (\?|\d+) 行: (.+)$", re.DOTALL)
 
+# plaita#351 P2-2：报错文本 → 稳定 code + fix 提示。匹配按子串、取首条命中；
+# 未命中保持旧形状 {line, message}（code/fix 稀疏键，既有消费者逐字节兼容）。
+# 子串取自编译器具名报错的稳定前缀（断言钉在 tests/test_compile_error_codes.py）。
+_ERROR_CODES: tuple = (
+    ("f-string", "fstring_unsupported",
+     '用 F.concat(...) 拼接，例：F.concat("hi ", INPUT.name)'),
+    ("下标只支持整数常量", "subscript_unsupported",
+     "字符串/动态键下标改用字段访问 INPUT.x；仅 [0]/[-1] 整数常量下标受支持"),
+    ("被多次赋值", "duplicate_assignment",
+     "跨分支同名赋值被编译期拒绝：各分支用不同变量名，或让每条分支直接 return"),
+    ("的赋值右侧引用了它自己", "self_reference_assignment",
+     "循环计数用 for w in WHILE(条件, id=...) 写法，循环态走 item/rounds"),
+    ("迭代对象必须是", "for_iter_unsupported",
+     "for 只能迭代 MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...) 节点调用；列表变换用 MAP/FILTER"),
+    ("不支持的语句", "unsupported_statement",
+     "不支持 break/continue/try/except；退出条件写进 WHILE 条件，错误处理用 on_error=ErrorHandler(...)"),
+    ("end(...) 的 error 必须是字面数据", "end_error_not_literal",
+     "end(error=...) 只收字面 dict；动态值放 output= 或上游节点"),
+    ("caps 字段不支持动态展开", "dynamic_kwargs_unsupported",
+     "节点传参写具名 kwargs；** 展开仅支持字符串键的 dict 字面量"),
+    ("未注册的自定义节点", "unregistered_node",
+     "按报错列出的可用类型修正占位符名（node_type 大写），或先 get_default_registry().register(...)"),
+    ("未知名字", "unknown_name",
+     "检查拼写；未赋值的变量不可引用——先赋值再用，或改 INPUT.x / NODE.x"),
+    ("只能作为语句或赋值右侧", "node_call_in_expression",
+     "拆成两条语句：r = HTTP.post(...); return r.data"),
+    ("不支持的调用", "unsupported_call",
+     "表达式里只能调 F.xxx(...) 或内置 len/abs/round/str"),
+)
+
+
+def _error_code_fix(message: str) -> tuple:
+    for needle, code, fix in _ERROR_CODES:
+        if needle in message:
+            return code, fix
+    return None, None
+
 
 @dataclass
 class CompileError:
     line: Optional[int]
     message: str
+    # plaita#351 P2-2：稳定错误码与修复提示（稀疏键——未命中分类时保持 None，
+    # to_dict 不产出该键，旧 {line, message} 消费者形状不变）。
+    code: Optional[str] = None
+    fix: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"line": self.line, "message": self.message}
+        payload: Dict[str, Any] = {"line": self.line, "message": self.message}
+        if self.code is not None:
+            payload["code"] = self.code
+        if self.fix is not None:
+            payload["fix"] = self.fix
+        return payload
 
 
 @dataclass
@@ -81,10 +127,12 @@ def _parse_codeflow_error(exc: Exception) -> CompileError:
     text = str(exc).strip()
     match = _CODEFLOW_ERR.match(text)
     if not match:
-        return CompileError(line=None, message=text)
+        code, fix = _error_code_fix(text)
+        return CompileError(line=None, message=text, code=code, fix=fix)
     line_raw, message = match.group(1), match.group(2)
     line = None if line_raw == "?" else int(line_raw)
-    return CompileError(line=line, message=message)
+    code, fix = _error_code_fix(message)
+    return CompileError(line=line, message=message, code=code, fix=fix)
 
 
 def compile_flow(
@@ -110,9 +158,10 @@ def compile_flow(
         # validate_flow_ir + Flow.model_validate（与 flow_from_source 同门）
         flow = build_flow(ir)
     except FlowIRValidationError as exc:
+        code, fix = _error_code_fix(str(exc))
         return CompileResult(
             ok=False,
-            errors=[CompileError(line=None, message=str(exc))],
+            errors=[CompileError(line=None, message=str(exc), code=code, fix=fix)],
         )
     except Exception as exc:
         err = _parse_codeflow_error(exc)
@@ -222,6 +271,107 @@ def list_node_types(*, discover_plugins: bool = True) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+_NODE_RESERVED_FIELDS: Dict[str, str] = {
+    "id": "节点 id；赋值形态用变量名充当 id，不要同时传 id=",
+    "timeout": "保留 kwargs，ISO 时长（如 PT5S）",
+    "on_error": "ErrorHandler(strategy, default=...)，错误策略走基类",
+}
+
+# 基类拓扑/标签字段：不进 expression_fields（next 是节点寻址不是表达式，
+# name/desc 是展示标签），也不进 example（example 只放节点自身必填字段）。
+_NODE_BASE_FIELDS = frozenset(
+    {"id", "name", "desc", "next", "output", "timeout", "on_error", "errorHandler"}
+)
+
+
+def _is_expression_field(field_info: Any) -> bool:
+    """Optional[Any]/Optional[str] 字段可接表达式串（$INPUT.x 等）。
+
+    与 skill 约定一致（authoring-spec §2.4）：强类型 int/bool 字段构建期会拒绝
+    表达式串；判据 = 去掉 Optional 后是 Any 或恰好 str。
+    """
+    ann = getattr(field_info, "annotation", None)
+    if ann is None:
+        return False
+    if ann is Any:
+        return True
+    if get_origin(ann) is Union:
+        args = [a for a in get_args(ann) if a is not type(None)]
+        if any(a is Any for a in args):
+            return True
+        return args == [str]
+    return False
+
+
+def _example_value(name: str, field_info: Any) -> Any:
+    """必填字段的占位示例值（最小可用 kwargs 的原料）。"""
+    ann = getattr(field_info, "annotation", None)
+    if ann is bool:
+        return True
+    if ann is int:
+        return 1
+    if ann is float:
+        return 1.0
+    if get_origin(ann) in (dict, Dict):
+        return {}
+    if get_origin(ann) in (list, List):
+        return []
+    return f"<{name}>"
+
+
+def describe_node_type(node_type: str, *, discover_plugins: bool = True) -> Dict[str, Any]:
+    """Describe one registered node type: pydantic schema + example + notes.
+
+    plaita#351 P0-2：业务节点字段 schema 此前不可查（flow_list_nodes 只有
+    tier/suspends），AI 作者只能猜 agentrun/hitl/连接器的字段名，猜错落到节点
+    构造期 pydantic 错误且无 source_line，修复闭环弱于编译错误。本工具让作者期
+    即可查：schema 用 ``model_json_schema()``，example 给必填字段的最小 kwargs，
+    notes 标保留字段（id/timeout/on_error）与可接表达式的字段
+    （Optional[Any]/Optional[str]）。
+    """
+    from plaita.node.capabilities import declared_tier
+
+    if not isinstance(node_type, str) or not node_type.strip():
+        return {"ok": False, "error": "node_type must be a non-empty string", "available": []}
+    registry = get_default_registry()
+    if discover_plugins:
+        registry.discover()
+    available = sorted(registry.list_types())
+    cls = registry.get(node_type.strip())
+    if cls is None:
+        return {
+            "ok": False,
+            "error": (
+                f"未知节点类型 {node_type.strip()!r}（@flow 占位符用其大写形式）。"
+                "完整行（含 tier/suspends）见 flow_list_nodes。"
+            ),
+            "available": available,
+        }
+    fields = getattr(cls, "model_fields", {})
+    required = [
+        name for name, f in fields.items()
+        if f.is_required() and name not in _NODE_BASE_FIELDS
+    ]
+    return {
+        "ok": True,
+        "node_type": node_type.strip(),
+        "placeholder": node_type.strip().upper(),
+        "node_name": getattr(cls, "node_name", node_type) if cls else node_type,
+        "tier": declared_tier(cls),
+        "suspends": getattr(cls, "is_suspending", False) is True,
+        "schema": cls.model_json_schema(),
+        "example": {name: _example_value(name, fields[name]) for name in required},
+        "notes": {
+            "reserved_fields": _NODE_RESERVED_FIELDS,
+            "expression_fields": sorted(
+                name for name, f in fields.items()
+                if _is_expression_field(f) and name not in _NODE_BASE_FIELDS
+            ),
+            "hint": "可接表达式的字段已声明 Optional[Any]/Optional[str]；强类型字段只收字面量",
+        },
+    }
 
 
 def list_tools_registered(as_code: bool = True) -> List[Any]:
