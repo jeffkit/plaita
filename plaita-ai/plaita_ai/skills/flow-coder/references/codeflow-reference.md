@@ -62,6 +62,7 @@ label = "pass" if INPUT.score >= 60 else "low"   # ✅ 三元也可作表达式
 | 列表/集合/字典推导式 | `MAP` / `FILTER` 节点 |
 | `lambda` / `await` / `:=` / `*args` 解包 | 拆成节点或普通赋值 |
 | `"x".upper()` 等字面量/非 F 方法调用 | 用 `F.upper(...)` 等表达式函数 |
+| `INPUT["name"]` 字符串/动态键下标 | `INPUT.name`（下标只支持整数常量 `[0]`/`[-1]`） |
 | 集合字面量 `{1,2}` | 列表 `[1, 2]` |
 | `return HTTP.post(...)` | `r = HTTP.post(...); return r.data` |
 
@@ -132,8 +133,30 @@ def countdown(INPUT):
 - **体内裸 `INPUT` 指子流程输入（只有 item/index），静默 None 是陷阱**——外层原始输入写 `PARENT.INPUT.<名>`；外层已赋值变量裸用名字即可（自动映射 `$PARENT` 快照）。
 - `while` 语句形态节点自动 id、输出不可命名引用；要取循环最终态用 `for w in WHILE(cond, id="w")` 形态（可选 `max_iterations=` 覆盖引擎默认 1000）。
 - 唯一退出通道是条件转假（引擎 `max_iterations=1000` 兜底，业务上限应写进条件）；**不支持 break / continue / while-else**。
+- **计数式 `i = i + 1` 非法**（编译期拒绝自引用赋值）——循环态一律走 `item`：
+
+```python expect-error
+# 期望报错: 的赋值右侧引用了它自己
+@flow("t")
+def t(INPUT):
+    i = 0
+    while i < 3:
+        i = i + 1
+    return i
+```
 
 ## 5. 集合节点
+
+`for` 的迭代对象**只能是** `MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...)` 节点调用——`for i in range(3)`、`for x in 某列表` 都是编译期报错：
+
+```python expect-error
+# 期望报错: for 循环的迭代对象必须是
+@flow("t")
+def t(INPUT):
+    for i in range(3):
+        return i
+    return None
+```
 
 ### MAP
 
@@ -295,6 +318,13 @@ r = PARALLEL(
 | 大写占位名但未注册 | `未注册的自定义节点 FOO(...)：node_type 'foo' 不在 registry 中。可用类型：[...]` |
 | 自定义节点传位置参数 | `自定义节点 xxx 只接受关键字参数（字段名=值），不支持位置参数` |
 | 自定义节点赋值同时传 `id=` | `自定义节点已用赋值变量 'a' 作为 id，不要同时传 id=` |
+| 跨分支同名赋值 | `变量 'r' 被多次赋值：codeflow 每个赋值是一个节点，变量名即节点 id，同一 id 只能出现一次…` |
+| 赋值右侧引用变量自身（`i = i + 1`） | `变量 'i' 的赋值右侧引用了它自己：…`（循环改 `for w in WHILE(...)`，见第 4 节） |
+| `for` 迭代 range/列表 | `for 循环的迭代对象必须是 MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...) 节点调用` |
+| 字符串/动态键下标 | `下标只支持整数常量`（改 `INPUT.x`） |
+| `break` / `continue` / `try` / `except` | `不支持的语句 Break/Try` |
+| `end(error=表达式)` | `end(...) 的 error 必须是字面数据…` |
+| `**变量` 动态展开 / caps 非字面量 | `caps 字段不支持动态展开: …`（见 authoring-spec §2.3） |
 
 ## 10. 已知边界
 
