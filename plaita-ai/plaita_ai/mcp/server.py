@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from plaita_ai.flow_runner import (
     PathTraversalError,
     compile_flow,
+    describe_node_type,
     get_skill_reference,
     get_skill_text,
     list_node_types,
@@ -37,10 +38,12 @@ except ImportError as exc:  # pragma: no cover
 mcp = FastMCP(
     "plaita-flow",
     instructions=(
-        "Compile and run Plaita @flow DSL workflows. "
-        "Use flow_compile to validate generated source before flow_run. "
-        "On compile errors, fix the @flow source using line numbers and retry. "
-        "flow_from_json reverse-generates @flow source from a JSON flow "
+    "Compile and run Plaita @flow DSL workflows. "
+    "Use flow_compile to validate generated source before flow_run. "
+    "On compile errors, fix the @flow source using line numbers and retry. "
+    "Call flow_describe_node for a node's field schema instead of guessing "
+    "field names. "
+    "flow_from_json reverse-generates @flow source from a JSON flow "
         "definition (migrate legacy flows to the DSL). "
         "For a deployed plaita (console configured via PLAITA_CONSOLE_URL), the "
         "console_* tools observe versions/runs/metrics, eval_* runs benchmark "
@@ -184,11 +187,35 @@ def flow_list_nodes() -> str:
     ``tier`` = execution tier (inline / managed / managed:queue; managed+ parks
     the flow and needs the managed runtime, managed:queue additionally needs
     the queue wakeup services), ``suspends`` = whether the node parks the flow.
+    Field-level schema is NOT included here — call ``flow_describe_node`` for
+    the pydantic schema / example kwargs of one node type (plaita#351).
 
     Returns:
         JSON array: [{node_type, placeholder, node_name, tier, suspends}, ...]
     """
     return result_json(list_node_types())
+
+
+@mcp.tool()
+def flow_describe_node(node_type: str) -> str:
+    """Describe one node type: field schema, minimal example, authoring notes.
+
+    Use this BEFORE writing a node call when you are unsure of its field names
+    (e.g. AGENTRUN / HITL / connectors) — guessing produces build-time pydantic
+    errors without source lines (plaita#351).
+
+    Args:
+        node_type: Lowercase node type (e.g. "http", "agentrun"), same as
+            flow_list_nodes rows; the @flow placeholder is its UPPERCASE form.
+
+    Returns:
+        JSON: {ok, node_type, placeholder, node_name, tier, suspends,
+        schema (pydantic model_json_schema), example (minimal kwargs for the
+        required fields), notes: {reserved_fields (id/timeout/on_error),
+        expression_fields (Optional[Any]/Optional[str]), hint}}
+        Unknown type: {ok: false, error, available: [node_type, ...]}.
+    """
+    return result_json(describe_node_type(node_type))
 
 
 @mcp.tool()

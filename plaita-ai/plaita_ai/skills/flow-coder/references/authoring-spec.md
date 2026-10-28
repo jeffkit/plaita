@@ -1,6 +1,6 @@
 # @flow 流程编写规范（权威单源）
 
-> **定位**：本文件是 plaita `@flow` 流程编写的**单一权威规范**——收录语法参考不会告诉你的作者硬约束（多数编译期不拦、运行期才炸）、plaita-nodes 业务集成、业务 flow 项目结构与 console 发布链路。
+> **定位**：本文件是 plaita `@flow` 流程编写的**单一权威规范**——收录语法参考不会告诉你的作者硬约束。约束按**拦截层级**两栏：**编译期强制**（编译器直接拒绝，报错带行号，把错误回灌即可自纠——见 §2.1/§2.2 与 §2.3 的 `**`/caps 门）与**运行期语义**（编译期不拦，跑起来才炸——如 §2.4/§2.5）。写之前分清约束落在哪一栏，别把注意力花在编译器已经拦的写法上。
 > **语法细节**不在本文件，见 [codeflow-reference.md](codeflow-reference.md) 与 `docs-site/docs/guide/code-dsl.md`。
 > **决议背景**：大仓 `docs/ADR-2026-08-27-orchestration-converge-on-plaita.md`（编排收敛 plaita、执行层统一 agentproc、mediaflow 全量迁移）。
 > **同步约束**：改 `plaita/dsl/codeflow/**`、plaita-nodes 节点语义或大仓编排决议时，必须同步本文件（映射见 `plaita/docs/DOC_CODE_MAP.md`）。
@@ -9,8 +9,8 @@
 
 ## 0. 30 秒自检清单（每次交付前过一遍）
 
-- [ ] 没有跨分支同名赋值（变量名即节点 id，无 phi 合并）
-- [ ] 没在 map/集合子流程的 end 里引用 if 块内赋值的节点；跨作用域聚合走了 MAP 输出（`NODE.<集合id>`）或 run 级报告通道
+- [ ] 没有跨分支同名赋值（编译期即拒：变量名即节点 id，同一 id 只能出现一次）
+- [ ] 没在 map/集合子流程的 end 里引用 if 块内赋值的节点（编译期报「未知名字」）；跨作用域聚合走了 MAP 输出（`NODE.<集合id>`）或 run 级报告通道
 - [ ] 没把 `timeout=` 挪作他用（保留 kwargs，ISO 时长如 `PT5S`）
 - [ ] 节点传参没用动态 `**` 展开（只认字符串键的 dict 字面量，逐键等价具名 kwargs；caps 字段直接写具名 kwargs）
 - [ ] 接表达式的自定义节点字段声明为 `Optional[Any]` / `Optional[str]`，不是 `int`/`bool` 强类型
@@ -37,27 +37,31 @@
   - `FlowExecution().run(...)`（底层）：**kwargs 不进 `$INPUT`（确定的设计），运行参数走 `params=`**。
   - 业务仓统一走 `Flow.run`；文档/示例若出现 `FlowExecution.run`，参数必须显式 `params=`。
 
-## 2. 作者硬约束（编译期不拦，踩了才知）
+## 2. 作者硬约束（按拦截层级：编译期强制 / 运行期语义）
 
-### 2.1 变量名即节点 id：跨分支同名赋值禁止
+> **读法**：§2.1/§2.2 是**编译期强制**——写错立即报错（带行号），不用背，把报错回灌自纠即可；
+> §2.4/§2.5 与 §4 的 dry-run 双通道是**运行期语义**——编译期不拦，跑起来才炸，这些才是要主动防的。
 
-赋值变量名直接成为节点 id，**没有 phi 合并语义**。两个分支各自 `r = HTTP.get(...)` 会产生同名节点 id 的语义冲突，编译器不会替你合并：
+### 2.1 变量名即节点 id：跨分支同名赋值（编译期拒绝）
 
-```python
+赋值变量名直接成为节点 id，**没有 phi 合并语义**。两个分支各自 `r = HTTP.get(...)` 会产生同名节点 id 的语义冲突，**编译器直接拒绝**（不再静默放行到运行期）：
+
+```python expect-error
+# 期望报错: 被多次赋值
 @flow("bad")
 def bad(INPUT):
     if INPUT.region == "eu":
         r = HTTP.get(url=INPUT.eu_url)
         return r.data
-    r = HTTP.get(url=INPUT.us_url)   # ❌ 与上一分支同名
+    r = HTTP.get(url=INPUT.us_url)   # ❌ 编译期报：变量 'r' 被多次赋值
     return r.data
 ```
 
-**合流模式**：把两支结果写进不同变量，合流处用 `first_non_null` 类节点取第一个非空值（mediaflow 的做法：`items = FIRST_NON_NULL(nodes_="items_eu,items_us")`；该节点在 `plaita_flows/nodes.py`，业务侧自带）。
+**合流模式**：把两支结果写进不同变量，合流处用 `first_non_null` 类节点取第一个非空值（mediaflow 的做法：`items = FIRST_NON_NULL(nodes_="items_eu,items_us")`；该节点在 `plaita_flows/nodes.py`，业务侧自带）。更简单的写法：让每条分支直接 `return`（如上例改成两支各自 return，就没有合流问题）。
 
 ### 2.2 作用域边界：if 块 / 集合子流程
 
-- **map 子流程的 end 不能引用 if 块内赋值的节点**——子流程编译边界看不到该 id。
+- **map 子流程的 end/body 不能引用 if 块内赋值的节点**——子流程编译边界看不到该 id，**编译期即报 `未知名字 'y'：可用 INPUT/NODE/GLOBAL/PARENT/ENV/F 或已赋值的节点变量`**。修法：把赋值提到集合节点之前（条件并进表达式，如 `y = A if cond else B`）。
 - 集合子流程（`MAP`/`FILTER`/`FIND`/`LOOP`/`REDUCE`）体内：可读集合节点执行前已确定的父侧变量（`$PARENT.NODE.<名>` 快照）；**写不回父 context**；裸 `INPUT` 指子流程输入，读外层原始输入须 `PARENT.INPUT.<名>`。
 - **跨作用域传数据的两种正规姿势**：
   1. 优先用集合节点自身输出：`MAP` 的输出即结果列表，经 `NODE.<集合id>` 在下游引用；
@@ -76,6 +80,8 @@ None 具名拒，`+5`/`-0` 这类单层 `±` 字面量折叠放行。动态传�
 ### 2.4 接表达式的节点字段一律 `Optional[Any]`
 
 `@flow` 里 `LLM(prompt=INPUT.q)` 会把字段值编译成表达式串 `"$INPUT.q"` 传入 IR；pydantic 强类型字段（`int`/`bool`）会**构建时拒绝**。要接表达式的字段声明 `Optional[Any]` / `Optional[str]`；真字面量才用强类型。
+
+> 层级说明：这一条落在**节点构造期**（`flow_from_source` / `compile_flow` 的 build 门），纯 `compile_source` 不含此步；且构造期报错**没有 source_line**，修复闭环弱于编译错误——所以字段名不要猜，用 `flow_describe_node("<node_type>")` 先查 schema（返回 pydantic schema + 必填字段最小示例 + 可接表达式的字段清单，plaita#351）。
 
 ### 2.5 字符串拼接用 `F.concat`
 

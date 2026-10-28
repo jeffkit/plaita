@@ -281,5 +281,269 @@
         "用 @flow DSL 表达，未用普通 Python 绕过"
       ]
     }
+  ],
+  "negative_evals": [
+    {
+      "id": "neg-01-fstring",
+      "name": "neg-fstring",
+      "prompt": "返回 'hi ' 加用户名拼接（诱导 f-string 写法）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    return f\"hi {INPUT.name}\"\n",
+      "expected_error": {
+        "line": 3,
+        "message_contains": "f-string",
+        "code": "fstring_unsupported"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    return F.concat(\"hi \", INPUT.name)\n",
+      "runs": [
+        {
+          "inputs": {
+            "name": "alice"
+          },
+          "expect": "hi alice"
+        }
+      ]
+    },
+    {
+      "id": "neg-02-return-node-call",
+      "name": "neg-return-node-call",
+      "prompt": "模式为 call 时调 HTTP 接口并返回响应（诱导 return HTTP.post(...) 写法）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.mode == \"call\":\n        return HTTP.post(url=\"http://example.invalid/api\", body={\"x\": 1})\n    return \"skipped\"\n",
+      "expected_error": {
+        "line": 4,
+        "message_contains": "只能作为语句或赋值右侧",
+        "code": "node_call_in_expression"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.mode == \"call\":\n        resp = HTTP.post(url=\"http://example.invalid/api\", body={\"x\": 1})\n        return resp.data\n    return \"skipped\"\n",
+      "runs": [
+        {
+          "inputs": {
+            "mode": "skip"
+          },
+          "expect": "skipped"
+        }
+      ]
+    },
+    {
+      "id": "neg-03-cross-branch-dup",
+      "name": "neg-cross-branch-dup",
+      "prompt": "按 region 取不同数据源（诱导两个分支各写 r = ...）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.region == \"eu\":\n        r = INPUT.eu\n        return r\n    r = INPUT.us\n    return r\n",
+      "expected_error": {
+        "line": 4,
+        "message_contains": "被多次赋值",
+        "code": "duplicate_assignment"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.region == \"eu\":\n        return INPUT.eu\n    return INPUT.us\n",
+      "runs": [
+        {
+          "inputs": {
+            "region": "us",
+            "eu": "E",
+            "us": "U"
+          },
+          "expect": "U"
+        }
+      ]
+    },
+    {
+      "id": "neg-04-map-scope",
+      "name": "neg-map-scope",
+      "prompt": "开关打开时把名字转大写，再在 MAP 子流程里拼到每个元素前（诱导在 if 块里赋值、map 里引用）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.on:\n        y = F.upper(INPUT.name)\n    for x in MAP(INPUT.items, id=\"m\"):\n        return F.concat(y, x)\n    return NODE.m\n",
+      "expected_error": {
+        "line": 6,
+        "message_contains": "未知名字 'y'",
+        "code": "unknown_name"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    y = F.upper(INPUT.name) if INPUT.on else \"none\"\n    for x in MAP(INPUT.items, id=\"m\"):\n        return F.concat(y, x)\n    return NODE.m\n",
+      "runs": [
+        {
+          "inputs": {
+            "on": true,
+            "name": "hi",
+            "items": [
+              "a",
+              "b"
+            ]
+          },
+          "expect": [
+            "HIa",
+            "HIb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "neg-05-end-error-expr",
+      "name": "neg-end-error-expr",
+      "prompt": "空消息时以业务错误结束（诱导 end(error={\"message\": INPUT.msg}) 动态载荷）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.msg == \"\":\n        end(result_type=\"error\", error={\"code\": 4001, \"message\": INPUT.msg})\n    return INPUT.msg\n",
+      "expected_error": {
+        "line": 4,
+        "message_contains": "必须是字面数据",
+        "code": "end_error_not_literal"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.msg == \"\":\n        end(result_type=\"error\", error={\"code\": 4001, \"message\": \"empty msg\"})\n    return INPUT.msg\n",
+      "runs": [
+        {
+          "inputs": {
+            "msg": ""
+          },
+          "expect_error_result": true
+        },
+        {
+          "inputs": {
+            "msg": "ok"
+          },
+          "expect": "ok"
+        }
+      ]
+    },
+    {
+      "id": "neg-06-for-range",
+      "name": "neg-for-range",
+      "prompt": "对列表每个元素乘 2（诱导 for i in range(...) 计数循环）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    for i in range(3):\n        return i\n    return None\n",
+      "expected_error": {
+        "line": 3,
+        "message_contains": "迭代对象必须是",
+        "code": "for_iter_unsupported"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    for x in MAP(INPUT.items, id=\"m\"):\n        return F.mul(x, 2)\n    return NODE.m\n",
+      "runs": [
+        {
+          "inputs": {
+            "items": [
+              1,
+              2
+            ]
+          },
+          "expect": [
+            2,
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "id": "neg-07-str-subscript",
+      "name": "neg-str-subscript",
+      "prompt": "取 name 字段并拼接问候（诱导 INPUT[\"name\"] 下标写法）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    name = INPUT[\"name\"]\n    return F.concat(\"hi \", name)\n",
+      "expected_error": {
+        "line": 3,
+        "message_contains": "下标只支持整数常量",
+        "code": "subscript_unsupported"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    name = INPUT.name\n    return F.concat(\"hi \", name)\n",
+      "runs": [
+        {
+          "inputs": {
+            "name": "alice"
+          },
+          "expect": "hi alice"
+        }
+      ]
+    },
+    {
+      "id": "neg-08-while-increment",
+      "name": "neg-while-increment",
+      "prompt": "数到 3 为止（诱导 while i < 3: i = i + 1 计数循环）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    i = 0\n    while i < 3:\n        i = i + 1\n    return i\n",
+      "expected_error": {
+        "line": 5,
+        "message_contains": "的赋值右侧引用了它自己",
+        "code": "self_reference_assignment"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    for w in WHILE(item == None or item < 3, id=\"wc\", max_iterations=50):\n        nxt = F.ifelse(item == None, 0, item)\n        return F.add(nxt, 1)\n    return NODE.wc\n",
+      "runs": [
+        {
+          "inputs": {},
+          "expect": 3
+        }
+      ]
+    },
+    {
+      "id": "neg-09-dynamic-kwarg",
+      "name": "neg-dynamic-kwarg",
+      "prompt": "call 模式下调 HTTP，超时参数放 dict 里展开传（诱导 **extra 动态展开）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.mode == \"call\":\n        extra = {\"timeout\": \"PT5S\"}\n        r = HTTP.get(url=\"http://example.invalid/api\", **extra)\n        return r.status\n    return \"skipped\"\n",
+      "expected_error": {
+        "line": 5,
+        "message_contains": "caps 字段不支持动态展开",
+        "code": "dynamic_kwargs_unsupported"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.mode == \"call\":\n        r = HTTP.get(url=\"http://example.invalid/api\", timeout=\"PT5S\")\n        return r.status\n    return \"skipped\"\n",
+      "runs": [
+        {
+          "inputs": {
+            "mode": "skip"
+          },
+          "expect": "skipped"
+        }
+      ]
+    },
+    {
+      "id": "neg-10-unregistered-node",
+      "name": "neg-unregistered-node",
+      "prompt": "把名字转大写（诱导使用不存在的 FOO 节点）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    out = FOO(text=INPUT.name)\n    return out\n",
+      "expected_error": {
+        "line": 3,
+        "message_contains": "未注册的自定义节点",
+        "code": "unregistered_node"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    out = F.upper(INPUT.name)\n    return out\n",
+      "runs": [
+        {
+          "inputs": {
+            "name": "alice"
+          },
+          "expect": "ALICE"
+        }
+      ]
+    },
+    {
+      "id": "neg-11-repair-isolation",
+      "name": "neg-repair-isolation",
+      "prompt": "kind=shout 时拼接感叹号，否则 POST 到接口（一个坏节点加一个正确分支；验证修复只动坏节点区域）",
+      "broken_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.kind == \"shout\":\n        return F.concat(INPUT.name, \"!\")\n    return HTTP.post(url=\"http://example.invalid/api\", body=INPUT.name)\n",
+      "expected_error": {
+        "line": 5,
+        "message_contains": "只能作为语句或赋值右侧",
+        "code": "node_call_in_expression"
+      },
+      "repaired_source": "@flow(\"t\")\ndef t(INPUT):\n    if INPUT.kind == \"shout\":\n        return F.concat(INPUT.name, \"!\")\n    resp = HTTP.post(url=\"http://example.invalid/api\", body=INPUT.name)\n    return resp.data\n",
+      "runs": [
+        {
+          "inputs": {
+            "kind": "shout",
+            "name": "bob"
+          },
+          "expect": "bob!"
+        }
+      ],
+      "expected_node_ids": [
+        "start",
+        "kind_eq_shout",
+        "resp",
+        "ret_data",
+        "ret_concat_name"
+      ],
+      "expected_good_nodes": {
+        "start": {
+          "type": "start",
+          "next": "kind_eq_shout"
+        },
+        "kind_eq_shout": {
+          "type": "if",
+          "next": "ret_concat_name"
+        },
+        "ret_concat_name": {
+          "type": "end",
+          "next": null
+        }
+      }
+    }
   ]
 }

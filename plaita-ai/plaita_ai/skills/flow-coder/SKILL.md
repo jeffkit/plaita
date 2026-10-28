@@ -1,6 +1,6 @@
 ---
 name: flow-coder
-version: 0.3.0
+version: 0.4.0
 description: 用 plaita 的 @flow DSL 把自然语言需求编译成可执行流程并运行。当用户要求"用 @flow 实现"、"生成一个 flow"、"编排一个流程/Agent/工作流并执行"、"写业务编排/迁移到 plaita"、"发布 flow 到 console"时使用本技能。技能指导 AI 产出 @flow 源码 → 编译期校验 → 运行期执行 → 错误回灌自纠，形成闭环；业务场景（plaita-nodes 节点、项目结构、console 发布）见 authoring-spec 规范。
 ---
 
@@ -23,9 +23,10 @@ description: 用 plaita 的 @flow DSL 把自然语言需求编译成可执行流
 
 | MCP Tool | 作用 |
 |----------|------|
-| `flow_compile` | 编译校验 `@flow` 源码，返回 `{ok, errors:[{line,message}]}` |
+| `flow_compile` | 编译校验 `@flow` 源码，返回 `{ok, errors:[{line, message, code?, fix?}]}`（`code`/`fix` 是稳定错误码与修复提示，见第 5 步） |
 | `flow_run` | 编译并执行（`inputs_json` / `globals_json` 为 JSON 字符串） |
-| `flow_list_nodes` | 列出可用节点类型（自定义节点占位符大写名） |
+| `flow_list_nodes` | 列出可用节点类型（自定义节点占位符大写名；含 tier/suspends 执行台阶信号） |
+| `flow_describe_node` | 查单个节点的字段 schema + 最小示例（**字段名不确定时先查，不要猜**） |
 | `flow_get_skill` | 拉取本 skill 全文（无本地 skill 时） |
 
 闭环：**生成源码 → `flow_compile` → 失败则带行号错误重写 → `flow_run`**。
@@ -68,11 +69,16 @@ print(flow.run(name="alice"))   # -> "hi ALICE"
 ```python
 @flow("<flow_id>", desc="<说明>")
 def <name>(INPUT):
-    # if / elif / else / while / for / return / 赋值
+    # 仅支持：if/elif/else、for x in MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...)、赋值、return
     return <expr>
 ```
 
 - `INPUT` / `F` / `NODE` / `GLOBAL` / `PARENT` / `ENV` / `HTTP` / `CODE` / `EVENT` / `MAP` / `FILTER` / `FIND` / `LOOP` / `REDUCE` / `WHILE` / `CHILD` / `REFERENCE` / `PARALLEL` / `ASSIGN` 这些名字**不需要 import**，是 AST 编译期识别的占位符。
+- **控制流是受限子集，不是普通 Python**——以下写法**编译期直接报错**（不是运行期才炸）：
+  - `for` 只能迭代集合/循环节点调用：`for i in range(3)`、`for x in [1,2]` 都会报 `for 循环的迭代对象必须是 MAP/FILTER/FIND/LOOP/REDUCE/WHILE(...)`；
+  - `while` 只有 `for w in WHILE(条件, id=...)` 形态，循环态用 `item`/`rounds`（见 codeflow-reference §4）；**`i = i + 1` 自增式非法**——赋值右侧引用变量自身会被编译期拒绝；
+  - 不支持 `break` / `continue` / `try` / `except`（报 `不支持的语句`）；退出条件写进 WHILE 条件；
+  - 字符串/动态键下标 `INPUT["x"]` 报 `下标只支持整数常量`——用 `INPUT.x`；仅 `[0]`/`[-1]` 整数常量下标合法。
 - **自定义节点占位符**：任何注册到 `NodeRegistry` 的 `Node` 子类，用 `node_type` 大写化作占位符即可在 `@flow` 里直接调用（如 `node_type="llm"` → `LLM(prompt=..., model=...)`、`"retrieve"` → `RETRIEVE(query=...)`、`"tool"` → `TOOL(action=...)`）。编译期查 registry，未注册的大写名会报错并列出可用类型，便于自纠。详见下方「自定义节点」。
 - **不要写 `input_type`**：该参数已废弃且被忽略。`$INPUT` 恒为 `run()` 传入的 dict，字段用 `INPUT.x` 访问。
 - **函数体从不被当 Python 执行**，只做静态 AST 分析。所以写法必须在支持子集内，否则编译期报错。
@@ -107,10 +113,38 @@ return "minor"
 | 列表/字典/集合推导式 | `MAP` / `FILTER` 节点 |
 | `lambda` / `await` / `:=` / `*args` | 拆成节点或普通赋值 |
 | `"x".upper()` 等字面量方法调用 | 用 `F.upper(...)` 等表达式函数 |
+| `INPUT.data.get("k")` 等非 F 方法调用 | 字段直取 `INPUT.data.k` |
+| `INPUT["name"]` 字符串下标 | `INPUT.name`（仅 `[0]`/`[-1]` 整数常量下标合法） |
+| `for i in range(3)` / `for x in 列表` | `for x in MAP/FILTER/...(...)`；计数循环用 `for w in WHILE(...)` |
+| `while` 循环里 `i = i + 1` 自增 | `for w in WHILE(条件, id=...)`，循环态走 `item`（codeflow-reference §4） |
+| `break` / `continue` / `try` / `except` | 退出条件写进 WHILE 条件；错误处理用 `on_error=ErrorHandler(...)` |
 | `return HTTP.post(...)` 节点调用嵌在表达式 | `resp = HTTP.post(...); return resp.data` |
 | 集合字面量 `{1,2}` | 用列表 `[1, 2]` |
 
 > **`+` 的多态陷阱**：`name + "!"` 编译成 `$F.add($INPUT.name, "!")`，运行时按 Python `+` 多态。要强制字符串拼接且对非字符串报错，显式用 `F.concat(...)`。
+
+两例编译期拒绝实录（回归钉子——改编译器行为前先过这里；`# 期望报错:` 子串由 CI 断言，见 tests/test_skill_claims.py）：
+
+```python expect-error
+# 期望报错: 被多次赋值
+@flow("t")
+def t(INPUT):
+    if INPUT.region == "eu":
+        r = INPUT.eu
+        return r
+    r = INPUT.us
+    return r
+```
+
+```python expect-error
+# 期望报错: 的赋值右侧引用了它自己
+@flow("t")
+def t(INPUT):
+    i = 0
+    while i < 3:
+        i = i + 1
+    return i
+```
 
 ### if / elif / else、赋值、return
 
@@ -271,7 +305,7 @@ flow_from_source(src).run(q="plaita 是什么")
 规则：
 - 占位符名 = `node_type` 大写（`llm`→`LLM`、`retrieve`→`RETRIEVE`、`tool`→`TOOL`）。
 - **只能作语句或赋值右侧**（同 `HTTP`/`CHILD`）：`return LLM(...)` 要拆成 `r = LLM(...); return r`。
-- **只接受关键字参数**（`字段名=值`），字段名须与 `Node` 子类的 pydantic 字段（snake_case）一致。
+- **只接受关键字参数**（`字段名=值`），字段名须与 `Node` 子类的 pydantic 字段（snake_case）一致。**字段名不确定就用 `flow_describe_node("<node_type>")` 查 schema 与最小示例，不要猜**——猜错的字段要等到节点构造期才报 pydantic 错误，没有行号。
 - 字段值经表达式编译：`INPUT.x`→`$INPUT.x`、字面量原样、`{% ... %}` 模板字符串原样透传给节点 `execute`。
 - 节点 id：赋值时用变量名（`a = LLM(...)` → id `a`，`a` 引用为 `$NODE.a`）；表达式语句可用 `id="name"`。赋值时不要同时传 `id=`。
 - 通用字段：`id=`、`timeout=`、`on_error=ErrorHandler(...)` 对所有自定义节点有效。
@@ -283,6 +317,7 @@ flow_from_source(src).run(q="plaita 是什么")
 内置占位符（`HTTP`/`CODE`/`MAP`/`CHILD`…）之外，**大仓业务 flow 的 Agent 调用、HITL、通知、凭据化连接器都在兄弟仓 plaita-nodes**（`agentrun`/`hitl`/`gate`/`api_request` 等 22 节点，`node_type` 大写化作占位符直接调）。要点：
 
 - **安装即注册 ≠ 可用**：plaita-nodes 走 entry_points 懒发现，须在 `flow_from_source` **之前**显式 `import plaita_nodes` → 业务 `register_all()` → `get_default_registry()` 触发。
+- **字段名先查再写**：`agentrun` / `hitl` / 连接器的字段用 `flow_describe_node("agentrun")` 查（返回 pydantic schema + 必填字段最小示例 + 可接表达式的字段清单），不要靠猜。
 - **大仓内安装**：`pip install -e ../plaita[http] -e ../agentproc/sdk/python -e ../plaita-nodes -e .`（plaita 未发 PyPI，不要 `pip install` 裸名）。
 - **agentrun 配置**：agents.json/providers.json 搜索 `~/.plaita`（新，优先）→ `~/.flowcast`（存量兜底），深合并；`env` 按配置透传、`timeout_secs` 默认 1800（与 flowcast 有意不同）。
 - **发布 console 前必查**：worker 侧要用 `PLAITA_NODE_PATH` / `PLAITA_NODE_MODULES` / `PLAITA_PYTHON` 注入业务节点，否则发布成功、调度必败。
@@ -302,7 +337,8 @@ flow_from_source(src).run(q="plaita 是什么")
 - 节点调用（`HTTP`/`CHILD`/`PARALLEL`/`MAP` 等）只作语句或赋值右侧。
 - 字符串拼接用 `F.concat`，不要用 f-string 或 `+`（除非确认两端都是数字/列表）。
 - 每条分支路径都有 `return`，避免"赋值后悬空"。
-- **authoring-spec 硬约束速记**（详见规范 §2）：跨分支同名赋值禁止（合流用 `FIRST_NON_NULL` 类节点）；集合子流程读父快照、写不回；`timeout=` 是保留 kwargs；接表达式的节点字段声明 `Optional[Any]`；业务节点先注册再 `flow_from_source`。
+- **节点字段名不确定先 `flow_describe_node` 查**，不要猜。
+- **authoring-spec 硬约束速记**（详见规范 §2，按拦截层级两栏）：跨分支同名赋值**编译期拒绝**（各分支用不同变量名，或让每条分支直接 return）；集合子流程读父快照、写不回；`timeout=` 是保留 kwargs；接表达式的节点字段声明 `Optional[Any]`；业务节点先注册再 `flow_from_source`。
 
 ### 第 3 步：编译期校验
 
@@ -327,18 +363,32 @@ print(result)
 
 执行时如果用到 HTTP，确保装了 `plaita[http]`。如果需要注入 LLM / 工具 / 检索库等自定义节点，把它们注册后或放进 `flow.global_context` 再 `.run`。
 
-### 第 5 步：错误回灌自纠（核心）
+### 第 5 步：错误回灌自纠（核心：最小 patch，不整段重写）
 
-编译失败或执行报错时，把**完整错误信息**（含行号、报错文本）拼回 prompt，重新生成一版源码再试。最多重试 3 轮。常见错误对照：
+编译失败或执行报错时，按**最小 patch 协议**修——整段重写可能把已经正确的节点/分支改坏：
 
-| 错误 | 修复 |
+1. 用完整错误信息（行号 + 报错文本；`flow_compile` 的 `errors[]` 还带 `code`/`fix` 字段）定位到**报错行/所在块**；
+2. **只改报错行/所在块**，其余节点、变量名、节点 id 一律保持不变；
+3. 重新 `flow_compile`，并用 diff 确认本次改动只落在失败区域（正确分支的节点与连线不应出现在 diff 里）；
+4. **同一位置连续 2 轮报同样的错 → 换策略**（拆节点/换写法），不要原地再试第 3 次；
+5. 最多重试 3 轮；仍失败就把错误与已尝试的修改如实汇报给用户。
+
+常见错误对照（`code` 为 `flow_compile` 返回的稳定错误码）：
+
+| 错误 / `code` | 修复 |
 |------|------|
-| `未知名字 'xxx'` | 该名字没在占位符/变量表里；检查拼写或改成 `INPUT.x` / `NODE.x` |
-| `节点调用只能作为语句或赋值右侧` | 把 `return HTTP(...)` 拆成 `r = HTTP(...); return r.data` |
+| `未知名字 'xxx'`（`unknown_name`） | 该名字没在占位符/变量表里；检查拼写或改成 `INPUT.x` / `NODE.x`。**map/WHILE 子流程里引用 if 块内赋值的变量也是这个错**——把赋值提到集合节点之前 |
+| `变量 'r' 被多次赋值`（`duplicate_assignment`） | 跨分支同名赋值被编译期拒绝；各分支用不同变量名，或让每条分支直接 return |
+| `变量 'i' 的赋值右侧引用了它自己`（`self_reference_assignment`） | `while` 不支持自增；改 `for w in WHILE(条件, id=...)`，循环态走 `item` |
+| `for 循环的迭代对象必须是 MAP/...`（`for_iter_unsupported`） | `for` 不能迭代 range/列表；用 MAP/FILTER 等集合节点或 WHILE |
+| `下标只支持整数常量`（`subscript_unsupported`） | `INPUT["x"]` 改 `INPUT.x`；仅 `[0]`/`[-1]` 合法 |
+| `caps 字段不支持动态展开`（`dynamic_kwargs_unsupported`） | `**变量` 改具名 kwargs（只支持字符串键 dict 字面量展开） |
+| `end(...) 的 error 必须是字面数据`（`end_error_not_literal`） | `error=` 只收字面 dict；动态值放 `output=` 或上游节点 |
+| `节点调用只能作为语句或赋值右侧`（`node_call_in_expression`） | 把 `return HTTP(...)` 拆成 `r = HTTP(...); return r.data` |
 | `赋值 xxx 之后悬空` | 赋值后补 `return` 或后续语句 |
-| f-string / 推导式报错 | 按上文"会报错的写法"表改写 |
-| `不支持的调用 Xxx.yyy(...)` | 表达式里只能调 `F.xxx(...)` 或 `len/abs/round/str` |
-| `未注册的自定义节点 XXX(...)：node_type 'xxx' 不在 registry 中` | 占位符名拼写错 / 节点未注册；按报错里列出的可用类型修正名字，或先 `get_default_registry().register(...)` |
+| f-string / 推导式报错（`fstring_unsupported`） | 按上文"会报错的写法"表改写 |
+| `不支持的调用 Xxx.yyy(...)`（`unsupported_call`） | 表达式里只能调 `F.xxx(...)` 或 `len/abs/round/str` |
+| `未注册的自定义节点 XXX(...)`（`unregistered_node`） | 占位符名拼写错 / 节点未注册；按报错里列出的可用类型修正名字，或先 `get_default_registry().register(...)` |
 
 ## 输出规范
 
@@ -352,7 +402,7 @@ print(result)
 
 ## 参考资料索引
 
-- `references/authoring-spec.md` —— **编写规范权威单源**：作者硬约束（编译期不拦的坑）、plaita-nodes 业务集成、业务 flow 项目结构、console 发布链路、交付自检清单。写业务编排/迁移前必读。
+- `references/authoring-spec.md` —— **编写规范权威单源**：作者硬约束（按拦截层级两栏：编译期强制 / 运行期语义）、plaita-nodes 业务集成、业务 flow 项目结构、console 发布链路、交付自检清单。写业务编排/迁移前必读。
 - `references/codeflow-reference.md` —— @flow 完整语法、表达式语义边界、节点清单、已知边界、可运行示例集。**生成复杂流程前先查它**。
 - 项目内文档：`docs-site/docs/guide/code-dsl.md`（@flow DSL 完整指南）、`docs-site/docs/scenarios/agent-orchestration.md`（Agent 编排模式）。
 - 示例代码：`examples/agent/nodes.py`（自定义 LLM/Tool/Retriever 节点）、`examples/agent/flows/*.json`（三个端到端 Agent 案例）。
