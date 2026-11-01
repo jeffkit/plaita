@@ -63,6 +63,23 @@ MODULES=(
   "plaita/node/event_node.py"
   "plaita/storage/memory.py"
   "plaita/storage/base.py"
+  # ── 2026-10-28 全量回归补齐：对齐 [tool.mutmut] only_mutate 的 30 模块基线
+  # （此前 MODULES 只有 17 个，以下 13 个从未进过 sweep 脚本；测试映射来自
+  # scripts/mutation-module-tests.sh 与 docs/mutation-testing.md §2.22–§2.27
+  # 各节基线的实跑配置，codeflow 四模块按基线口径只用 test_codeflow* 全家）
+  "plaita/core/callback.py"
+  "plaita/core/expression.py"
+  "plaita/core/parallel_executor.py"
+  "plaita/core/runner.py"
+  "plaita/core/context.py"
+  "plaita/node/calculate.py"
+  "plaita/node/decide.py"
+  "plaita/core/async_utils.py"
+  "plaita/dsl/sexpr.py"
+  "plaita/dsl/codeflow/_common.py"
+  "plaita/dsl/codeflow/_expr.py"
+  "plaita/dsl/codeflow/_nodes.py"
+  "plaita/dsl/codeflow/_stmt.py"
 )
 
 TESTS_FOR_MODULE=(
@@ -83,6 +100,19 @@ TESTS_FOR_MODULE=(
   "tests/unit/test_event_node_unit.py tests/unit/test_event_node_mutations.py"
   "tests/unit/test_storage_memory_units.py tests/unit/test_storage_mutations.py"
   "tests/unit/test_storage_base.py tests/unit/test_storage_mutations.py"
+  "tests/unit/test_callback.py"
+  "tests/unit/test_expression.py tests/unit/test_expression_cache.py tests/unit/test_expression_golden.py tests/unit/test_expression_size_guard.py tests/unit/test_expression_provenance_perf.py"
+  "tests/unit/test_parallel_executor.py"
+  "tests/unit/test_runner.py tests/unit/test_runner_strategies_extended.py tests/unit/test_runner_tenant_context.py"
+  "tests/unit/test_context.py tests/unit/test_context_executor_extended.py"
+  "tests/unit/test_calculate.py"
+  "tests/unit/test_decide.py"
+  "tests/unit/test_async_utils.py"
+  "tests/unit/test_sexpr.py tests/unit/test_sexpr_extended.py tests/unit/test_sexpr_coverage3.py tests/unit/test_sexpr_coverage4.py tests/unit/test_sexpr_mutations.py"
+  "tests/unit/test_codeflow.py tests/unit/test_codeflow_canonical.py tests/unit/test_codeflow_childflow_flow_id.py tests/unit/test_codeflow_coverage3.py tests/unit/test_codeflow_coverage4.py tests/unit/test_codeflow_custom_node.py tests/unit/test_codeflow_emit.py tests/unit/test_codeflow_extended.py tests/unit/test_codeflow_loop_scope.py tests/unit/test_codeflow_mutations.py tests/unit/test_codeflow_naming.py tests/unit/test_codeflow_nodes_mutations.py tests/unit/test_codeflow_source_line.py tests/unit/test_codeflow_source.py tests/unit/test_codeflow_stmt_mutations.py tests/unit/test_codeflow_subscope_childflows.py tests/unit/test_codeflow_while.py"
+  "tests/unit/test_codeflow.py tests/unit/test_codeflow_canonical.py tests/unit/test_codeflow_childflow_flow_id.py tests/unit/test_codeflow_coverage3.py tests/unit/test_codeflow_coverage4.py tests/unit/test_codeflow_custom_node.py tests/unit/test_codeflow_emit.py tests/unit/test_codeflow_extended.py tests/unit/test_codeflow_loop_scope.py tests/unit/test_codeflow_mutations.py tests/unit/test_codeflow_naming.py tests/unit/test_codeflow_nodes_mutations.py tests/unit/test_codeflow_source_line.py tests/unit/test_codeflow_source.py tests/unit/test_codeflow_stmt_mutations.py tests/unit/test_codeflow_subscope_childflows.py tests/unit/test_codeflow_while.py"
+  "tests/unit/test_codeflow.py tests/unit/test_codeflow_canonical.py tests/unit/test_codeflow_childflow_flow_id.py tests/unit/test_codeflow_coverage3.py tests/unit/test_codeflow_coverage4.py tests/unit/test_codeflow_custom_node.py tests/unit/test_codeflow_emit.py tests/unit/test_codeflow_extended.py tests/unit/test_codeflow_loop_scope.py tests/unit/test_codeflow_mutations.py tests/unit/test_codeflow_naming.py tests/unit/test_codeflow_nodes_mutations.py tests/unit/test_codeflow_source_line.py tests/unit/test_codeflow_source.py tests/unit/test_codeflow_stmt_mutations.py tests/unit/test_codeflow_subscope_childflows.py tests/unit/test_codeflow_while.py"
+  "tests/unit/test_codeflow.py tests/unit/test_codeflow_canonical.py tests/unit/test_codeflow_childflow_flow_id.py tests/unit/test_codeflow_coverage3.py tests/unit/test_codeflow_coverage4.py tests/unit/test_codeflow_custom_node.py tests/unit/test_codeflow_emit.py tests/unit/test_codeflow_extended.py tests/unit/test_codeflow_loop_scope.py tests/unit/test_codeflow_mutations.py tests/unit/test_codeflow_naming.py tests/unit/test_codeflow_nodes_mutations.py tests/unit/test_codeflow_source_line.py tests/unit/test_codeflow_source.py tests/unit/test_codeflow_stmt_mutations.py tests/unit/test_codeflow_subscope_childflows.py tests/unit/test_codeflow_while.py"
 )
 
 # 仅用于 mutmut run 初筛阶段（in-process pytest.main()）的纯同步测试子集。
@@ -107,6 +137,19 @@ SYNC_TESTS_FOR_MODULE=(
   "tests/unit/test_event_node_unit.py tests/unit/test_event_node_mutations.py"
   "tests/unit/test_storage_memory_units.py tests/unit/test_storage_mutations.py"
   "tests/unit/test_storage_base.py tests/unit/test_storage_mutations.py"
+  "tests/unit/test_callback.py"
+  "tests/unit/test_expression.py tests/unit/test_expression_golden.py"
+  "tests/unit/test_parallel_executor.py"
+  ""
+  "tests/unit/test_context.py"
+  "tests/unit/test_calculate.py"
+  "tests/unit/test_decide.py"
+  ""
+  "tests/unit/test_sexpr.py tests/unit/test_sexpr_extended.py tests/unit/test_sexpr_coverage3.py tests/unit/test_sexpr_coverage4.py tests/unit/test_sexpr_mutations.py"
+  "tests/unit/test_codeflow_mutations.py"
+  "tests/unit/test_codeflow_mutations.py"
+  "tests/unit/test_codeflow_nodes_mutations.py"
+  "tests/unit/test_codeflow_stmt_mutations.py"
 )
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────
@@ -185,8 +228,15 @@ recheck_all_mutations() {
   local t_killed=0 t_survived=0 t_error=0
 
   pushd mutants > /dev/null 2>&1 || { echo 0 > "$RECHECK_TMPFILE"; return 0; }
+  local idx=0
   while IFS= read -r m; do
     [[ -z "$m" ]] && continue
+    # 进度行：大模块（数千变异点）串行复核以 50 个为步长上报，
+    # 供观测方从日志读数（不进 RESULTS_FILE，纯 stdout）。
+    idx=$((idx+1))
+    if (( idx % 50 == 0 )); then
+      echo "  recheck-progress: ${idx}/${n_names} (killed=${t_killed} survived=${t_survived})"
+    fi
 
     # ── 第一轮：只跑最快的测试文件（通常 1-2s）───────────────────────
     # 注意: 用 rc=0 + || rc=$? 避免 set -e 在测试失败时提前退出
@@ -237,6 +287,19 @@ recheck_all_mutations() {
 RESULTS_FILE="${RESULTS_FILE:-mutation-sweep-results.txt}"
 : > "$RESULTS_FILE"
 echo "=== Plaita Full Mutation Sweep $(date) ===" | tee -a "$RESULTS_FILE"
+
+# pyproject.toml 备份恢复（#sweep-20261028）：旧版在收尾用硬编码模块清单"恢复"
+# only_mutate——该清单早已落后 [tool.mutmut] 真实基线，跑一次 sweep 会把 30 模块
+# 砍回 24。改为开头整文件备份、退出时（含 set -e 中途失败）原样还原。
+PYPROJECT_BACKUP="pyproject.toml.mutation-sweep-backup"
+cp pyproject.toml "$PYPROJECT_BACKUP"
+restore_pyproject() {
+  if [[ -f "$PYPROJECT_BACKUP" ]]; then
+    mv "$PYPROJECT_BACKUP" pyproject.toml
+    echo "pyproject.toml restored from backup (byte-identical)."
+  fi
+}
+trap restore_pyproject EXIT
 
 SKIP=0
 [[ -n "$START_FROM" ]] && SKIP=1
@@ -302,7 +365,9 @@ for i in "${!MODULES[@]}"; do
   # 监控 + 超时 kill。看门狗必须重定向所有 fd 并在子 shell 内运行，
   # 否则会继承父管道写端；若被孤儿化（mutmut 提前结束、kill 漏掉），
   # 管道读端 tee 永远读不到 EOF，上游驱动脚本会死等。
-  ( sleep 600 && kill "$MUTMUT_PID" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  # 超时默认 600s；大模块（如 sexpr 3096 变异点）用 INITIAL_TIMEOUT_S 放行
+  # 让 mutmut 并行初筛跑完——被掐掉的初筛会把全部点推入串行 recheck（几十小时）。
+  ( sleep "${INITIAL_TIMEOUT_S:-600}" && kill "$MUTMUT_PID" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
   KILLER_PID=$!
   wait "$MUTMUT_PID" 2>/dev/null || true
   kill "$KILLER_PID" 2>/dev/null || true
@@ -383,42 +448,5 @@ echo ""
 echo "Modules with 100%: ${#SUCCESS_MODULES[@]}"
 for m in "${SUCCESS_MODULES[@]}"; do echo "  ✓ $m"; done
 
-# 恢复 pyproject.toml 基线
-"$MUT_PYTHON_BIN" <<PYEOF
-import re
-path = "pyproject.toml"
-content = open(path).read()
-modules = [
-  "plaita/core/callback.py",
-  "plaita/core/expression.py",
-  "plaita/core/parallel_executor.py",
-  "plaita/core/runner.py",
-  "plaita/core/context.py",
-  "plaita/node/calculate.py",
-  "plaita/node/decide.py",
-  # NEW — validated by this sweep
-  "plaita/core/executor.py",
-  "plaita/core/strategies.py",
-  "plaita/core/state.py",
-  "plaita/core/errors.py",
-  "plaita/core/flow.py",
-  "plaita/event/core.py",
-  "plaita/node/concurrent.py",
-  "plaita/node/loop.py",
-  "plaita/core/expression_parser.py",
-  "plaita/event/memory.py",
-  "plaita/io.py",
-  "plaita/dsl/builder.py",
-  "plaita/node/code.py",
-  "plaita/node/__init__.py",
-  "plaita/node/event_node.py",
-  "plaita/storage/memory.py",
-  "plaita/storage/base.py",
-]
-entries = "\n".join(f'  "{m}",' for m in modules)
-new_block = f'only_mutate = [\n{entries}\n]'
-content = re.sub(r'only_mutate\s*=\s*\[.*?\]', new_block, content, flags=re.DOTALL)
-content = re.sub(r'mutate_only_covered_lines\s*=\s*(true|false)', 'mutate_only_covered_lines = true', content)
-open(path, "w").write(content)
-print("pyproject.toml restored to full baseline.")
-PYEOF
+# pyproject.toml 由 trap（EXIT）从整文件备份原样还原——旧版在此用硬编码模块
+# 清单重写 only_mutate，会把真实基线砍回过期版本（2026-10-28 全量回归时修复）。
