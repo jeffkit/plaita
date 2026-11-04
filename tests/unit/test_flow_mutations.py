@@ -923,5 +923,401 @@ class TestCollectEnvRefsMutations(unittest.TestCase):
         self.assertIn("LIST_KEY", refs)
 
 
+# ===========================================================================
+# Round 2（2026-11-01，#355 清剿首批）：对剩余幸存簇的精准杀灭
+# ===========================================================================
+
+class TestResolveCycleRound2(unittest.TestCase):
+    def test_root_missing_from_adjacency_terminates(self):
+        """root 不在邻接表 ⇒ 走 get 默认空迭代器终止返回 []。"""
+        self.assertEqual(_resolve_cycle({}, "s1"), [])
+
+    def test_pop_does_not_stop_exploration(self):
+        """弹出叶子后必须 continue 探索兄弟分支（break 会截断后续环发现）。"""
+        adj = {"s": ["a", "b"], "a": [], "b": ["s"]}
+        self.assertEqual(_resolve_cycle(adj, "s"), ["s", "b", "s"])
+
+
+class TestModelValidateKwargsForwarded(unittest.TestCase):
+    def test_unknown_kwarg_is_rejected(self):
+        """未知 kwargs 必须透传给 pydantic（杀 **kwargs 摘除类变异）。"""
+        with self.assertRaises(TypeError):
+            Flow.model_validate(_minimal_flow_dict(), registry=_make_registry(),
+                                definitely_not_a_pydantic_kwarg=1)
+
+    def test_json_unknown_kwarg_is_rejected(self):
+        import json as _json
+        with self.assertRaises(TypeError):
+            Flow.model_validate_json(_json.dumps(_minimal_flow_dict()), registry=_make_registry(),
+                                     definitely_not_a_pydantic_kwarg=1)
+
+
+class TestCycleWarningPath(unittest.TestCase):
+    """环检测告警门（cycle and not timeout）与路径透传。"""
+
+    def test_cycle_warns_with_exact_path_and_flow_id(self):
+        reg = _make_registry()
+        cyclic = {"flow_id": "cyc-355", "nodes": [
+            {"id": "s1", "name": "start", "type": "start", "next": "a1"},
+            {"id": "a1", "name": "a", "type": "assignment", "next": "s1"},
+        ]}
+        with self.assertLogs(level="WARNING") as captured:
+            Flow.model_validate(cyclic, registry=reg)
+        joined = "\n".join(captured.output)
+        self.assertIn("contains a cycle", joined)
+        self.assertIn("s1 -> a1 -> s1", joined)
+        self.assertIn("cyc-355", joined)
+
+    def test_acyclic_flow_does_not_warn_cycle(self):
+        import warnings as _w
+        reg = _make_registry()
+        with self.assertNoLogs(level="WARNING"):
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                Flow.model_validate(_minimal_flow_dict(), registry=reg)
+
+    def test_cycle_with_timeout_does_not_warn_forever(self):
+        """设了 flow 级 timeout ⇒ 不再是 will-loop-forever，不该告警。"""
+        import warnings as _w
+        reg = _make_registry()
+        cyclic = {"flow_id": "cyc-t", "timeout": "PT10S", "nodes": [
+            {"id": "s1", "name": "start", "type": "start", "next": "p1"},
+            {"id": "p1", "name": "p", "type": "probe_355", "next": "s1"},
+        ]}
+        reg2 = _reg_with_probe()
+        with self.assertNoLogs(level="WARNING"):
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                Flow.model_validate(cyclic, registry=reg2)
+
+
+class TestResolveNodesWithoutStartRaises(unittest.TestCase):
+    def test_resolve_nodes_without_start_raises_start_missing(self):
+        """直构 Flow（仅 end）+ resolve_nodes ⇒ FlowStartMissingError（start 门变异簇）。"""
+        from plaita.core.errors import FlowStartMissingError
+        reg = _make_registry()
+        flow = Flow(flow_id="nostart-355", nodes=[End(id="e1", name="end")])
+        with self.assertRaises(FlowStartMissingError):
+            flow.resolve_nodes(reg)
+
+
+class TestValidateNodesWarning(unittest.TestCase):
+    """构建期 node.validate() 降级警告——消息四要素（模板/flow_id/id/type）。"""
+
+    def _flow_with_broken_assignment(self):
+        d = _minimal_flow_dict()
+        d["nodes"].insert(1, {"id": "a1", "name": "a", "type": "assignment", "next": "e1"})
+        d["nodes"][0]["next"] = "a1"
+        return d
+
+    def test_model_validate_warns_construction_details(self):
+        reg = _make_registry()
+        with self.assertLogs(level="WARNING") as captured:
+            Flow.model_validate(self._flow_with_broken_assignment(), registry=reg)
+        joined = "\n".join(captured.output)
+        self.assertIn("failed construction-time validation", joined)
+        self.assertIn("test-flow", joined)
+        self.assertIn("a1", joined)
+        self.assertIn("assignment", joined)
+
+    def test_validate_nodes_explicit_nodes(self):
+        reg = _make_registry()
+        flow = Flow.model_validate(self._flow_with_broken_assignment(), registry=reg)
+        a1 = flow.find_node_by_id("a1")
+        with self.assertLogs(level="WARNING") as captured:
+            flow.validate_nodes(nodes=[a1])
+        self.assertIn("failed construction-time validation", "\n".join(captured.output))
+
+    def test_validate_nodes_default_uses_flow_nodes(self):
+        reg = _make_registry()
+        flow = Flow.model_validate(self._flow_with_broken_assignment(), registry=reg)
+        with self.assertLogs(level="WARNING") as captured:
+            flow.validate_nodes()
+        self.assertIn("failed construction-time validation", "\n".join(captured.output))
+
+    def test_validate_nodes_good_only_is_silent(self):
+        reg = _make_registry()
+        flow = Flow.model_validate(_minimal_flow_dict(), registry=reg)
+        with self.assertNoLogs(level="WARNING"):
+            flow.validate_nodes(nodes=[flow.find_node_by_id("s1")])
+
+
+class TestWarnUncoveredEnvRefs(unittest.TestCase):
+    def test_env_ref_warns_with_flow_id_and_key(self):
+        reg = _make_registry()
+        d = _minimal_flow_dict()
+        d["nodes"][1]["output"] = "$ENV.MY_KEY"
+        with self.assertLogs(level="WARNING") as captured:
+            Flow.model_validate(d, registry=reg)
+        joined = "\n".join(captured.output)
+        self.assertIn("MY_KEY", joined)
+        self.assertIn("test-flow", joined)
+
+
+class TestFromStringRound2(unittest.TestCase):
+    def test_empty_raises_valueerror_with_message(self):
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            Flow.from_string("")
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            Flow.from_string("   ")
+
+    def test_json_string_uses_injected_registry(self):
+        import json as _json
+        flow = Flow.from_string(_json.dumps(_flow_dict_with_probe()), registry=_reg_with_probe())
+        self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
+
+    def test_yaml_string_uses_injected_registry(self):
+        yaml_text = (
+            "flow_id: yflow\n"
+            "nodes:\n"
+            "- id: s1\n  name: start\n  type: start\n  next: p1\n"
+            "- id: p1\n  name: probe\n  type: probe_355\n  next: e1\n"
+            "- id: e1\n  name: end\n  type: end\n"
+        )
+        flow = Flow.from_string(yaml_text, registry=_reg_with_probe())
+        self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
+
+
+class TestEnsureIndexRound2(unittest.TestCase):
+    def test_index_rebuilt_when_nodes_list_changes(self):
+        reg = _make_registry()
+        flow = Flow.model_validate(_minimal_flow_dict(), registry=reg)
+        flow._ensure_index()
+        flow.nodes.append(_AssignNode(id="n2", name="n2"))
+        idx2 = flow._ensure_index()
+        self.assertIn("n2", idx2)
+
+
+class TestNextNodeRound2(unittest.TestCase):
+    def test_dangling_next_raises_with_reference_context(self):
+        """next 指向不存在节点 ⇒ NodeNotFoundError 且消息带引用方上下文。"""
+        reg = _make_registry()
+        flow = Flow(flow_id="f1", nodes=[Start(id="s1", name="start", next="ghost")])
+        flow.resolve_nodes(reg)
+        s1 = flow.find_node_by_id("s1")
+        with self.assertRaisesRegex(NodeNotFoundError, "referenced by node"):
+            flow.next_node(s1)
+
+    def test_if_node_placeholder_defaults_hint(self):
+        """if 节点占位默认 next/else_next（"true"/"false"）指向不存在节点 ⇒
+        NodeNotFoundError 且消息带占位提示（杀 hint 文本/守卫条件整簇变异）。"""
+        from plaita.node.decide import Bool
+        reg = _make_registry()
+        ifn = Bool(id="c1", name="cond",
+                   condition={"left": "$x", "op": "eq", "right": "yes", "relation": "and"})
+        flow = Flow(flow_id="f1", nodes=[
+            Start(id="s1", name="start", next="c1"),
+            ifn,
+            End(id="e1", name="end"),
+        ])
+        flow.resolve_nodes(reg)
+        c1 = flow.find_node_by_id("c1")
+        with self.assertRaisesRegex(NodeNotFoundError, "placeholder defaults of if-nodes"):
+            flow.next_node(c1, branch="true")
+
+    def test_non_if_node_with_string_true_does_not_enter_branch_path(self):
+        """非 if 节点的字符串 target "true" 走普通 next 查找 ⇒ NodeNotFoundError。"""
+        reg = _make_registry()
+        flow = Flow(flow_id="f1", nodes=[
+            Start(id="s1", name="start", next="true"),
+            _AssignNode(id="a1", name="a1"),
+        ])
+        flow.resolve_nodes(reg)
+        s1 = flow.find_node_by_id("s1")
+        with self.assertRaises(NodeNotFoundError):
+            flow.next_node(s1)
+
+    def test_branch_not_found_warns(self):
+        from plaita.node.decide import Switch, Branch, Condition
+        reg = _make_registry()
+        end = End(id="e1", name="end")
+        switch_node = Switch(
+            id="c1", name="cond",
+            branches=[Branch(condition={"left": "$x", "op": "eq", "right": "yes"}, next="e1")],
+        )
+        flow = Flow(flow_id="f1", nodes=[switch_node, end])
+        with self.assertLogs(level="WARNING") as captured:
+            flow._get_branch_target(switch_node, "nosuch")
+        self.assertIn("branch nosuch not found for node c1", "\n".join(captured.output))
+
+
+class TestRunInputContract(unittest.TestCase):
+    def _flow(self):
+        reg = _make_registry()
+        d = {"flow_id": "rr", "nodes": [
+            {"id": "s1", "name": "start", "type": "start", "next": "e1"},
+            {"id": "e1", "name": "end", "type": "end", "output": "$INPUT.x"},
+        ]}
+        return Flow.model_validate(d, registry=reg)
+
+    def test_non_dict_positional_rejected(self):
+        with self.assertRaises(TypeError):
+            self._flow().run(5)
+
+    def test_reserved_run_keyword_rejected_by_name(self):
+        # _reject_reserved_run_keywords 抛 TypeError，消息列出被拒关键字名
+        with self.assertRaisesRegex(TypeError, "inputs_data"):
+            self._flow().run(inputs_data=1, foo=2)
+
+    def test_dict_positional_input_reaches_execution(self):
+        self.assertEqual(self._flow().run({"x": 42}), 42)
+
+
+class TestCollectEnvRefsRound2(unittest.TestCase):
+    def test_two_refs_both_captured(self):
+        refs = set()
+        _collect_env_refs("$ENV.A plain $ENV.B", refs)
+        self.assertEqual(refs, {"A", "B"})
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# _resolve_cycle — iterative DFS, only back-edges count (#105)
+# Survivor cluster 2026-11-01: ~19 mutants on color/frames/state machinery.
+# ---------------------------------------------------------------------------
+
+from plaita.core.flow import _resolve_cycle  # noqa: E402
+
+
+class TestResolveCycleMutations(unittest.TestCase):
+    def test_acyclic_chain_returns_empty(self):
+        """s1→e1：无环 ⇒ []。杀 BLACK/pop/continue/color 簇——若 BLACK 不落或
+        弹栈丢帧，链终止行为即变。"""
+        self.assertEqual(_resolve_cycle({"s1": ["e1"], "e1": []}, "s1"), [])
+
+    def test_diamond_dag_returns_empty(self):
+        """菱形汇聚（入度>1、无回边）⇒ []——#105 的原始误报场景。"""
+        adj = {"s": ["a", "b"], "a": ["e"], "b": ["e"], "e": []}
+        self.assertEqual(_resolve_cycle(adj, "s"), [])
+
+    def test_two_node_cycle_exact_path(self):
+        """a→b→a ⇒ 精确 ['a', 'b', 'a']。杀 GRAY/state.get/start_idx/append 簇。"""
+        adj = {"a": ["b"], "b": ["a"]}
+        self.assertEqual(_resolve_cycle(adj, "a"), ["a", "b", "a"])
+
+    def test_self_loop_exact_path(self):
+        adj = {"a": ["a"]}
+        self.assertEqual(_resolve_cycle(adj, "a"), ["a", "a"])
+
+    def test_cycle_not_through_root_reports_inner_cycle(self):
+        """s→a→b→b 自环：环从 b 起 ⇒ ['b', 'b']（start_idx 语义）。"""
+        adj = {"s": ["a"], "a": ["b"], "b": ["b"]}
+        self.assertEqual(_resolve_cycle(adj, "s"), ["b", "b"])
+
+    def test_cycle_found_after_dag_prefix(self):
+        """s→a→b→c→b：前缀无环段不误报，环段精确返回 ['b','c','b']。"""
+        adj = {"s": ["a"], "a": ["b"], "b": ["c"], "c": ["b"]}
+        self.assertEqual(_resolve_cycle(adj, "s"), ["b", "c", "b"])
+
+    def test_node_without_outgoing_terminates(self):
+        """邻接表缺键（非空 dict）⇒ 终止返回 []。杀 adjacency.get 默认值簇。"""
+        self.assertEqual(_resolve_cycle({"s": ["x"]}, "s"), [])
+
+    def test_multiple_branches_one_cyclic(self):
+        """两条分支一环一直：环分支命中即返回，不吞掉直行分支。"""
+        adj = {"s": ["a", "c"], "a": ["b"], "b": ["a"], "c": []}
+        self.assertEqual(_resolve_cycle(adj, "s"), ["a", "b", "a"])
+
+
+# ---------------------------------------------------------------------------
+# Registry injection is actually honored (end-to-end)
+# Survivor cluster 2026-11-01: resolve_nodes(registry) → resolve_nodes(None)
+# survives because injected registry behaves like default. Kill by using a
+# node type that exists ONLY in the injected registry.
+# ---------------------------------------------------------------------------
+
+class _ProbeNode(Node):
+    node_type: ClassVar[str] = "probe_355"
+    node_name: ClassVar[str] = "probe_355"
+
+    def execute(self, execution=None):
+        return {}
+
+
+def _reg_with_probe():
+    reg = _make_registry()
+    reg.register(_ProbeNode)
+    return reg
+
+
+def _flow_dict_with_probe():
+    d = _minimal_flow_dict()
+    d["nodes"][0]["next"] = "p1"
+    d["nodes"].append({"id": "p1", "name": "probe", "type": "probe_355", "next": "e1"})
+    return d
+
+
+class TestRegistryInjectionHonored(unittest.TestCase):
+    def _reg_with_probe(self):
+        return _reg_with_probe()
+
+    def _flow_dict_with_probe(self):
+        return _flow_dict_with_probe()
+
+    def test_model_validate_uses_injected_registry(self):
+        flow = Flow.model_validate(self._flow_dict_with_probe(), registry=self._reg_with_probe())
+        probe = flow.find_node_by_id("p1")
+        self.assertIsInstance(probe, _ProbeNode)
+
+    def test_model_validate_json_uses_injected_registry(self):
+        import json as _json
+        flow = Flow.model_validate_json(
+            _json.dumps(self._flow_dict_with_probe()), registry=self._reg_with_probe()
+        )
+        self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
+
+    def test_resolve_nodes_direct_injection(self):
+        flow = Flow(flow_id="f1", nodes=self._flow_dict_with_probe()["nodes"])
+        flow.resolve_nodes(self._reg_with_probe())
+        self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
+
+    def test_missing_type_in_injected_registry_raises(self):
+        """注入 registry 缺类型 ⇒ 解析报错（杀『恒用默认 registry』变异）。"""
+        reg = _make_registry()  # 无 probe_355
+        with self.assertRaises(Exception):
+            Flow.model_validate(self._flow_dict_with_probe(), registry=reg)
+
+
+# ---------------------------------------------------------------------------
+# Structural check warning path (non-fatal) — message carries flow_id
+# Survivor cluster 2026-11-01: log-arg / call-removal mutants on
+# resolve_nodes' except branch.
+# ---------------------------------------------------------------------------
+
+class TestStructuralCheckWarning(unittest.TestCase):
+    def test_broken_flow_warns_with_flow_id_and_is_nonfatal(self):
+        """环 flow（解析成功、structural check 报不可达/cycle）⇒ 吞成 WARNING，
+        消息带 flow_id 与 structural check 字样，flow 仍然可用。"""
+        reg = _make_registry()
+        # 悬空 next：resolve 成功、validate_flow_ir 抛错被吞成 WARNING
+        dangling = {"flow_id": "broken-355", "nodes": [
+            {"id": "s1", "name": "start", "type": "start", "next": "ghost"},
+        ]}
+        with self.assertLogs(level="WARNING") as captured:
+            flow = Flow.model_validate(dangling, registry=reg)
+        joined = "\n".join(captured.output)
+        self.assertIn("broken-355", joined)
+        self.assertIn("structural check", joined)
+        # 具体校验错误文本必须透传（杀 validate_flow_ir 调用参数被换掉的变异：
+        # 参数变了报错文本就不再是这个悬空 next 错误）
+        self.assertIn("ghost", joined)
+        self.assertIsNotNone(flow)
+
+
+# ---------------------------------------------------------------------------
+# resolve_nodes index-cache identity — changed flag must gate invalidation
+# ---------------------------------------------------------------------------
+
+class TestResolveNodesCacheIdentity(unittest.TestCase):
+    def test_resolve_without_change_keeps_cached_index(self):
+        """已解析节点再 resolve（无变化）⇒ _ensure_index 缓存同一对象；
+        `changed = False`→`True` 类变异会每次重建。"""
+        reg = _make_registry()
+        flow = Flow.model_validate(_minimal_flow_dict(), registry=reg)
+        first = flow._ensure_index()
+        flow.resolve_nodes(reg)
+        second = flow._ensure_index()
+        self.assertIs(first, second)
