@@ -23,7 +23,7 @@ from plaita.core.flow import Flow, _collect_env_refs, parse
 from plaita.core.errors import NodeNotFoundError
 from plaita.node import NodeRegistry, Start, End
 from plaita.node.basic import Node
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -1354,6 +1354,136 @@ class TestFromStringRound4(unittest.TestCase):
         self.assertEqual(flow.find_node_by_id("p1").output, "yes")
 
 
+# ===========================================================================
+# Round 5（#355 flow 收口）：真幸存清单（独立复核后 43 个）定向击杀
+# ===========================================================================
+
+class TestFromStringValueErrorSource(unittest.TestCase):
+    """fs_1/fs_5：pydantic ValidationError 是 ValueError 子类且内嵌同款文案，
+    assertRaisesRegex 区分不了来源——必须 type 精确 + str 精确。"""
+
+    def test_empty_raises_type_exact_valueerror_with_exact_message(self):
+        with self.assertRaises(ValueError) as ctx:
+            Flow.from_string("")
+        self.assertIs(type(ctx.exception), ValueError)
+        self.assertEqual(str(ctx.exception), "Flow content cannot be empty")
+        with self.assertRaises(ValueError) as ctx2:
+            Flow.from_string("   ")
+        self.assertIs(type(ctx2.exception), ValueError)
+        self.assertEqual(str(ctx2.exception), "Flow content cannot be empty")
+
+
+class TestProbePromptCoercion(unittest.TestCase):
+    """fs_8-11：JSON 判据变异会把 JSON 串送进 yaml 分支——yaml 把裸 yes
+    翻译成 True，被 Optional[str] 字段拒绝 ⇒ 解析炸（原版成功）。"""
+
+    def _probe_yes_flow_json(self, leading=""):
+        import json as _json
+        d = _flow_dict_with_probe()
+        d["nodes"][2]["prompt"] = "yes"
+        return leading + _json.dumps(d)
+
+    def test_plain_json_prompt_stays_string(self):
+        flow = Flow.from_string(self._probe_yes_flow_json(), registry=_reg_with_probe())
+        self.assertEqual(flow.find_node_by_id("p1").prompt, "yes")
+
+    def test_leading_space_json_prompt_stays_string(self):
+        flow = Flow.from_string(self._probe_yes_flow_json(leading="   "), registry=_reg_with_probe())
+        self.assertEqual(flow.find_node_by_id("p1").prompt, "yes")
+
+
+class TestNextNodeHintInitializer(unittest.TestCase):
+    """nn_10：hint 初始化 ""→"XXXX" 只在非 if 路径可见（if 路径 hint 会被
+    重赋值覆盖）——非 if 悬空 next 的消息必须精确。"""
+
+    def test_non_if_dangling_exact_message(self):
+        reg = _make_registry()
+        flow = Flow(flow_id="f1", nodes=[Start(id="s1", name="start", next="ghost")])
+        flow.resolve_nodes(reg)
+        s1 = flow.find_node_by_id("s1")
+        with self.assertRaises(NodeNotFoundError) as ctx:
+            flow.next_node(s1)
+        self.assertEqual(
+            str(ctx.exception),
+            "Node with id 'Node with id 'ghost' not found "
+            "(referenced by node 's1' of type 'start')' not found",
+        )
+
+
+class TestNextNodeDebugExact(unittest.TestCase):
+    """nn_28/30/37：DEBUG 日志三参数位精确。"""
+
+    def test_next_node_debug_log_exact(self):
+        reg = _make_registry()
+        flow = Flow.model_validate(_minimal_flow_dict(), registry=reg)
+        s1 = flow.find_node_by_id("s1")
+        with self.assertLogs(level="DEBUG") as captured:
+            flow.next_node(s1)
+        self.assertIn(
+            "finding next node e1 for s1, result: e1",
+            [r.getMessage() for r in captured.records],
+        )
+
+
+class TestGetBranchTargetDebugRound5(unittest.TestCase):
+    def test_branch_debug_names_node_and_lists_branches(self):
+        from plaita.node.decide import Switch, Branch
+        reg = _make_registry()
+        end = End(id="e1", name="end")
+        switch_node = Switch(
+            id="c1", name="cond",
+            branches=[Branch(condition={"left": "$x", "op": "eq", "right": "yes", "relation": "and"}, next="e1")],
+        )
+        flow = Flow(flow_id="f1", nodes=[switch_node, end])
+        with self.assertLogs(level="DEBUG") as captured:
+            flow._get_branch_target(switch_node, "e1")
+        msgs = [r.getMessage() for r in captured.records]
+        self.assertTrue(any(
+            m.startswith("current node c1 has branches: [") for m in msgs
+        ), msgs)
+
+    def test_name_fallback_requires_current(self):
+        """branch_name_as_target 场景：无 next 分支经 name 回退解析
+        （杀 resolve_branch_target(None, b) 变异——None 无该属性必炸）。"""
+        from plaita.node.decide import Switch, Branch
+        reg = _make_registry()
+        end = End(id="e1", name="end")
+        switch_node = Switch(
+            id="c1", name="cond", branch_name_as_target=True,
+            branches=[Branch(condition={"left": "$x", "op": "eq", "right": "yes", "relation": "and"}, name="e1")],
+        )
+        flow = Flow(flow_id="f1", nodes=[switch_node, end])
+        self.assertIs(flow.next_node(switch_node, branch="e1"), end)
+
+
+class TestWarnUncoveredExact(unittest.TestCase):
+    def test_env_ref_warning_exact_message(self):
+        reg = _make_registry()
+        d = _minimal_flow_dict()
+        d["nodes"][1]["output"] = "$ENV.MY_KEY"
+        with self.assertLogs(level="WARNING") as captured:
+            Flow.model_validate(d, registry=reg)
+        self.assertIn(
+            "flow 'test-flow' 引用了 $ENV.['MY_KEY'] 但 expose_env 为空——"
+            "0.5.0 起 $ENV 默认不暴露任何环境变量, 这些引用会静默解析为空。"
+            "请在 Flow 上显式声明: Flow(..., expose_env=['MY_KEY'])。详见 MIGRATION.md。",
+            [r.getMessage() for r in captured.records],
+        )
+
+
+class TestEnsureIndexIdentity(unittest.TestCase):
+    def test_same_ids_new_list_rebuilds(self):
+        """同 id 集的新列表对象 ⇒ 指纹含 id(nodes) 必失效重建
+        （杀 id(nodes)→id(None) 变异：指纹恒定 → 返回旧缓存对象）。"""
+        reg = _make_registry()
+        flow = Flow.model_validate(_minimal_flow_dict(), registry=reg)
+        idx1 = flow._ensure_index()
+        flow.nodes = list(flow.nodes)  # 新列表对象、同 id 集
+        idx2 = flow._ensure_index()
+        self.assertIsNot(idx1, idx2)
+        self.assertIn("s1", idx2)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1416,6 +1546,7 @@ class TestResolveCycleMutations(unittest.TestCase):
 class _ProbeNode(Node):
     node_type: ClassVar[str] = "probe_355"
     node_name: ClassVar[str] = "probe_355"
+    prompt: Optional[str] = None
 
     def execute(self, execution=None):
         return {}
