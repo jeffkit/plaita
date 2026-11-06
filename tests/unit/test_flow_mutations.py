@@ -965,12 +965,12 @@ class TestCycleWarningPath(unittest.TestCase):
         ]}
         with self.assertLogs(level="WARNING") as captured:
             Flow.model_validate(cyclic, registry=reg)
-        joined = "\n".join(captured.output)
+        msgs = [r.getMessage() for r in captured.records]
         self.assertIn(
             "flow cyc-355 contains a cycle in next/branches: s1 -> a1 -> s1; "
             "without a flow-level timeout a Normal run will loop forever. "
             "If intentional, set flow timeout or use loop/while nodes with iteration limits.",
-            joined,
+            msgs,
         )
 
     def test_acyclic_flow_does_not_warn_cycle(self):
@@ -1019,15 +1019,15 @@ class TestValidateNodesWarning(unittest.TestCase):
         reg = _make_registry()
         with self.assertLogs(level="WARNING") as captured:
             Flow.model_validate(self._flow_with_broken_assignment(), registry=reg)
-        joined = "\n".join(captured.output)
-        # 精确格式：id/type 参数位各自独立可辨（错误文本自身含 a1/assignment，
-        # 单独 assertIn 无法区分参数位被换 None——必须钉格式）
+        # getMessage() 精确全文（杀模板 XX 包裹 + 参数位替换；错误文本自身
+        # 含 a1/assignment，子串断言无法区分参数位）
+        msgs = [r.getMessage() for r in captured.records]
         self.assertIn(
-            "flow test-flow node a1 (assignment) failed construction-time validation",
-            joined,
+            "flow test-flow node a1 (assignment) failed construction-time validation "
+            "(non-fatal, the flow still runs): assignment node 'a1': "
+            "缺少必填的 output_type（outputType）。",
+            msgs,
         )
-        # 错误文本透传（杀 scrub→None 类变异）
-        self.assertIn("output_type", joined)
 
     def test_validate_nodes_explicit_nodes(self):
         reg = _make_registry()
@@ -1121,18 +1121,21 @@ class TestNextNodeRound2(unittest.TestCase):
         ])
         flow.resolve_nodes(reg)
         c1 = flow.find_node_by_id("c1")
+        # NodeNotFoundError 会把消息再包一层 "Node with id '<msg>' not found"，
+        # 故精确串以后缀形态断言（杀 hint 初始化 XXXX / XX 包裹 / 小写 note）
         with self.assertRaises(NodeNotFoundError) as true_ctx:
             flow.next_node(c1, branch="true")
-        msg = str(true_ctx.exception)
-        self.assertIn("(referenced by node 'c1' of type 'if')", msg)
         self.assertIn(
+            "Node with id 'true' not found (referenced by node 'c1' of type 'if') "
             "Note: 'true'/'false' are placeholder defaults of if-nodes "
-            "(next/else_next) — set them to your real target node ids.", msg)
+            "(next/else_next) — set them to your real target node ids.' not found",
+            str(true_ctx.exception))
         with self.assertRaises(NodeNotFoundError) as false_ctx:
             flow.next_node(c1, branch="false")
         self.assertIn(
+            "Node with id 'false' not found (referenced by node 'c1' of type 'if') "
             "Note: 'true'/'false' are placeholder defaults of if-nodes "
-            "(next/else_next) — set them to your real target node ids.",
+            "(next/else_next) — set them to your real target node ids.' not found",
             str(false_ctx.exception))
 
     def test_non_if_node_with_string_true_does_not_enter_branch_path(self):
@@ -1159,7 +1162,10 @@ class TestNextNodeRound2(unittest.TestCase):
         flow = Flow(flow_id="f1", nodes=[switch_node, end])
         with self.assertLogs(level="WARNING") as captured:
             flow._get_branch_target(switch_node, "nosuch")
-        self.assertIn("branch nosuch not found for node c1", "\n".join(captured.output))
+        self.assertIn(
+            "branch nosuch not found for node c1",
+            [r.getMessage() for r in captured.records],
+        )
         # DEBUG 参数位探针（current.id / branches 参数被换 None/None 类变异）
         with self.assertLogs(level="DEBUG") as dbg:
             flow._get_branch_target(switch_node, "yes")
@@ -1178,13 +1184,21 @@ class TestRunInputContract(unittest.TestCase):
         return Flow.model_validate(d, registry=reg)
 
     def test_non_dict_positional_rejected(self):
-        with self.assertRaises(TypeError):
+        with self.assertRaises(TypeError) as ctx:
             self._flow().run(5)
+        self.assertEqual(
+            str(ctx.exception),
+            "flow.run() accepts a single dict and/or keyword arguments; "
+            "got positional args=(5,). Wrap scalar/array input in a dict, "
+            "e.g. flow.run({'value': '...'}) and reference $INPUT.value.",
+        )
 
     def test_reserved_run_keyword_rejected_by_name(self):
-        # _reject_reserved_run_keywords 抛 TypeError，消息列出被拒关键字名
-        with self.assertRaisesRegex(TypeError, "inputs_data"):
+        # 消息精确列出被拒键的 sorted 列表（杀 not in 反转变异——反转会列出 foo）
+        with self.assertRaises(TypeError) as ctx:
             self._flow().run(inputs_data=1, foo=2)
+        self.assertIn("['inputs_data']", str(ctx.exception))
+        self.assertNotIn("'foo'", str(ctx.exception))
 
     def test_dict_positional_input_reaches_execution(self):
         self.assertEqual(self._flow().run({"x": 42}), 42)
@@ -1244,6 +1258,100 @@ class TestRound3Probes(unittest.TestCase):
         flow = Flow.from_string(_json.dumps(_flow_dict_with_probe()), registry=reg)
         self.assertEqual(flow.flow_id, "test-flow")
         self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
+
+
+# ===========================================================================
+# Round 4（#355 flow 清剿）：getMessage 精确断言补残留 + 分支边环 + from_string
+# ===========================================================================
+
+class TestCycleWarningExactRound4(unittest.TestCase):
+    def test_cycle_warning_exact_message_strict(self):
+        """环警告精确全文再钉一次（cyc fixture 走 resolve_nodes 原路径）。"""
+        reg = _make_registry()
+        cyclic = {"flow_id": "cyc-355", "nodes": [
+            {"id": "s1", "name": "start", "type": "start", "next": "a1"},
+            {"id": "a1", "name": "a", "type": "assignment", "next": "s1"},
+        ]}
+        with self.assertLogs(level="WARNING") as captured:
+            Flow.model_validate(cyclic, registry=reg)
+        msgs = [r.getMessage() for r in captured.records]
+        self.assertIn(
+            "flow cyc-355 contains a cycle in next/branches: s1 -> a1 -> s1; "
+            "without a flow-level timeout a Normal run will loop forever. "
+            "If intentional, set flow timeout or use loop/while nodes with iteration limits.",
+            msgs,
+        )
+
+
+class TestBranchEdgeCycleRound4(unittest.TestCase):
+    """仅经 branches 的环（Switch 分支边）——杀 branches/branch.next 参数簇。"""
+
+    def test_switch_branch_edge_cycle_detected(self):
+        from plaita.node.decide import Switch, Branch
+        reg = _make_registry()
+        switch_node = Switch(
+            id="sw", name="sw",
+            branches=[Branch(condition={"left": "$x", "op": "eq", "right": "yes", "relation": "and"}, next="s1")],
+        )
+        flow = Flow(flow_id="swcyc-355", nodes=[
+            Start(id="s1", name="start", next="sw"),
+            switch_node,
+            End(id="e1", name="end"),
+        ])
+        with self.assertLogs(level="WARNING") as captured:
+            flow.resolve_nodes(reg)
+        msgs = [r.getMessage() for r in captured.records]
+        self.assertIn(
+            "flow swcyc-355 contains a cycle in next/branches: s1 -> sw -> s1; "
+            "without a flow-level timeout a Normal run will loop forever. "
+            "If intentional, set flow timeout or use loop/while nodes with iteration limits.",
+            msgs,
+        )
+
+    def test_cycle_with_timeout_silent_for_probe_cycle(self):
+        """带 timeout 的环（probe 节点，validate 干净）⇒ 零警告
+        （杀 cycle 门 `and not timeout` 的 or 变异——误报面会发警告）。"""
+        import warnings as _w
+        reg = _reg_with_probe()
+        flow = Flow(flow_id="swcyc-t", timeout="PT10S", nodes=[
+            Start(id="s1", name="start", next="p1"),
+            _ProbeNode(id="p1", name="p", next="s1"),
+        ])
+        with self.assertNoLogs(level="WARNING"):
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                flow.resolve_nodes(reg)
+
+
+class TestFromStringRound4(unittest.TestCase):
+    def test_valid_json_does_not_hit_yaml_fallback_warning(self):
+        """合法 JSON 直 réussi——fallback 警告缺席（杀 model_validate_json
+        参数/registry 变异：变异会解析失败落入 fallback 发警告）。"""
+        import json as _json
+        reg = _reg_with_probe()
+        with self.assertNoLogs(level="WARNING"):
+            flow = Flow.from_string(_json.dumps(_flow_dict_with_probe()), registry=reg)
+        self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
+
+    def test_yaml_truthy_coercion_via_json_branch(self):
+        """JSON 串含 "yes" 字符串值：必须走 JSON 分支保持字符串——落入 yaml
+        分支会把裸 yes 翻成 True 被 Optional[str] 拒绝（杀 JSON 判据变异）。"""
+        import json as _json
+        reg = _reg_with_probe()
+        d = _flow_dict_with_probe()
+        d["nodes"][2]["output"] = "yes"
+        flow = Flow.from_string(_json.dumps(d), registry=reg)
+        self.assertEqual(flow.find_node_by_id("p1").output, "yes")
+
+    def test_leading_space_json_still_json_branch(self):
+        """前导空格的 JSON：lstrip 判据保证仍走 JSON 分支（杀 rstrip/[:2]/
+        not in 变异——它们会送 yaml 分支触发 yes→True 拒绝）。"""
+        import json as _json
+        reg = _reg_with_probe()
+        d = _flow_dict_with_probe()
+        d["nodes"][2]["output"] = "yes"
+        flow = Flow.from_string("   " + _json.dumps(d), registry=reg)
+        self.assertEqual(flow.find_node_by_id("p1").output, "yes")
 
 
 if __name__ == "__main__":
@@ -1374,12 +1482,12 @@ class TestStructuralCheckWarning(unittest.TestCase):
         ]}
         with self.assertLogs(level="WARNING") as captured:
             flow = Flow.model_validate(dangling, registry=reg)
-        joined = "\n".join(captured.output)
-        # 整条消息精确相等（杀模板 XX 包裹 / 参数替换 / 调用形状变异）
+        # getMessage() 精确相等（assertIn 子串对 XX 包裹免疫——第三轮实证）
+        msgs = [r.getMessage() for r in captured.records]
         self.assertIn(
             "flow broken-355 structural check (non-fatal, flow still runs): "
             "[nodes] 节点 's1' 的 next 指向不存在的节点 id 'ghost'",
-            joined,
+            msgs,
         )
         self.assertIsNotNone(flow)
 
