@@ -265,11 +265,13 @@ class TestIsEndNodeMutations(unittest.TestCase):
 
 class TestNextNodeMutations(unittest.TestCase):
     def test_next_node_returns_none_for_end(self):
-        """Kill mutations that call next_node even for end."""
+        """Kill mutations that call next_node even for end（无警告探针：变异
+        会绕过 end 短路走进 _get_branch_target 发警告）。"""
         reg = _make_registry()
         flow = Flow.model_validate(_minimal_flow_dict(), registry=reg)
         end = flow.find_node_by_id("e1")
-        self.assertIsNone(flow.next_node(end))
+        with self.assertNoLogs(level="WARNING"):
+            self.assertIsNone(flow.next_node(end))
 
     def test_next_node_from_start_returns_end(self):
         """Kill mutations that skip target resolution."""
@@ -964,9 +966,12 @@ class TestCycleWarningPath(unittest.TestCase):
         with self.assertLogs(level="WARNING") as captured:
             Flow.model_validate(cyclic, registry=reg)
         joined = "\n".join(captured.output)
-        self.assertIn("contains a cycle", joined)
-        self.assertIn("s1 -> a1 -> s1", joined)
-        self.assertIn("cyc-355", joined)
+        self.assertIn(
+            "flow cyc-355 contains a cycle in next/branches: s1 -> a1 -> s1; "
+            "without a flow-level timeout a Normal run will loop forever. "
+            "If intentional, set flow timeout or use loop/while nodes with iteration limits.",
+            joined,
+        )
 
     def test_acyclic_flow_does_not_warn_cycle(self):
         import warnings as _w
@@ -1015,10 +1020,14 @@ class TestValidateNodesWarning(unittest.TestCase):
         with self.assertLogs(level="WARNING") as captured:
             Flow.model_validate(self._flow_with_broken_assignment(), registry=reg)
         joined = "\n".join(captured.output)
-        self.assertIn("failed construction-time validation", joined)
-        self.assertIn("test-flow", joined)
-        self.assertIn("a1", joined)
-        self.assertIn("assignment", joined)
+        # 精确格式：id/type 参数位各自独立可辨（错误文本自身含 a1/assignment，
+        # 单独 assertIn 无法区分参数位被换 None——必须钉格式）
+        self.assertIn(
+            "flow test-flow node a1 (assignment) failed construction-time validation",
+            joined,
+        )
+        # 错误文本透传（杀 scrub→None 类变异）
+        self.assertIn("output_type", joined)
 
     def test_validate_nodes_explicit_nodes(self):
         reg = _make_registry()
@@ -1056,9 +1065,9 @@ class TestWarnUncoveredEnvRefs(unittest.TestCase):
 
 class TestFromStringRound2(unittest.TestCase):
     def test_empty_raises_valueerror_with_message(self):
-        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+        with self.assertRaisesRegex(ValueError, "Flow content cannot be empty"):
             Flow.from_string("")
-        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+        with self.assertRaisesRegex(ValueError, "Flow content cannot be empty"):
             Flow.from_string("   ")
 
     def test_json_string_uses_injected_registry(self):
@@ -1112,8 +1121,19 @@ class TestNextNodeRound2(unittest.TestCase):
         ])
         flow.resolve_nodes(reg)
         c1 = flow.find_node_by_id("c1")
-        with self.assertRaisesRegex(NodeNotFoundError, "placeholder defaults of if-nodes"):
+        with self.assertRaises(NodeNotFoundError) as true_ctx:
             flow.next_node(c1, branch="true")
+        msg = str(true_ctx.exception)
+        self.assertIn("(referenced by node 'c1' of type 'if')", msg)
+        self.assertIn(
+            "Note: 'true'/'false' are placeholder defaults of if-nodes "
+            "(next/else_next) — set them to your real target node ids.", msg)
+        with self.assertRaises(NodeNotFoundError) as false_ctx:
+            flow.next_node(c1, branch="false")
+        self.assertIn(
+            "Note: 'true'/'false' are placeholder defaults of if-nodes "
+            "(next/else_next) — set them to your real target node ids.",
+            str(false_ctx.exception))
 
     def test_non_if_node_with_string_true_does_not_enter_branch_path(self):
         """非 if 节点的字符串 target "true" 走普通 next 查找 ⇒ NodeNotFoundError。"""
@@ -1124,8 +1144,9 @@ class TestNextNodeRound2(unittest.TestCase):
         ])
         flow.resolve_nodes(reg)
         s1 = flow.find_node_by_id("s1")
-        with self.assertRaises(NodeNotFoundError):
+        with self.assertRaises(NodeNotFoundError) as ctx:
             flow.next_node(s1)
+        self.assertNotIn("placeholder defaults", str(ctx.exception))
 
     def test_branch_not_found_warns(self):
         from plaita.node.decide import Switch, Branch, Condition
@@ -1139,6 +1160,12 @@ class TestNextNodeRound2(unittest.TestCase):
         with self.assertLogs(level="WARNING") as captured:
             flow._get_branch_target(switch_node, "nosuch")
         self.assertIn("branch nosuch not found for node c1", "\n".join(captured.output))
+        # DEBUG 参数位探针（current.id / branches 参数被换 None/None 类变异）
+        with self.assertLogs(level="DEBUG") as dbg:
+            flow._get_branch_target(switch_node, "yes")
+        djoin = "\n".join(dbg.output)
+        self.assertIn("current node c1 has branches: ", djoin)
+        self.assertNotIn("current node None has branches: None", djoin)
 
 
 class TestRunInputContract(unittest.TestCase):
@@ -1168,6 +1195,55 @@ class TestCollectEnvRefsRound2(unittest.TestCase):
         refs = set()
         _collect_env_refs("$ENV.A plain $ENV.B", refs)
         self.assertEqual(refs, {"A", "B"})
+
+
+class TestRound3Probes(unittest.TestCase):
+    """第三轮补探针：adjacency 构建、from_string JSON 分支、run 位置参数。"""
+
+    def test_branch_edge_feeds_cycle_detection(self):
+        """经 Bool 分支的环（s→b→s）必须被检出（杀 branches getattr/
+        branch.next 参数簇——边丢了警告就消失）。"""
+        from plaita.node.decide import Bool
+        reg = _make_registry()
+        b1 = Bool(id="b1", name="b",
+                  condition={"left": "$x", "op": "eq", "right": "yes", "relation": "and"},
+                  next="s1", else_next="e1")
+        flow = Flow(flow_id="brcyc-355", nodes=[
+            Start(id="s1", name="start", next="b1"),
+            b1,
+            End(id="e1", name="end"),
+        ])
+        with self.assertLogs(level="WARNING") as captured:
+            flow.resolve_nodes(reg)
+        joined = "\n".join(captured.output)
+        self.assertIn("flow brcyc-355 contains a cycle in next/branches: s1 -> b1 -> s1;", joined)
+
+    def test_dangling_branch_next_still_warns_structural(self):
+        """Bool 分支 next 悬空（else_next 指向不存在节点）⇒ structural 警告
+        消息透传该错误（杀 branch.next getattr 簇）。"""
+        from plaita.node.decide import Bool
+        reg = _make_registry()
+        b1 = Bool(id="b1", name="b",
+                  condition={"left": "$x", "op": "eq", "right": "yes", "relation": "and"},
+                  next="e1", else_next="ghost")
+        flow = Flow(flow_id="bdang-355", nodes=[
+            Start(id="s1", name="start", next="b1"),
+            b1,
+            End(id="e1", name="end"),
+        ])
+        with self.assertLogs(level="WARNING") as captured:
+            flow.resolve_nodes(reg)
+        self.assertIn("bdang-355 structural check", "\n".join(captured.output))
+        self.assertIn("ghost", "\n".join(captured.output))
+
+    def test_json_branch_calls_model_validate_json_with_content(self):
+        """JSON 串必须走 model_validate_json（None/content 参数变异 → 解析炸）。
+        registry 注入在 json 分支同样生效（杀 registry=None/省略变异）。"""
+        import json as _json
+        reg = _reg_with_probe()
+        flow = Flow.from_string(_json.dumps(_flow_dict_with_probe()), registry=reg)
+        self.assertEqual(flow.flow_id, "test-flow")
+        self.assertIsInstance(flow.find_node_by_id("p1"), _ProbeNode)
 
 
 if __name__ == "__main__":
@@ -1299,11 +1375,12 @@ class TestStructuralCheckWarning(unittest.TestCase):
         with self.assertLogs(level="WARNING") as captured:
             flow = Flow.model_validate(dangling, registry=reg)
         joined = "\n".join(captured.output)
-        self.assertIn("broken-355", joined)
-        self.assertIn("structural check", joined)
-        # 具体校验错误文本必须透传（杀 validate_flow_ir 调用参数被换掉的变异：
-        # 参数变了报错文本就不再是这个悬空 next 错误）
-        self.assertIn("ghost", joined)
+        # 整条消息精确相等（杀模板 XX 包裹 / 参数替换 / 调用形状变异）
+        self.assertIn(
+            "flow broken-355 structural check (non-fatal, flow still runs): "
+            "[nodes] 节点 's1' 的 next 指向不存在的节点 id 'ghost'",
+            joined,
+        )
         self.assertIsNotNone(flow)
 
 
