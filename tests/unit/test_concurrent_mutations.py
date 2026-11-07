@@ -429,6 +429,8 @@ class TestExecBranchAsyncMutations(unittest.IsolatedAsyncioTestCase):
 
 import concurrent.futures as _cf  # noqa: E402
 
+from types import SimpleNamespace as _NS355  # noqa: E402
+
 from plaita.node.concurrent import _BG_LOCK, _BG_STATE_MAX  # noqa: E402
 
 
@@ -1026,6 +1028,67 @@ class TestExecuteDispatchRound3(unittest.TestCase):
                 with patch.object(Parallel, meth, return_value={}) as m:
                     p.execute(MagicMock())
                 m.assert_called_once()
+
+
+# ===========================================================================
+# Round 4（#355 concurrent 清剿第四批）：wait 后半 + callback DEBUG 精确 + async DEBUG
+# ===========================================================================
+
+class TestWaitFreshState(unittest.TestCase):
+    def test_fresh_state_without_done_key_waits_and_counts(self):
+        """state 无 "done" 键 ⇒ get 默认 0 + 完成数（杀 get("done", None)+1
+        的 None+1 TypeError 变异——挂死会直接 fail 本测试）。"""
+        p = Parallel(id="p_wf", branches=[], join_branches=[])
+        execution = MagicMock()
+        execution.execution_id = "wf-355"
+        done_f = _cf.Future()
+        done_f.set_result("x")
+        with _BG_LOCK:
+            st = _BG_STATE.setdefault("wf-355", {"futures": [done_f], "errors": []})
+        result = p.wait_background_branches(execution)
+        self.assertEqual(result, {"done": 1, "not_done": 0})
+
+
+class TestBgDoneCallbackCancelledDebug(unittest.TestCase):
+    def test_cancelled_debug_message_exact(self):
+        """cancelled future 的 DEBUG 消息全文精确（杀模板 None/XX/大写/参数位
+        簇——scrub 后文本为空串，正好钉住前缀+空尾）。"""
+        p = Parallel(id="p_cd", branches=[], join_branches=[])
+        errors = []
+        state = {"futures": [], "errors": errors, "done": 0}
+        fut = _cf.Future()
+        fut.cancel()
+        cb = p._make_background_done_callback(
+            _NS355(name="b1"), errors, state
+        )
+        with self.assertLogs(level="DEBUG") as captured:
+            cb(fut)
+        self.assertTrue(any(
+            m.startswith("background future.exception() unavailable: ")
+            for m in [r.getMessage() for r in captured.records]
+        ))
+
+
+class TestExecBranchAsyncDebugExact(unittest.IsolatedAsyncioTestCase):
+    async def test_async_debug_log_exact(self):
+        """async 分支 DEBUG 消息全文精确（杀 pb.name/rs 参数位变异）。"""
+        p = _make_parallel()
+        pb = ParallelBranch.model_validate(_simple_branch_dict("dbg-b"))
+        execution = MagicMock()
+        be = MagicMock()
+        execution.get_child_execution.return_value = be
+
+        async def _mock_arun(flow, lazy, input_value):
+            return "ASYNC-R"
+
+        be.arun_compatible = _mock_arun
+        with self.assertLogs(level="DEBUG") as captured:
+            rs = await p.exec_branch_async(pb, execution, be)
+        self.assertEqual(rs, "ASYNC-R")
+        self.assertIn(
+            "async branch dbg-b executed: ASYNC-R",
+            [r.getMessage() for r in captured.records],
+        )
 
 
 if __name__ == "__main__":
