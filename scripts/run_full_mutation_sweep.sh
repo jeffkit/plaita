@@ -367,7 +367,10 @@ for i in "${!MODULES[@]}"; do
   # 管道读端 tee 永远读不到 EOF，上游驱动脚本会死等。
   # 超时默认 600s；大模块（如 sexpr 3096 变异点）用 INITIAL_TIMEOUT_S 放行
   # 让 mutmut 并行初筛跑完——被掐掉的初筛会把全部点推入串行 recheck（几十小时）。
-  ( sleep "${INITIAL_TIMEOUT_S:-600}" && kill "$MUTMUT_PID" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  ( sleep "${INITIAL_TIMEOUT_S:-600}" && kill "$MUTMUT_PID" 2>/dev/null; \
+    # kill 打在管道 tail pid 上杀不死 mutmut 本体（async 挂起形态，#355 concurrent 实证
+    # 22h+ 无人管）——补刀：按命令行精确清理 mutmut 进程树（本 worktree 独占 mutmut，无邻席风险）
+    sleep 5 && pkill -f "python -m mutmut run" 2>/dev/null; true ) </dev/null >/dev/null 2>&1 &
   KILLER_PID=$!
   wait "$MUTMUT_PID" 2>/dev/null || true
   kill "$KILLER_PID" 2>/dev/null || true
