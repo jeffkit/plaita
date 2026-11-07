@@ -423,5 +423,316 @@ class TestExecBranchAsyncMutations(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actual_result_xyz", combined)
 
 
+# ===========================================================================
+# Round 5（2026-11-07，#355 concurrent 清剿首批）：独立复核确认的 187 真幸存
+# ===========================================================================
+
+import concurrent.futures as _cf  # noqa: E402
+
+from plaita.node.concurrent import _BG_LOCK, _BG_STATE_MAX  # noqa: E402
+
+
+class _Exec355:
+    """无 execution_id 属性的裸对象——走 str(id(execution)) 兜底路径。"""
+
+
+class _EidExec355:
+    """带固定 execution_id 的对象——走主键路径。"""
+
+    execution_id = "eid-355"
+
+
+class TestGetBgStateRound1(unittest.TestCase):
+    def setUp(self):
+        with _BG_LOCK:
+            _BG_STATE.clear()
+
+    def tearDown(self):
+        with _BG_LOCK:
+            _BG_STATE.clear()
+
+    def test_eid_prefers_execution_id_attribute(self):
+        """ Kills _2/3/8/9: eid 必须取 execution_id 属性（or→and / getattr(None) /
+        属性名改写都会丢主键落到 str(id(...))）。"""
+        st = _get_bg_state(_EidExec355())
+        self.assertIn("eid-355", _BG_STATE)
+
+    def test_eid_falls_back_to_object_identity(self):
+        """无 execution_id 属性 ⇒ getattr 默认 None → str(id(obj))；两个对象两份
+        状态（杀 _7 默认值摘除〔AttributeError〕/_10 str(None)/_11 id(None)。"""
+        keep = []
+        e1, e2 = object(), object()
+        keep += [e1, e2]
+        st1 = _get_bg_state(e1)
+        st2 = _get_bg_state(e2)
+        self.assertIsNot(st1, st2)
+        self.assertEqual(len(_BG_STATE), 2)
+
+    def test_existing_state_returned_not_recreated(self):
+        """同一 eid 二次取必须返回同一份（杀 get→None / get(None) / 存储 None），
+        且 done/futures/errors 三键齐全。"""
+        st1 = _get_bg_state(_EidExec355())
+        st1["done"] = 7
+        st2 = _get_bg_state(_EidExec355())
+        self.assertIs(st1, st2)
+        self.assertEqual(st2["done"], 7)
+        for key in ("done", "futures", "errors"):
+            self.assertIn(key, st2)
+
+    def test_lru_eviction_boundary_exact(self):
+        """超限逐出后长度恰为 MAX（杀 > → >= 的过度逐出）。"""
+        keep = []
+        for i in range(_BG_STATE_MAX):
+            o = object()
+            keep.append(o)
+            _get_bg_state(o)
+        self.assertLessEqual(len(_BG_STATE), _BG_STATE_MAX)
+        extra = object()
+        keep.append(extra)
+        _get_bg_state(extra)
+        self.assertEqual(len(_BG_STATE), _BG_STATE_MAX)
+
+
+class TestResolveBranchInputRound1(unittest.TestCase):
+    def test_input_none_inherits_parent_input_snapshot(self):
+        """pb.input 为 None ⇒ 继承父 $INPUT（$INPUT 键求值 + 快照）。
+        Kills _2（input_key=None→evaluate(None) KeyError）/ _3（快照 None）/
+        _4（快照=None 求值）/ _5（evaluate(None)）。"""
+        from plaita.node.concurrent import Parallel
+
+        pb = ParallelBranch(id="b1")
+        execution = MagicMock()
+        execution.express_prefix = "$"
+        execution.express_input_name = "INPUT"
+        execution.evaluate = lambda key: {"$INPUT": {"x": 99}}[key]
+        inst = Parallel.model_validate({'id': 'p_ri', 'branches': [_simple_branch_dict('b1')]})
+        snap = inst._resolve_branch_input(pb, execution)
+        self.assertEqual(snap, {"x": 99})
+
+
+class TestExecBranchRound1(unittest.TestCase):
+    def _setup(self):
+        pb = ParallelBranch(id="b1", name="b-name")
+        pb.flow = "FLOW-OBJ"
+        execution = MagicMock()
+        execution.mode = "generator"
+        from plaita.core.executor import ExecutionMode
+
+        execution.mode = ExecutionMode.GENERATOR
+        be = MagicMock()
+        execution.get_child_execution.return_value = be
+        return pb, execution, be
+
+    def test_lazy_and_input_forwarded_to_run_compatible(self):
+        pb, execution, be = self._setup()
+        with patch.object(Parallel, "_resolve_branch_input", return_value="INPUT-VAL"):
+            rs = Parallel.model_validate({'id': 'p_eb3', 'branches': [_simple_branch_dict('b1')]}).exec_branch(pb, execution, be)
+        be.run_compatible.assert_called_once_with(pb.flow, True, "INPUT-VAL")
+        self.assertEqual(rs, "RESULT" if rs == "RESULT" else rs)
+
+    def test_child_execution_created_and_bound_when_absent(self):
+        pb, execution, be = self._setup()
+        with patch("plaita.node.concurrent.bind_child_step") as bcs, \
+             patch.object(Parallel, "_resolve_branch_input", return_value="I"):
+            Parallel.model_validate({'id': 'p_eb4', 'branches': [_simple_branch_dict('b1')]}).exec_branch(pb, execution)  # 不传 branch_execution
+        bcs.assert_called_once_with(execution, be, "b-name")
+
+    def test_debug_log_exact(self):
+        pb, execution, be = self._setup()
+        be.run_compatible.return_value = "RESULT"
+        with patch.object(Parallel, "_resolve_branch_input", return_value="I"):
+            with self.assertLogs(level="DEBUG") as captured:
+                Parallel.exec_branch(MagicMock(), pb, execution, be)
+        self.assertIn(
+            "branch b-name executed: RESULT",
+            [r.getMessage() for r in captured.records],
+        )
+
+
+class TestRejectSuspendingRound1(unittest.TestCase):
+    def test_suspending_branch_flow_rejected(self):
+        from plaita.core.errors import FlowSuspendRejectedError
+
+        pb = MagicMock()
+        pb.flow = "FLOW-OBJ"
+        pb.name = "b1"
+        with patch("plaita.node.concurrent.flow_contains_suspending_node") as fc:
+            fc.return_value = True
+            inst = Parallel.model_validate({
+                "id": "p_rs", "branches": [_simple_branch_dict("b1")],
+            })
+            with self.assertRaises(FlowSuspendRejectedError):
+                inst._reject_suspending_branches([pb])
+            fc.assert_called_once_with("FLOW-OBJ")
+
+
+class TestSplitBranchesRound1(unittest.TestCase):
+    def test_split_excludes_join_from_background(self):
+        p = _make_parallel(join_branches=["a"])
+        b_a = ParallelBranch(id="pa", name="a")
+        b_b = ParallelBranch(id="pb", name="b")
+        joined, background = p._split_branches([b_a, b_b])
+        self.assertEqual([b.name for b in joined], ["a"])
+        self.assertEqual([b.name for b in background], ["b"])
+
+
+class TestExecBgBranchesRound1(unittest.TestCase):
+    def _run(self, branch_name="b1"):
+        p = Parallel(id="p_eb", branches=[], join_branches=[])
+        bg = [ParallelBranch(id="b1", name=branch_name)]
+        execution = MagicMock()
+        execution.execution_id = "eb-355"
+        be = MagicMock()
+        execution.get_child_execution.return_value = be
+        executor = MagicMock()
+        fut = MagicMock()
+        executor.submit.return_value = fut
+        with patch("plaita.node.concurrent.bind_child_step") as bcs:
+            p._execute_background_branches(bg, executor, execution)
+        return p, executor, fut, bcs, execution, be, bg[0]
+
+    def test_submit_args_exact(self):
+        p, executor, fut, bcs, execution, be, branch = self._run()
+        executor.submit.assert_called_once_with(
+            p.exec_branch, branch, execution, be,
+        )
+
+    def test_future_registered_and_callback_attached(self):
+        p, executor, fut, bcs, execution, be, branch = self._run()
+        with _BG_LOCK:
+            st = _BG_STATE["eb-355"]
+        self.assertIn(fut, st["futures"])
+        fut.add_done_callback.assert_called_once()
+
+    def test_empty_background_is_noop(self):
+        p = Parallel(id="p_eb2", branches=[], join_branches=[])
+        executor = MagicMock()
+        execution = MagicMock()
+        execution.execution_id = "eb-noop"
+        p._execute_background_branches([], executor, execution)
+        executor.submit.assert_not_called()
+
+
+class TestBgDoneCallbackRound1(unittest.TestCase):
+    def _mk(self, done_state=None):
+        p = Parallel(id="p_cb", branches=[], join_branches=[])
+        errors = []
+        state = {"futures": [], "errors": errors, "done": 0}
+        if done_state is not None:
+            state["done"] = done_state
+        fut = _cf.Future()
+        state["futures"].append(fut)
+        from types import SimpleNamespace as _NS
+        cb = p._make_background_done_callback(_NS(name="b1"), errors, state)
+        return cb, fut, errors, state
+
+    def test_success_future_removed_and_counted(self):
+        cb, fut, errors, state = self._mk()
+        fut.set_result("ok")
+        cb(fut)
+        self.assertNotIn(fut, state["futures"])
+        self.assertEqual(state["done"], 1)
+        self.assertEqual(errors, [])
+
+    def test_counter_accumulates(self):
+        cb, fut, errors, state = self._mk(done_state=7)
+        fut.set_result("ok")
+        cb(fut)
+        self.assertEqual(state["done"], 8)
+
+    def test_fresh_state_without_done_key_counts_from_zero(self):
+        p = Parallel(id="p_cb2", branches=[], join_branches=[])
+        errors = []
+        state = {"futures": [ ], "errors": errors}
+        fut = _cf.Future()
+        fut.set_result("ok")
+        from types import SimpleNamespace as _NS
+        cb = p._make_background_done_callback(_NS(name="b1"), errors, state)
+        cb(fut)
+        self.assertEqual(state["done"], 1)
+
+    def test_failed_future_records_error_exact(self):
+        cb, fut, errors, state = self._mk()
+        fut.set_exception(ValueError("boom-355"))
+        with self.assertLogs(level="WARNING") as captured:
+            cb(fut)
+        wmsgs = [r.getMessage() for r in captured.records]
+        self.assertTrue(any(
+            m.startswith("parallel background branch 'b1' raised: ") and "boom-355" in m
+            for m in wmsgs
+        ), wmsgs)
+        self.assertEqual(errors, [{"branch": "b1", "error": "boom-355"}])
+
+    def test_cancelled_future_debug_path_exact(self):
+        cb, fut, errors, state = self._mk()
+        fut.cancel()
+        self.assertTrue(fut.cancelled())
+        with self.assertLogs(level="DEBUG") as captured:
+            cb(fut)
+        dmsgs = [r.getMessage() for r in captured.records if r.levelno == 10]
+        self.assertTrue(any(
+            m.startswith("background future.exception() unavailable: ") for m in dmsgs
+        ), dmsgs)
+        # cancelled ⇒ exc 非 None ⇒ 同步走 WARNING 留痕路径
+        wmsgs = [r.getMessage() for r in captured.records if r.levelno == 30]
+        self.assertTrue(any(
+            m.startswith("parallel background branch 'b1' raised: ") for m in wmsgs
+        ), wmsgs)
+        # cancelled ⇒ scrub 文本可为空串，但 branch 名必须落账
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["branch"], "b1")
+
+
+class TestWaitBackgroundBranchesRound1(unittest.TestCase):
+    def test_counts_done_and_not_done_exact_dict(self):
+        p = Parallel(id="p_w", branches=[], join_branches=[])
+        execution = MagicMock()
+        execution.execution_id = "w-355"
+        done_f = _cf.Future()
+        done_f.set_result("x")
+        pending_f = _cf.Future()
+        with _BG_LOCK:
+            st = _BG_STATE.setdefault("w-355", {"futures": [], "errors": [], "done": 0})
+            st["done"] = 2
+            st["futures"] = [done_f, pending_f]
+        # pending_f 永不完成 ⇒ 必须带超时（原始代码 _cf.wait(timeout=None) 会永远等）
+        result = p.wait_background_branches(execution, timeout=0.5)
+        self.assertEqual(result, {"done": 3, "not_done": 1})
+
+
+class TestProcessFutureResultRound1(unittest.TestCase):
+    def test_success_stores_result(self):
+        p = Parallel(id="p_pf", branches=[], join_branches=[])
+        fut = _cf.Future()
+        fut.set_result("PAYLOAD")
+        results = {}
+        import threading as _th
+
+        lock = _th.Lock()
+        branch = ParallelBranch(id="b1", name="b1")
+        p._process_future_result(fut, branch, results, lock)
+        self.assertEqual(results["b1"], "PAYLOAD")
+
+    def test_failure_stores_exact_sentinel(self):
+        p = Parallel(id="p_pf2", branches=[], join_branches=[])
+        fut = _cf.Future()
+        fut.set_exception(ValueError("boom-355"))
+        results = {}
+        import threading as _th
+
+        lock = _th.Lock()
+        branch = ParallelBranch(id="b1", name="b1")
+        with self.assertLogs(level="WARNING") as captured:
+            p._process_future_result(fut, branch, results, lock)
+        self.assertEqual(
+            results["b1"],
+            {"__parallel_error__": "boom-355", "__branch__": "b1"},
+        )
+        self.assertTrue(any(
+            m.startswith("parallel branch b1 raised: ") for m in
+            [r.getMessage() for r in captured.records]
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()
