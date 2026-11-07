@@ -734,5 +734,129 @@ class TestProcessFutureResultRound1(unittest.TestCase):
         ))
 
 
+# ===========================================================================
+# Round 2（#355 concurrent 清剿第二批）：_build_executor / pool_execute /
+# thread·process·coroutine_execute 参数位
+# ===========================================================================
+
+class TestBuildExecutorCancel(unittest.TestCase):
+    """_build_executor 的 PROCESS 模式取消门（cancel_event / cancel_requested
+    双 Event 检查 + 具名 warning + None 返回）。"""
+
+    def _p(self):
+        return Parallel(id="p_bx", branches=[], join_branches=[])
+
+    def _exec(self, cancel_event=None, cancel_requested=None):
+        m = MagicMock()
+        m.cancel_event = cancel_event
+        m.cancel_requested = cancel_requested
+        return m
+
+    def test_thread_mode_ignores_cancel_signals(self):
+        """THREAD 模式不查取消信号（信号只在 PROCESS 门）——恒返回执行器。"""
+        p = self._p()
+        ex = self._exec(cancel_event=threading.Event(), cancel_requested=threading.Event())
+        with patch("plaita.node.concurrent.make_executor") as mk:
+            p._build_executor(THREAD, ex)
+        mk.assert_called_once_with(THREAD)
+
+    def test_process_cancel_event_set_skips(self):
+        """PROCESS 模式 cancel_event 已 set ⇒ 警告 + None（杀条件 or→and /
+        is not None→is None / getattr 参数位簇）。"""
+        ev = threading.Event()
+        ev.set()
+        p = self._p()
+        ex = self._exec(cancel_event=ev, cancel_requested=None)
+        with patch("plaita.node.concurrent.make_executor") as mk, \
+             self.assertLogs(level="WARNING") as captured:
+            result = p._build_executor(PROCESS, ex)
+        self.assertIsNone(result)
+        mk.assert_not_called()
+        self.assertIn(
+            f"parallel {p.id}: cancel already requested, skip process branches",
+            [r.getMessage() for r in captured.records],
+        )
+
+    def test_process_cancel_requested_set_skips(self):
+        """粘滞 cancel_requested 已 set ⇒ 同样跳过（杀第二个 getattr 位）。"""
+        ev = threading.Event()
+        ev.set()
+        p = self._p()
+        ex = self._exec(cancel_event=None, cancel_requested=ev)
+        with patch("plaita.node.concurrent.make_executor") as mk, \
+             self.assertLogs(level="WARNING") as captured:
+            result = p._build_executor(PROCESS, ex)
+        self.assertIsNone(result)
+        mk.assert_not_called()
+        self.assertIn(
+            f"parallel {p.id}: cancel already requested, skip process branches",
+            [r.getMessage() for r in captured.records],
+        )
+
+    def test_process_no_cancel_builds_executor(self):
+        """两个信号都未 set ⇒ 正常构建（杀条件翻转误报面）。"""
+        p = self._p()
+        ex = self._exec()
+        with patch("plaita.node.concurrent.make_executor") as mk:
+            result = p._build_executor(PROCESS, ex)
+        self.assertIsNotNone(result)
+        mk.assert_called_once_with(PROCESS)
+
+    def test_process_cancel_unset_events_build(self):
+        """Event 存在但未 set ⇒ 正常构建（杀 is_set() 判据变异）。"""
+        p = self._p()
+        ev1, ev2 = threading.Event(), threading.Event()
+        ex = self._exec(cancel_event=ev1, cancel_requested=ev2)
+        with patch("plaita.node.concurrent.make_executor") as mk:
+            result = p._build_executor(PROCESS, ex)
+        self.assertIsNotNone(result)
+        mk.assert_called_once_with(PROCESS)
+
+
+class TestPoolExecuteDispatch(unittest.TestCase):
+    def test_pool_type_overrides_mode(self):
+        """pool_type 显式给定时覆盖 self.mode（杀 or→and 变异：
+        变异下 mode 恒等于 self.mode）。"""
+        p = _make_parallel(mode=THREAD)
+        execution = MagicMock()
+        execution.cancel_event = None
+        execution.cancel_requested = None
+        with patch("plaita.node.concurrent.make_executor") as mk, \
+             patch.object(Parallel, "match_condition_branches", return_value=[]), \
+             patch.object(Parallel, "_reject_suspending_branches"), \
+             patch.object(Parallel, "_split_branches", return_value=([], [])), \
+             patch.object(Parallel, "_execute_join_branches", return_value={}), \
+             patch.object(Parallel, "_execute_background_branches"):
+            p.pool_execute(PROCESS, execution)
+        mk.assert_called_once_with(PROCESS)
+
+    def test_default_mode_falls_back_to_self_mode(self):
+        """pool_type 缺省 ⇒ 用 self.mode（THREAD）。"""
+        p = _make_parallel(mode=THREAD)
+        execution = MagicMock()
+        with patch("plaita.node.concurrent.make_executor") as mk, \
+             patch.object(Parallel, "match_condition_branches", return_value=[]), \
+             patch.object(Parallel, "_reject_suspending_branches"), \
+             patch.object(Parallel, "_split_branches", return_value=([], [])), \
+             patch.object(Parallel, "_execute_join_branches", return_value={}), \
+             patch.object(Parallel, "_execute_background_branches"):
+            p.pool_execute(None, execution)
+        mk.assert_called_once_with(THREAD)
+
+
+class TestExecuteWrappers(unittest.TestCase):
+    def test_thread_execute_delegates_thread(self):
+        p = _make_parallel(mode=THREAD)
+        with patch.object(Parallel, "pool_execute", return_value={}) as po:
+            p.thread_execute(MagicMock())
+        po.assert_called_once_with(THREAD, p.thread_execute.__self__ if False else po.call_args.args[1] if False else unittest.mock.ANY)
+
+    def test_process_execute_delegates_process(self):
+        p = _make_parallel(mode=THREAD)
+        with patch.object(Parallel, "pool_execute", return_value={}) as po:
+            p.process_execute(MagicMock())
+        self.assertEqual(po.call_args.args[0], PROCESS)
+
+
 if __name__ == "__main__":
     unittest.main()
