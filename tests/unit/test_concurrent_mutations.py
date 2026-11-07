@@ -858,5 +858,175 @@ class TestExecuteWrappers(unittest.TestCase):
         self.assertEqual(po.call_args.args[0], PROCESS)
 
 
+# ===========================================================================
+# Round 3（#355 concurrent 清剿第三批）：arun 双模式 / exec_branch_async 补漏 /
+# coroutine_execute 拒绝 / execute 分发
+# ===========================================================================
+
+from plaita.node.concurrent import COROUTINE as _CORO  # noqa: E402
+from plaita.tenant_context import mark_tenant_derived  # noqa: E402
+
+
+class TestArunCoroutineMode(unittest.IsolatedAsyncioTestCase):
+    def _p_coro(self, join=("j1",), background=("bg1",)):
+        branches = [_simple_branch_dict(n) for n in (*join, *background)]
+        return Parallel.model_validate({
+            "id": "p_arun", "mode": COROUTINE,
+            "branches": branches, "join_branches": list(join),
+        })
+
+    def _patch_core(self, results_by_name):
+        """patch exec_branch_async 按分支名返回结果/抛错，并挂 bind 探针。
+        （new=普通函数经实例访问会绑定 self——首参必须收下。）"""
+        async def _eba(self_ignored, pb, execution, branch_execution=None):
+            if pb.name in results_by_name:
+                r = results_by_name[pb.name]
+                if isinstance(r, Exception):
+                    raise r
+                return r
+            return f"ok-{pb.name}"
+        bind_mock = MagicMock()
+        eba = patch.object(Parallel, "exec_branch_async", new=_eba)
+        return bind_mock, eba
+
+    async def test_coroutine_join_results_dict(self):
+        """join 分支 gather ⇒ {name: result} 精确（杀 gather/dict 构建簇）。"""
+        p = self._p_coro(join=("j1", "j2"), background=())
+        bind_mock, eba = self._patch_core({"j1": "R1", "j2": "R2"})
+        execution = MagicMock()
+        execution.get_child_execution.return_value = MagicMock()
+        with patch("plaita.node.concurrent.bind_child_step", new=bind_mock), eba:
+            result = await p.arun(execution)
+        self.assertEqual(result, {"j1": "R1", "j2": "R2"})
+
+    async def test_coroutine_join_failure_yields_sentinel(self):
+        """join 分支抛错 ⇒ 哨兵 dict（杀异常路径 log/result 变异）。"""
+        p = self._p_coro(join=("j1",), background=())
+        bind_mock, eba = self._patch_core({"j1": ValueError("boom-355")})
+        execution = MagicMock()
+        execution.get_child_execution.return_value = MagicMock()
+        with patch("plaita.node.concurrent.bind_child_step", new=bind_mock), eba, \
+             self.assertLogs(level="WARNING"):
+            result = await p.arun(execution)
+        self.assertEqual(
+            result["j1"],
+            {"__parallel_error__": "boom-355", "__branch__": "j1"},
+        )
+
+    async def test_coroutine_background_creates_child_and_binds(self):
+        """后台分支：子执行在调度前创建 + bind_child_step 三参精确。"""
+        p = self._p_coro(join=("j1",), background=("bg1",))
+        bind_mock, eba = self._patch_core({"j1": "R1", "bg1": "RB"})
+        execution = MagicMock()
+        be = MagicMock()
+        execution.get_child_execution.return_value = be
+        with patch("plaita.node.concurrent.bind_child_step", new=bind_mock), eba:
+            await p.arun(execution)
+            await asyncio.sleep(0)  # 让 ensure_future 任务跑完
+        bind_list = [c.args for c in bind_mock.call_args_list]
+        self.assertTrue(any(
+            c[:2] == (execution, be) for c in bind_list
+        ), [str(c) for c in bind_list])
+
+    async def test_coroutine_background_failure_warns(self):
+        """后台分支抛错 ⇒ WARNING 留痕（杀 _bg 日志变异）。"""
+        p = self._p_coro(join=("j1",), background=("bg1",))
+        bind_mock, eba = self._patch_core({"j1": "R1", "bg1": ValueError("bg-boom")})
+        execution = MagicMock()
+        execution.get_child_execution.return_value = MagicMock()
+        with patch("plaita.node.concurrent.bind_child_step", new=bind_mock), eba, \
+             self.assertLogs(level="WARNING") as captured:
+            await p.arun(execution)
+            await asyncio.sleep(0)
+        self.assertTrue(any(
+            "async background branch 'bg1' raised" in r.getMessage()
+            for r in captured.records
+        ), [r.getMessage() for r in captured.records])
+
+
+class TestArunDelegation(unittest.IsolatedAsyncioTestCase):
+    async def test_thread_mode_delegates_pool_execute_with_derived_tenant(self):
+        """thread/process 模式经 to_thread 委托 pool_execute(self.mode, …) 且
+        来源标记降级 derived（杀 _pool_execute_derived/mark 变异）。"""
+        p = _make_parallel(mode=THREAD)
+        execution = MagicMock()
+        with patch.object(Parallel, "match_condition_branches", return_value=[]), \
+             patch.object(Parallel, "_reject_suspending_branches"), \
+             patch.object(Parallel, "_split_branches", return_value=([], [])), \
+             patch("plaita.node.concurrent.mark_tenant_derived") as mtd, \
+             patch.object(Parallel, "pool_execute", return_value={"ok": 1}) as po:
+            result = await p.arun(execution)
+        self.assertEqual(result, {"ok": 1})
+        po.assert_called_once_with(THREAD, execution)
+        mtd.assert_called_once()
+
+    async def test_process_mode_delegates_pool_execute(self):
+        p = _make_parallel(mode=THREAD)
+        execution = MagicMock()
+        with patch.object(Parallel, "match_condition_branches", return_value=[]), \
+             patch.object(Parallel, "_reject_suspending_branches"), \
+             patch.object(Parallel, "_split_branches", return_value=([], [])), \
+             patch("plaita.node.concurrent.mark_tenant_derived"), \
+             patch.object(Parallel, "pool_execute", return_value={}) as po:
+            await p.arun(execution)
+        po.assert_called_once_with(THREAD, execution)
+
+
+class TestExecBranchAsyncRound3(unittest.IsolatedAsyncioTestCase):
+    async def test_child_execution_created_and_bound_when_absent(self):
+        """branch_execution 缺省 ⇒ get_child_execution + bind 三参精确
+        （杀 async 侧 bind 参数簇）。"""
+        p = _make_parallel()
+        pb = ParallelBranch.model_validate(_simple_branch_dict("b-name"))
+        execution = MagicMock()
+        be = MagicMock()
+        execution.get_child_execution.return_value = be
+
+        async def _mock_arun(flow, lazy, input_value):
+            return "R"
+
+        be.arun_compatible = _mock_arun
+        with patch("plaita.node.concurrent.bind_child_step") as bcs:
+            rs = await p.exec_branch_async(pb, execution)
+        self.assertEqual(rs, "R")
+        bcs.assert_called_once_with(execution, be, "b-name")
+
+    async def test_arun_compatible_flow_arg_forwarded(self):
+        """pb.flow 必须原样透传给 arun_compatible 首参。"""
+        p = _make_parallel()
+        pb = ParallelBranch.model_validate(_simple_branch_dict("b1"))
+        execution = MagicMock()
+        be = MagicMock()
+        execution.get_child_execution.return_value = be
+        calls: list = []
+
+        async def _capture(flow, lazy, input_value):
+            calls.append(flow)
+            return "R"
+
+        be.arun_compatible = _capture
+        rs = await p.exec_branch_async(pb, execution)
+        self.assertEqual(rs, "R")
+        self.assertEqual(calls[0], pb.flow)
+
+
+class TestCoroutineExecuteRejects(unittest.TestCase):
+    def test_sync_coroutine_mode_raises_with_guidance(self):
+        p = _make_parallel(mode=THREAD)
+        with self.assertRaisesRegex(ValueError, "Use mode='thread' or mode='process'"):
+            p.coroutine_execute(MagicMock())
+
+
+class TestExecuteDispatchRound3(unittest.TestCase):
+    def test_execute_dispatches_by_mode(self):
+        cases = [(THREAD, "thread_execute"), (PROCESS, "process_execute")]
+        for mode, meth in cases:
+            with self.subTest(mode=mode):
+                p = _make_parallel(mode=mode)
+                with patch.object(Parallel, meth, return_value={}) as m:
+                    p.execute(MagicMock())
+                m.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
